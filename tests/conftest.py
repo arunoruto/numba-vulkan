@@ -1,10 +1,14 @@
 import os
 import shutil
 import subprocess
+import sys
 
 import pytest
 
 import numba_vulkan as nv
+
+# Lets tests import the fuzzer, which is a script next to them.
+sys.path.insert(0, os.path.dirname(__file__))
 
 _DEVICES = nv.list_devices()
 

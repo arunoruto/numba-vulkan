@@ -97,6 +97,22 @@ def ol_smoothstep(edge0, edge1, x):
     return impl
 ```
 
+## Math functions
+
+The `math` module and NumPy's element-wise functions work on scalars inside
+kernels and give the same results:
+
+```python
+@nv.jit
+def kernel(x, out):
+    i = nv.global_id(0)
+    if i < x.shape[0]:
+        out[i] = np.sqrt(x[i]) + math.erf(x[i]) + np.maximum(x[i], np.float32(0.0))
+```
+
+NumPy functions cannot be applied to whole arrays inside a kernel; a kernel
+computes one element per invocation.
+
 ## Keeping kernels in float32
 
 Numba types Python literals as `float64` and `int64`. Mixing them into

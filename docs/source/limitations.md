@@ -11,8 +11,17 @@ are tracked in {doc}`known_issues`.
   `float64`, with integer indexing
   (including negative indices), `.shape`, `.size`, `.ndim` and `len()`
 - arithmetic with Python semantics, comparisons, bit operations, casts
-- tuples, `if`/`while`/`for ... in range(...)`, `break`/`continue`
-- `min`, `max`, `abs`, the `math` module, `**` with integer exponents
+- tuples, `if`/`while`/`for ... in range(...)`
+- `min`, `max`, `abs`, `**` with integer exponents
+- the `math` module, including `hypot`, `log1p`, `expm1`, the inverse
+  hyperbolic functions, `erf`, `erfc`, `gamma`, `lgamma`, `copysign`,
+  `isnan`, `isinf` and `isfinite` (`math.fmod` is not typed by Numba; use
+  `np.fmod` or `%`)
+- NumPy functions applied to scalars (`np.sqrt(x[i])`, `np.maximum(a, b)`...):
+  arithmetic, comparison, logical, bitwise and math ufuncs
+- complex numbers as local values (not as array elements)
+- early `return`s, `break`/`continue`, and conditions combined with
+  `and`/`or`
 - calling `@nv.jit` and `@njit` functions; `@overload(target="vulkan")`
 - dispatch grids with one to three dimensions
 
@@ -50,7 +59,9 @@ Workgroup size
 
 ## Differences between drivers
 
-Results are not bit-identical across devices. In particular, `float32`
+Float arithmetic follows IEEE rules (shaders are compiled without
+reassociation or fused multiply-add), but library functions are not
+bit-identical across devices. In particular, `float32`
 `sin` on Intel's Mesa driver is only accurate to about 1e-4, against about
 1e-6 on NVIDIA and llvmpipe. `round()` of halfway values is wrong on
 llvmpipe.

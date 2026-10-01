@@ -220,13 +220,18 @@ def system_info():
     cpu = platform.processor() or platform.machine()
     try:
         with open("/proc/cpuinfo") as fh:
-            cpu = next(ln.split(":", 1)[1].strip() for ln in fh if ln.startswith("model name"))
+            cpu = next(
+                ln.split(":", 1)[1].strip() for ln in fh if ln.startswith("model name")
+            )
     except (OSError, StopIteration):
         pass
     info = [
         ("Date", datetime.date.today().isoformat()),
         ("CPU", f"{cpu} ({os.cpu_count()} threads)"),
-        ("Vulkan devices", ", ".join(f"{d.name} ({d.kind})" for d in nv.list_devices())),
+        (
+            "Vulkan devices",
+            ", ".join(f"{d.name} ({d.kind})" for d in nv.list_devices()),
+        ),
         ("Python", platform.python_version()),
     ]
     for package in ("numba", "llvmlite", "numpy", "numba-cuda"):

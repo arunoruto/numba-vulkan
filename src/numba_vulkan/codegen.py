@@ -14,13 +14,50 @@ from numba.core.codegen import Codegen, CodeLibrary
 
 from numba_vulkan.buffers import expand_buffer_access
 from numba_vulkan.errors import SpirvCodegenError, VulkanUnsupportedError
+from numba_vulkan.structurize import structurize
 
 TRIPLE = "spirv1.5-unknown-vulkan1.2-compute"
 ENTRY_POINT = "main"
 
 _SPV_CAPABILITIES = {10: "float64", 11: "int64", 22: "int16", 39: "int8"}
 _OP_TYPE_POINTER, _OP_SELECT, _OP_PHI = 32, 169, 245
+_OP_DECORATE, _NO_CONTRACTION = 71, 42
+# OpFNegate, OpFAdd, OpFSub, OpFMul, OpFDiv, OpFRem, OpFMod
+_FLOAT_ARITHMETIC = {127, 129, 131, 133, 136, 140, 141}
+# Opcodes that end the annotation section: OpUndef, the type and constant
+# declarations, OpFunction and OpVariable.
+_FIRST_DECLARATIONS = {1, 54, 59} | set(range(19, 40)) | set(range(41, 53))
+_FCMP_ORDERING = re.compile(
+    r"^(\s*)(%\S+) = fcmp (?:[a-z]+ )*?(uno|ord) (float|double) ([^,]+), (.+)$",
+    re.MULTILINE,
+)
+_COPYSIGN = re.compile(
+    r"^(\s*)(%\S+) = (?:tail )?call (float|double) @llvm\.copysign\.f(?:32|64)"
+    r"\((?:float|double) (?:noundef )?([^,]+), (?:float|double) (?:noundef )?([^)]+)\).*$",
+    re.MULTILINE,
+)
 _SREM = re.compile(r"^(\s*)(%\S+) = srem (\S+) ([^,]+), (.+)$", re.MULTILINE)
+
+# LLVM passes run on the linked kernel, in order. Everything is inlined into
+# the entry point first. instcombine is required: it folds away the
+# aggregates Numba builds for arrays and tuples, and the SPIR-V backend
+# miscompiles nested insertvalue/extractvalue chains.
+PASSES = (
+    "always_inliner",
+    "global_dead_code_eliminate",
+    "sroa",
+    "instruction_combine",
+    "simplify_cfg",
+    "dead_code_elimination",
+    "global_dead_code_eliminate",
+    # Canonical loops (one latch, dedicated exits) and no phi nodes: the form
+    # numba_vulkan.structurize needs to rearrange control flow.
+    "loop_simplify",
+    "register_to_memory",
+)
+
+# Seconds after which the SPIR-V backend is assumed to hang.
+EMIT_TIMEOUT = 120
 
 _target_machine = None
 
@@ -61,11 +98,17 @@ def emit_spirv(llvm_ir):
     SpirvCodegenError
         If the backend fails or the module does not pass `check_spirv`.
     """
-    proc = subprocess.run(
-        [sys.executable, "-m", "numba_vulkan._emit", TRIPLE],
-        input=llvm_ir.encode(),
-        capture_output=True,
-    )
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-m", "numba_vulkan._emit", TRIPLE],
+            input=llvm_ir.encode(),
+            capture_output=True,
+            timeout=EMIT_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired:
+        raise SpirvCodegenError(
+            f"LLVM's SPIR-V backend did not finish within {EMIT_TIMEOUT} seconds"
+        ) from None
     if proc.returncode != 0 or not proc.stdout:
         lines = proc.stderr.decode(errors="replace").strip().splitlines()
         reason = next(
@@ -73,8 +116,9 @@ def emit_spirv(llvm_ir):
         )
         reason = reason or (lines[-1] if lines else f"exit code {proc.returncode}")
         raise SpirvCodegenError(f"LLVM's SPIR-V backend failed: {reason}")
-    check_spirv(proc.stdout)
-    return proc.stdout
+    spirv = mark_exact(proc.stdout)
+    check_spirv(spirv)
+    return spirv
 
 
 @dataclass
@@ -145,6 +189,43 @@ def spirv_capabilities(spirv):
             caps.add(_SPV_CAPABILITIES[words[pos + 1]])
         pos += max(count, 1)
     return caps
+
+
+def mark_exact(spirv):
+    """Decorate all float arithmetic in a SPIR-V module as ``NoContraction``.
+
+    Without the decoration, shader compilers are free to reassociate float
+    arithmetic: all tested drivers simplify ``(1 + x) - 1`` to ``x``, which
+    destroys compensated algorithms such as the one behind ``log1p``. Numba
+    promises IEEE semantics unless ``fastmath`` is requested, so every
+    add, subtract, multiply, divide, negate and remainder is marked exact.
+
+    Parameters
+    ----------
+    spirv : bytes
+        A SPIR-V module.
+
+    Returns
+    -------
+    bytes
+        The module with the decorations inserted.
+    """
+    words = list(struct.unpack(f"<{len(spirv) // 4}I", spirv))
+    targets, insert_at, pos = [], None, 5
+    while pos < len(words):
+        count, opcode = words[pos] >> 16, words[pos] & 0xFFFF
+        if insert_at is None and opcode in _FIRST_DECLARATIONS:
+            insert_at = pos
+        if opcode in _FLOAT_ARITHMETIC:
+            targets.append(words[pos + 2])  # the result id follows the type id
+        pos += max(count, 1)
+    if not targets or insert_at is None:
+        return spirv
+    decorations = []
+    for target in targets:
+        decorations += [(3 << 16) | _OP_DECORATE, target, _NO_CONTRACTION]
+    words[insert_at:insert_at] = decorations
+    return struct.pack(f"<{len(words)}I", *words)
 
 
 def check_spirv(spirv):
@@ -218,6 +299,98 @@ def _expand_srem(text):
         )
 
     return _SREM.sub(repl, text)
+
+
+def _expand_fcmp_ordering(text):
+    """Rewrite ``fcmp uno`` and ``fcmp ord`` as tests on the bit pattern.
+
+    The SPIR-V backend emits OpUnordered and OpOrdered for them, which only
+    OpenCL-flavoured SPIR-V may use. Numba's own number and ufunc
+    implementations produce these comparisons when they check for NaN.
+
+    Parameters
+    ----------
+    text : str
+        Textual LLVM IR.
+
+    Returns
+    -------
+    str
+        The rewritten LLVM IR.
+    """
+    counter = iter(range(1 << 30))
+    layout = {
+        "float": ("i32", 0xFF << 23, (1 << 31) - 1),
+        "double": ("i64", 0x7FF << 52, (1 << 63) - 1),
+    }
+
+    def repl(match):
+        """Replacement text for one ``fcmp uno`` or ``fcmp ord``."""
+        indent, res, pred, ty, lhs, rhs = match.groups()
+        bits, exponent, mask = layout[ty]
+        code, flags = [], []
+        for operand in (lhs, rhs):
+            if not operand.startswith("%"):
+                continue  # a finite constant is never NaN
+            n = next(counter)
+            code += [
+                f"{indent}%nan.b{n} = bitcast {ty} {operand} to {bits}",
+                f"{indent}%nan.m{n} = and {bits} %nan.b{n}, {mask}",
+                f"{indent}%nan.f{n} = icmp ugt {bits} %nan.m{n}, {exponent}",
+            ]
+            flags.append(f"%nan.f{n}")
+        if not flags:
+            unordered = "false"
+        elif len(flags) == 1 or flags[0] == flags[1]:
+            unordered = flags[0]
+        else:
+            n = next(counter)
+            code.append(f"{indent}%nan.o{n} = or i1 {flags[0]}, {flags[1]}")
+            unordered = f"%nan.o{n}"
+        if pred == "uno":
+            code.append(f"{indent}{res} = or i1 {unordered}, false")
+        else:
+            code.append(f"{indent}{res} = xor i1 {unordered}, true")
+        return "\n".join(code)
+
+    return _FCMP_ORDERING.sub(repl, text)
+
+
+def _expand_copysign(text):
+    """Rewrite calls to ``llvm.copysign`` as operations on the bit pattern.
+
+    The SPIR-V backend cannot select the intrinsic, and instcombine
+    introduces it even where the source spelled out the bit operations.
+
+    Parameters
+    ----------
+    text : str
+        Textual LLVM IR.
+
+    Returns
+    -------
+    str
+        The rewritten LLVM IR.
+    """
+    counter = iter(range(1 << 30))
+
+    def repl(match):
+        """Replacement text for one ``llvm.copysign`` call."""
+        indent, res, ty, magnitude, sign = match.groups()
+        bits, width = ("i64", 64) if ty == "double" else ("i32", 32)
+        n = next(counter)
+        return "\n".join(
+            [
+                f"{indent}%cs.m{n} = bitcast {ty} {magnitude} to {bits}",
+                f"{indent}%cs.s{n} = bitcast {ty} {sign} to {bits}",
+                f"{indent}%cs.a{n} = and {bits} %cs.m{n}, {(1 << (width - 1)) - 1}",
+                f"{indent}%cs.b{n} = and {bits} %cs.s{n}, {-(1 << (width - 1))}",
+                f"{indent}%cs.o{n} = or {bits} %cs.a{n}, %cs.b{n}",
+                f"{indent}{res} = bitcast {bits} %cs.o{n} to {ty}",
+            ]
+        )
+
+    return _COPYSIGN.sub(repl, text)
 
 
 class VulkanCodeLibrary(CodeLibrary):
@@ -375,15 +548,8 @@ class VulkanCodeLibrary(CodeLibrary):
         pto = llvm.create_pipeline_tuning_options(speed_level=0)
         builder = llvm.create_pass_builder(machine, pto)
         passes = llvm.create_new_module_pass_manager()
-        passes.add_always_inliner_pass()
-        passes.add_global_dead_code_eliminate_pass()
-        passes.add_sroa_pass()
-        # Folds away the aggregates Numba builds for arrays and tuples; the
-        # SPIR-V backend miscompiles nested insertvalue/extractvalue chains.
-        passes.add_instruction_combine_pass()
-        passes.add_simplify_cfg_pass()
-        passes.add_dead_code_elimination_pass()
-        passes.add_global_dead_code_eliminate_pass()
+        for name in PASSES:
+            getattr(passes, f"add_{name}_pass")()
         passes.run(linked, builder)
         leftover = [
             fn.name
@@ -396,7 +562,9 @@ class VulkanCodeLibrary(CodeLibrary):
                 "recursive functions are not supported on Vulkan "
                 f"(could not inline {', '.join(leftover)})"
             )
-        text, self.written_bindings = expand_buffer_access(_expand_srem(str(linked)))
+        text = _expand_copysign(_expand_fcmp_ordering(_expand_srem(str(linked))))
+        text = structurize(text)
+        text, self.written_bindings = expand_buffer_access(text)
         linked = llvm.parse_assembly(text)
         linked.verify()
         self._linked = linked
