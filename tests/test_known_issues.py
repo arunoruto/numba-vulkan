@@ -31,28 +31,18 @@ def known_issue(issue, x, expected):
     return register
 
 
-@known_issue("KI-04 slicing", XF, lambda x: np.append(x[1:], 0))
-def _(x, out):
-    i = nv.global_id(0)
-    if i < x.size - 1:
-        out[i] = x[1:][i]
-
-
-@known_issue("KI-04 array method (x.sum())", XF, lambda x: np.full_like(x, x.sum()))
+@known_issue("KI-04 array expression", XF, lambda x: 2 * x)
 def _(x, out):
     i = nv.global_id(0)
     if i < x.size:
-        out[i] = x.sum()
+        out[i] = (x * 2)[i]
 
 
-@known_issue("KI-04 iterating over an array", XF, lambda x: np.full_like(x, x.sum()))
+@known_issue("KI-04 fancy indexing", XF, lambda x: x)
 def _(x, out):
     i = nv.global_id(0)
     if i < x.size:
-        total = f32(0.0)
-        for value in x:
-            total += value
-        out[i] = total
+        out[i] = x[x > 0][0]
 
 
 @known_issue("KI-05 allocating an array (np.zeros)", XF, lambda x: x)
@@ -80,15 +70,6 @@ def _(x, out):
 
 
 @known_issue("KI-09 float16 array", XF.astype(np.float16), lambda x: x)
-def _(x, out):
-    i = nv.global_id(0)
-    if i < x.size:
-        out[i] = x[i]
-
-
-@known_issue(
-    "KI-09 non-contiguous array", np.arange(2 * N, dtype=f32)[::2], lambda x: x
-)
 def _(x, out):
     i = nv.global_id(0)
     if i < x.size:

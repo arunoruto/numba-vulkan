@@ -7,9 +7,15 @@ are tracked in {doc}`known_issues`.
 ## What works
 
 - `int32`, `int64`, `float32`, `float64` and `bool` scalars
-- C-contiguous N-d arrays of `bool`, 8 to 64-bit integers, `float32` and
-  `float64`, with integer indexing
-  (including negative indices), `.shape`, `.size`, `.ndim` and `len()`
+- N-d arrays of `bool`, 8 to 64-bit integers, `float32` and `float64`,
+  with indexing by integers, slices and `...` (negative indices and steps
+  included), `.shape`, `.size`, `.ndim`, `.T` and `len()`
+- views: slices refer to the same data, can be passed to functions and
+  written through; `a[1:3] = x` fills a slice from a scalar or an array
+- iteration over arrays (`for v in a`, `enumerate`, `zip`)
+- `sum`, `prod`, `mean`, `min`, `max`, `argmin`, `argmax`, `any`, `all` over
+  a whole array or view, as methods and as NumPy functions, and `np.dot`
+  of two 1-d arrays
 - arithmetic with Python semantics, comparisons, bit operations, casts
 - tuples, `if`/`while`/`for ... in range(...)`
 - `min`, `max`, `abs`, `**` with integer exponents
@@ -34,9 +40,11 @@ are tracked in {doc}`known_issues`.
   is not installed, calling them with `float64` raises an error, unless
   `@nv.jit(narrow_math=True)` asks for `float32` precision.
 
-Slices, views and NumPy functions
-: Only full integer indexing is supported. Array slicing, array-valued
-  expressions, NumPy functions and array allocation are not.
+Array expressions and allocation
+: Anything that creates a new array is unsupported: `a * 2`, `a[mask]`,
+  `a.copy()`, `np.zeros(n)`, reductions along an `axis`. Work on elements
+  and views instead. `a[1:] = a[:-1]` is rejected, because the two slices
+  could overlap.
 
 Exceptions and recursion
 : An exception raised inside a kernel is raised by the launch once the

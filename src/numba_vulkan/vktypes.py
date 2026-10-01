@@ -16,8 +16,9 @@ class VulkanArray(types.Array):
         Element type.
     ndim : int
         Number of dimensions.
-    layout : {'C', 'F', 'A'}
-        Memory layout. Only ``'C'`` can be indexed at present.
+    layout : {'C', 'A'}
+        Memory layout: ``'C'`` for contiguous arrays, ``'A'`` for views
+        with arbitrary strides.
     binding : int
         Descriptor binding of the buffer holding the data.
     readonly : bool, optional
@@ -69,6 +70,16 @@ class VulkanArray(types.Array):
         )
 
     @property
+    def iterator_type(self):
+        """Type of ``iter(array)``.
+
+        Returns
+        -------
+        VulkanArrayIterator
+        """
+        return VulkanArrayIterator(self)
+
+    @property
     def key(self):
         """Identity of the type: Numba's array key plus the binding.
 
@@ -77,6 +88,14 @@ class VulkanArray(types.Array):
         tuple
         """
         return super().key + (self.binding,)
+
+
+class VulkanArrayIterator(types.ArrayIterator):
+    """Iterator over the first axis of a `VulkanArray`.
+
+    A type of its own, so that iteration can be lowered without the data
+    pointer that Numba's array iterator relies on.
+    """
 
 
 class VulkanDispatcherType(types.Dispatcher):

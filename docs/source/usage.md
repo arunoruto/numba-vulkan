@@ -39,9 +39,40 @@ def stencil(src, dst):
 stencil.forall((src.shape[1], src.shape[0]))(src, dst)
 ```
 
-Arguments are NumPy arrays (C-contiguous), device arrays and scalars. NumPy
-arrays are copied to the device before the call, and those the kernel
-writes to are copied back.
+Arguments are NumPy arrays, device arrays and scalars. NumPy arrays are
+copied to the device before the call, and those the kernel writes to are
+copied back.
+
+## Arrays inside kernels
+
+Indexing follows NumPy: integers select, slices give views of the same
+data. Views cost nothing to create and can be iterated over, reduced,
+passed to other functions and written through:
+
+```python
+@nv.jit
+def normalise_rows(a, out):
+    i = nv.global_id(0)
+    if i < a.shape[0]:
+        row = a[i]                    # a view, not a copy
+        total = row.sum()
+        for j, value in enumerate(row):
+            out[i, j] = value / total
+        out[i, -1] = row[1:-1].max()  # slices of slices
+        out[i, :2] = 0                # fill a slice
+
+normalise_rows.forall(a.shape[0])(a, out)
+```
+
+Available on arrays and views: `.shape`, `.size`, `.ndim`, `.T`, `len()`,
+iteration (also with `enumerate` and `zip`), `sum`, `prod`, `mean`, `min`,
+`max`, `argmin`, `argmax`, `any`, `all` over all elements, and `np.dot` of
+two 1-d arrays. Whatever would create a new array (`a * 2`, `a[mask]`,
+`np.zeros`) is not available; see {doc}`limitations`.
+
+A reduction is a loop inside one invocation. `a[i].sum()` in a kernel over
+rows is the intended use; `a.sum()` in every invocation repeats the whole
+sum each time.
 
 ## Keeping data on the device
 

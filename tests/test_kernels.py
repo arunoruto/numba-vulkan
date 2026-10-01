@@ -207,9 +207,9 @@ def test_unsupported_constructs_raise_with_location():
     @nv.jit
     def bad(x):
         i = nv.global_id(0)
-        x[i] = x[i:][0]
+        x[i] = x[i, None][0]
 
-    with pytest.raises(errors.NumbaError, match="only full integer indexing"):
+    with pytest.raises(errors.NumbaError, match="only integers, slices and"):
         bad.forall(4)(np.zeros(4, dtype=np.float32))
 
 

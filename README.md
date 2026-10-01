@@ -276,9 +276,11 @@ compile times and the software versions used.
 
 Works:
 
-- `int32`/`int64`/`float32`/`float64`/`bool` scalars and C-contiguous N-d
-  arrays of `bool`, 8 to 64-bit integers, `float32` and `float64`, with
-  integer indexing (including negative indices), `.shape`, `.size` and `len()`
+- `int32`/`int64`/`float32`/`float64`/`bool` scalars and N-d arrays of
+  `bool`, 8 to 64-bit integers, `float32` and `float64`
+- indexing with integers and slices; slices are views, as in NumPy, and can
+  be iterated over, passed to functions, assigned to and reduced
+  (`a[i, 1:-1].sum()`, `for v in a[i]`, `out[i, :3] = 0`, `np.dot`, `.T`)
 - arithmetic, comparisons, bit operations, casts, tuples, complex numbers,
   `if`/`while`/`for ... in range(...)`, early `return`s, `min`/`max`/`abs`
 - the `math` module in float32 **and float64** (including `hypot`, `log1p`,
@@ -330,7 +332,7 @@ ones most likely to bite:
 | | Issue | Workaround |
 | --- | --- | --- |
 | KI-01 | float64 `math.sin(x)`, `x ** 2.5`... need libclc, which a source checkout lacks | install a wheel, or set `NUMBA_VULKAN_LIBCLC` |
-| KI-04 | no slices, array methods or iteration over arrays | index explicitly |
+| KI-04 | nothing that creates an array: `a * 2`, `a[mask]`, `np.zeros`, `axis=` reductions | work on elements and views |
 | KI-06 | global NumPy arrays cannot be used in kernels | pass them as arguments |
 | KI-10 | no bounds checks unless asked for; integer division by zero is not reported | `@nv.jit(boundscheck=True)` while debugging |
 | KI-17 | most kernels need the optional float64/int64/int8 device features | none yet |
@@ -358,7 +360,8 @@ To continue the work, start with the
 - [x] Loops with `break`/`return` anywhere, `while` loops (fuzz-tested)
 - [x] Device arrays and buffer reuse, to avoid copying on every call
 - [ ] Asynchronous launches; scalars as push constants
-- [ ] Slices and array views
+- [x] Slices, array views, iteration and reductions
+- [ ] Array expressions and local arrays
 - [ ] A float32-by-default typing mode, so kernels run on devices without float64
 - [x] float64 math, through libclc
 - [x] Bundle libclc in wheels
