@@ -36,10 +36,10 @@ rows, which reuse the kernels compiled for the rows above.
   (KI-28 in {doc}`known_issues`).
 - The integrated GPU and llvmpipe share memory with the CPU and gain less
   from device arrays; `saxpy` is limited by memory bandwidth there.
-- Compiling a Vulkan kernel takes 0.5 to 0.9 s, several times longer than
-  CUDA. The time goes into starting the child process that runs LLVM's
-  SPIR-V backend and, for kernels that call math functions, into linking
-  libclc.
+- Compiling a Vulkan kernel takes 0.05 to 0.25 s, about as long as for
+  CUDA; the higher figure applies to kernels that call math functions,
+  which link libclc. (The very first kernel of a workload also pays for
+  Numba's type inference of the shared core function.)
 - The `option` workload calls `log`, `exp` and `sqrt` from libclc. On the
   GPUs that costs little compared with the built-in functions; on llvmpipe
   it roughly doubles the run time.

@@ -74,6 +74,12 @@ order:
 The devenv shell sets the variable. Elsewhere, install your distribution's
 libclc package, or copy the file from a clspv or LLVM build.
 
+The first kernel that needs libclc rewrites it into a form that links
+quickly (a few seconds, once) and stores the result in
+`~/.cache/numba-vulkan`, or in the directory named by
+`NUMBA_VULKAN_CACHE_DIR`. The file is named after a hash of the original,
+so a new libclc gets a new one; old ones can be deleted at any time.
+
 :::{important}
 LLVM can only read bitcode written by the same or an older LLVM. llvmlite
 0.50 contains LLVM 22, so libclc must come from LLVM 22 or older.

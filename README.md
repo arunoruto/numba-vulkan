@@ -241,16 +241,16 @@ One run on an Intel i9-9900K (8 cores), NVIDIA TITAN X (Pascal) and Intel UHD
 
 | Backend | Mandelbrot 2048², 200 iter. | Option pricing, 4.2M | saxpy, 4.2M |
 | --- | ---: | ---: | ---: |
-| Numba CPU, 1 thread | 464.3 | 107.7 | 2.9 |
-| Numba CPU, parallel | 93.9 | 23.0 | 6.0 |
-| **numba-vulkan**, NVIDIA TITAN X | 12.9 | 14.1 | 8.2 |
-| **numba-vulkan**, Intel UHD 630 | 54.6 | 15.6 | 10.8 |
-| **numba-vulkan**, llvmpipe (CPU) | 70.5 | 44.3 | 8.7 |
-| numba-cuda, NVIDIA TITAN X | 10.5 | 16.3 | 12.6 |
-| **numba-vulkan**, NVIDIA TITAN X, device arrays | 8.8 | 0.69 | 0.51 |
-| **numba-vulkan**, Intel UHD 630, device arrays | 52.8 | 6.0 | 5.0 |
-| **numba-vulkan**, llvmpipe (CPU), device arrays | 66.3 | 35.1 | 3.9 |
-| numba-cuda, NVIDIA TITAN X, device arrays | 7.6 | 0.28 | 0.22 |
+| Numba CPU, 1 thread | 472.0 | 110.8 | 2.1 |
+| Numba CPU, parallel | 92.5 | 21.0 | 5.4 |
+| **numba-vulkan**, NVIDIA TITAN X | 16.1 | 11.4 | 7.5 |
+| **numba-vulkan**, Intel UHD 630 | 57.9 | 16.4 | 8.9 |
+| **numba-vulkan**, llvmpipe (CPU) | 86.2 | 40.1 | 8.8 |
+| numba-cuda, NVIDIA TITAN X | 13.4 | 14.2 | 10.5 |
+| **numba-vulkan**, NVIDIA TITAN X, device arrays | 9.0 | 0.72 | 0.51 |
+| **numba-vulkan**, Intel UHD 630, device arrays | 55.9 | 6.1 | 5.1 |
+| **numba-vulkan**, llvmpipe (CPU), device arrays | 78.7 | 34.9 | 3.6 |
+| numba-cuda, NVIDIA TITAN X, device arrays | 7.7 | 0.28 | 0.22 |
 
 Reading the numbers:
 
@@ -260,8 +260,8 @@ Reading the numbers:
   loses to a single CPU thread, because the time goes into copying arrays.
   With device arrays nothing is copied, and the discrete GPU is several
   times faster than the CPU.
-- First-call (compile) time is 0.5 to 0.9 s for Vulkan (the higher figure
-  when the math library is linked in), against 0.05 to 0.3 s for CUDA.
+- First-call (compile) time is 0.05 to 0.25 s for Vulkan (the higher figure
+  when the math library is linked in), about the same as for CUDA.
 - All backends agree with the CPU result to float32 rounding; saxpy is
   bit-identical on Vulkan.
 - Repeated runs vary by around 25 %, so small differences are not meaningful.

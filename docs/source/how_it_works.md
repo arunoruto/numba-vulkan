@@ -130,7 +130,11 @@ LLVM's SPIR-V backend, shipped in llvmlite since LLVM 20, has a Vulkan mode
 that produces structured control flow and storage-buffer access. It runs in
 a child process, because it aborts the whole process on input it cannot
 handle; a failure then surfaces as
-{py:class}`~numba_vulkan.errors.SpirvCodegenError`.
+{py:class}`~numba_vulkan.errors.SpirvCodegenError`. It also needs a fresh
+process for every module, because it keeps state that corrupts the second
+module it translates. To keep that cheap, one helper process is started
+when the first function is compiled; it imports llvmlite once and forks
+for each module ({py:class}`numba_vulkan.codegen.Emitter`).
 
 Two things happen to the binary afterwards. Every float operation is
 decorated `NoContraction`, because shader compilers otherwise reassociate
@@ -160,6 +164,7 @@ sets and the command buffer are kept per device and kernel specialisation.
 | NVIDIA's shader compiler segfaults on some invalid SPIR-V | modules are checked before use; buffer access is deferred |
 | The SPIR-V backend miscompiles nested aggregate inserts | aggregates are folded away before emission |
 | The SPIR-V backend aborts the process on unsupported input | emission runs in a child process |
+| The SPIR-V backend emits duplicate ids for the second module translated in one process | one forked process per module |
 | Numba's integer power falls back to a `float64` `pow` | integer exponents are implemented with multiplications |
 | LLVM's structurizer emits invalid SPIR-V for early exits and short-circuit conditions | control flow is restructured before code generation |
 | The SPIR-V backend emits `OpUnordered`/`OpOrdered`, which shaders may not use | NaN comparisons are rewritten as tests on the bit pattern |

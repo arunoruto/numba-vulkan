@@ -1,18 +1,23 @@
 """Code libraries for the Vulkan target: LLVM IR in, SPIR-V out."""
 
+import atexit
 import os
 import re
+import select
+import signal
 import struct
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 from dataclasses import dataclass, field
 
 import llvmlite.binding as llvm
 from llvmlite import ir
 from numba.core.codegen import Codegen, CodeLibrary
 
-from numba_vulkan import libclc
+from numba_vulkan import _emit, libclc
 from numba_vulkan.buffers import expand_buffer_access
 from numba_vulkan.errors import SpirvCodegenError, VulkanUnsupportedError
 from numba_vulkan.legalize import legalize
@@ -79,6 +84,151 @@ def target_machine():
     return _target_machine
 
 
+class Emitter:
+    """A child process that runs LLVM's SPIR-V backend.
+
+    The backend aborts the process on input it cannot handle, and it must
+    not translate two modules in one process, so it runs outside the
+    user's interpreter. Starting a Python process that imports llvmlite
+    takes a few tenths of a second; the child is therefore kept, and forks
+    for every module (see `numba_vulkan._emit`). It is replaced when it
+    dies or hangs. On platforms without ``fork`` a new child is started
+    for every module.
+    """
+
+    def __init__(self):
+        self._proc = None
+        self._log = None
+        self._lock = threading.Lock()
+
+    def _running(self):
+        """Whether the child process exists and has not exited."""
+        return self._proc is not None and self._proc.poll() is None
+
+    def _start(self):
+        """Start the child process without waiting for it to be ready."""
+        self._stop()
+        self._log = tempfile.TemporaryFile()
+        self._proc = subprocess.Popen(
+            # Run as a script, which spares the child importing this package
+            # and Numba; -P keeps this directory off its module search path.
+            [sys.executable, "-P", _emit.__file__, TRIPLE],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=self._log,
+            bufsize=0,
+            # A group of its own, so that a hanging grandchild can be killed.
+            start_new_session=True,
+        )
+
+    def _stop(self):
+        """Terminate the child process and its children, if any."""
+        if self._proc is not None:
+            try:
+                os.killpg(self._proc.pid, signal.SIGKILL)
+            except (AttributeError, ProcessLookupError, PermissionError):
+                self._proc.kill()
+            self._proc.wait()
+            for stream in (self._proc.stdin, self._proc.stdout, self._log):
+                stream.close()
+        self._proc = self._log = None
+
+    def warm_up(self):
+        """Start the child process in the background if it is not running.
+
+        Called when compilation of a function begins, so that the process
+        is ready by the time there is a module to translate.
+        """
+        with self._lock:
+            if not self._running():
+                self._start()
+
+    def close(self):
+        """Terminate the child process; it is restarted when needed."""
+        with self._lock:
+            self._stop()
+
+    def _read(self, count, deadline):
+        """Read `count` bytes of a reply.
+
+        Raises
+        ------
+        TimeoutError
+            If the deadline passes first.
+        EOFError
+            If the process exits first.
+        """
+        fd, data = self._proc.stdout.fileno(), b""
+        while len(data) < count:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or not select.select([fd], [], [], remaining)[0]:
+                raise TimeoutError
+            chunk = os.read(fd, count - len(data))
+            if not chunk:
+                raise EOFError
+            data += chunk
+        return data
+
+    def _failure(self, start):
+        """Describe a failure from what the backend wrote since `start`."""
+        self._log.seek(start)
+        lines = self._log.read().decode(errors="replace").strip().splitlines()
+        reason = next(
+            (ln for ln in lines if "LLVM ERROR" in ln or "Assertion" in ln), None
+        )
+        return reason or (lines[-1] if lines else "no message")
+
+    def emit(self, llvm_ir):
+        """Translate a module.
+
+        Parameters
+        ----------
+        llvm_ir : str
+            Textual LLVM IR.
+
+        Returns
+        -------
+        bytes
+            The SPIR-V module.
+
+        Raises
+        ------
+        SpirvCodegenError
+            If the backend fails or does not finish within `EMIT_TIMEOUT`
+            seconds.
+        """
+        with self._lock:
+            if not self._running():
+                self._start()
+            start = os.fstat(self._log.fileno()).st_size
+            data = llvm_ir.encode()
+            deadline = time.monotonic() + EMIT_TIMEOUT
+            try:
+                self._proc.stdin.write(_emit.HEADER.pack(len(data)) + data)
+                header = self._read(_emit.HEADER.size, deadline)
+                (size,) = _emit.HEADER.unpack(header)
+                if size != _emit.FAILED:
+                    return self._read(size, deadline)
+                reason = self._failure(start)
+            except TimeoutError:
+                self._stop()
+                raise SpirvCodegenError(
+                    f"LLVM's SPIR-V backend did not finish within {EMIT_TIMEOUT} seconds"
+                ) from None
+            except (EOFError, OSError):
+                self._proc.wait()
+                reason = self._failure(start)
+                self._stop()
+            finally:
+                if not _emit.CAN_FORK:
+                    self._stop()
+            raise SpirvCodegenError(f"LLVM's SPIR-V backend failed: {reason}")
+
+
+emitter = Emitter()
+atexit.register(emitter.close)
+
+
 def emit_spirv(llvm_ir, exact=True):
     """Translate LLVM IR to a SPIR-V binary in a child process.
 
@@ -99,25 +249,9 @@ def emit_spirv(llvm_ir, exact=True):
     SpirvCodegenError
         If the backend fails or the module does not pass `check_spirv`.
     """
-    try:
-        proc = subprocess.run(
-            [sys.executable, "-m", "numba_vulkan._emit", TRIPLE],
-            input=llvm_ir.encode(),
-            capture_output=True,
-            timeout=EMIT_TIMEOUT,
-        )
-    except subprocess.TimeoutExpired:
-        raise SpirvCodegenError(
-            f"LLVM's SPIR-V backend did not finish within {EMIT_TIMEOUT} seconds"
-        ) from None
-    if proc.returncode != 0 or not proc.stdout:
-        lines = proc.stderr.decode(errors="replace").strip().splitlines()
-        reason = next(
-            (ln for ln in lines if "LLVM ERROR" in ln or "Assertion" in ln), None
-        )
-        reason = reason or (lines[-1] if lines else f"exit code {proc.returncode}")
-        raise SpirvCodegenError(f"LLVM's SPIR-V backend failed: {reason}")
-    spirv = mark_exact(proc.stdout) if exact else proc.stdout
+    spirv = emitter.emit(llvm_ir)
+    if exact:
+        spirv = mark_exact(spirv)
     check_spirv(spirv)
     return spirv
 
@@ -274,10 +408,9 @@ def check_spirv(spirv):
 def _link_libclc(module, pass_builder):
     """Link the libclc functions a module calls into it.
 
-    The whole library is linked and everything unused is removed again,
-    which leaves the called functions and what they depend on. libclc marks
-    its functions ``noinline``; that attribute is dropped, because shaders
-    need everything inlined into the entry point.
+    The library is linked in the form `numba_vulkan.libclc.prepared_bitcode`
+    provides, from which the linker takes the called functions and what
+    they depend on.
 
     Parameters
     ----------
@@ -309,7 +442,7 @@ def _link_libclc(module, pass_builder):
             f"this kernel needs libclc for {', '.join(wanted)}, but libclc was not "
             f"found; install it or point {libclc.ENV_VAR} at clspv--.bc"
         )
-    library = llvm.parse_bitcode(libclc.read_bitcode())
+    library = llvm.parse_bitcode(libclc.prepared_bitcode())
     library.triple = module.triple
     library.data_layout = module.data_layout
     module.link_in(library)
@@ -321,12 +454,7 @@ def _link_libclc(module, pass_builder):
     passes = llvm.create_new_module_pass_manager()
     passes.add_global_dead_code_eliminate_pass()
     passes.run(module, pass_builder)
-    text = re.sub(r"\b(noinline|optnone) ", "", str(module))
-    # libclc keeps its lookup tables in OpenCL's constant address space,
-    # which becomes the UniformConstant storage class. Vulkan only allows
-    # initialised globals in the Private storage class.
-    text = text.replace(_AS_OPENCL_CONSTANT, _AS_PRIVATE)
-    return llvm.parse_assembly(text)
+    return module
 
 
 class VulkanCodeLibrary(CodeLibrary):
