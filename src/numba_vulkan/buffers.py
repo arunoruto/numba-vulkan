@@ -47,7 +47,8 @@ _DECLARE = re.compile(rf"^declare [^\n]*@{_PREFIX}\.[^\n]*\n", re.MULTILINE)
 # Each kernel renumbers the ones it uses to follow its arguments.
 CONSTANT_BASE = 1 << 20
 _constants = {}
-_CONSTANT_ACCESS = re.compile(rf"(@{_PREFIX}\.(?:load|store)\.\w+\(i32 )(\d+)(,)")
+# llvmlite quotes the function name, LLVM's own printer does not.
+_CONSTANT_ACCESS = re.compile(rf'(@"?{_PREFIX}\.(?:load|store)\.\w+"?\(i32 )(\d+)(,)')
 
 
 def constant_binding(array):
@@ -79,7 +80,43 @@ def constant_binding(array):
     return known[0]
 
 
-def renumber_constants(text, first):
+def constant_order(text):
+    """The constant arrays that LLVM IR refers to, in order of appearance.
+
+    Parameters
+    ----------
+    text : str
+        Textual LLVM IR with placeholder buffer accesses.
+
+    Returns
+    -------
+    list of int
+        The placeholder bindings (at or above `CONSTANT_BASE`), each once.
+    """
+    found = (int(b) for _, b, _ in _CONSTANT_ACCESS.findall(text))
+    return list(dict.fromkeys(b for b in found if b >= CONSTANT_BASE))
+
+
+def constant_data(binding):
+    """Contents of the constant array behind a placeholder binding.
+
+    Parameters
+    ----------
+    binding : int
+        A binding returned by `constant_binding`.
+
+    Returns
+    -------
+    numpy.ndarray
+        The values the array had when it was first seen.
+    """
+    for known, _, data in _constants.values():
+        if known == binding:
+            return data
+    raise KeyError(binding)
+
+
+def renumber_constants(text, first, order=None):
     """Give the constant arrays of a kernel bindings after its arguments.
 
     Parameters
@@ -88,23 +125,22 @@ def renumber_constants(text, first):
         Textual LLVM IR with placeholder buffer accesses.
     first : int
         Binding for the first constant array.
+    order : list of int, optional
+        Placeholder bindings in the order in which they receive their
+        bindings; those that `text` no longer uses are skipped. By default
+        the order of appearance in `text`.
 
     Returns
     -------
     text : str
         The IR with the placeholder bindings replaced.
-    constants : dict of int to numpy.ndarray
-        Contents of each constant array by its binding in this kernel.
+    placeholders : dict of int to int
+        Placeholder binding of each constant array by its binding in this
+        kernel.
     """
-    used = sorted(
-        {
-            int(b)
-            for _, b, _ in _CONSTANT_ACCESS.findall(text)
-            if int(b) >= CONSTANT_BASE
-        }
-    )
-    actual = {virtual: first + k for k, virtual in enumerate(used)}
-    by_binding = {binding: data for binding, _, data in _constants.values()}
+    used = set(constant_order(text))
+    kept = [b for b in (constant_order(text) if order is None else order) if b in used]
+    actual = {placeholder: first + k for k, placeholder in enumerate(kept)}
 
     def rename(match):
         """Replace the binding of one access if it is a constant array."""
@@ -112,7 +148,7 @@ def renumber_constants(text, first):
         return match.group(1) + str(actual.get(binding, binding)) + match.group(3)
 
     text = _CONSTANT_ACCESS.sub(rename, text)
-    return text, {actual[virtual]: by_binding[virtual] for virtual in used}
+    return text, {actual[placeholder]: placeholder for placeholder in kept}
 
 
 def arg_binding(index):

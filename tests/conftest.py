@@ -12,6 +12,10 @@ sys.path.insert(0, os.path.dirname(__file__))
 
 _DEVICES = nv.list_devices()
 
+# The tests are about the compiler, so nothing is taken from the kernel cache;
+# tests/test_kernelcache.py turns it on for itself.
+os.environ.setdefault("NUMBA_VULKAN_CACHE", "0")
+
 # Invalid SPIR-V can crash a driver, so every kernel is validated first.
 if shutil.which("spirv-val") is not None:
     os.environ["NUMBA_VULKAN_VALIDATE"] = "1"
