@@ -120,13 +120,3 @@ def test_known_issue(issue):
             rtol=2e-3,
             atol=1e-5,
         )
-
-
-@pytest.mark.xfail(strict=True, reason="KI-24 in docs/source/known_issues.md")
-def test_known_issue_deeply_nested_control_flow():
-    # One of the random programs that still fails to compile: a return
-    # and a break inside nested loops and conditionals.
-    from fuzz_control_flow import run as run_program
-
-    failure, source = run_program(42, [nv.get_device().info.index])
-    assert failure is None, failure

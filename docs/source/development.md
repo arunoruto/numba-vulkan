@@ -126,12 +126,13 @@ To make the matching NumPy ufunc work as well, add it to the tables in
 ## Fuzzing control flow
 
 `tests/fuzz_control_flow.py` generates random functions made of nested
-`if`/`elif`/`else`, `and`/`or`, loops, `break`, `continue` and early
-`return`s, runs them on Vulkan and compares with plain Python:
+`if`/`elif`/`else`, `and`/`or`, `for` and `while` loops, `break`,
+`continue` and early `return`s, runs them on Vulkan and compares with plain Python:
 
 ```sh
 uv run python tests/fuzz_control_flow.py 0 100          # seeds 0..99, all devices
 uv run python tests/fuzz_control_flow.py 0 100 --cpu    # llvmpipe only
+uv run python tests/fuzz_control_flow.py 0 100 --rich   # also while loops, deeper
 uv run python tests/fuzz_control_flow.py --show 42      # print one program
 ```
 

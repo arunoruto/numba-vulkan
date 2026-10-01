@@ -65,11 +65,12 @@ _LIBCLC = {
     math.hypot: "hypot",
     math.erf: "erf",
     math.erfc: "erfc",
+    math.lgamma: "lgamma",
+    math.gamma: "tgamma",
 }
 # Functions libclc has, but whose code does not survive the SPIR-V backend
 # yet, by (name, bit width); they fall back to this package's own versions.
-# Empty at present. libclc's lgamma and tgamma are not listed in `_LIBCLC`
-# at all, because their control flow cannot be restructured yet.
+# Empty at present.
 _LIBCLC_BROKEN = set()
 _ROUNDING = {
     math.floor: "llvm.floor",

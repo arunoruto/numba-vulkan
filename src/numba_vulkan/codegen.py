@@ -47,8 +47,10 @@ PASSES = (
     "simplify_cfg",
     "dead_code_elimination",
     "global_dead_code_eliminate",
-    # Canonical loops (one latch, dedicated exits) and no phi nodes: the form
-    # numba_vulkan.structurize needs to rearrange control flow.
+    # Two-way branches only, canonical loops (one latch, dedicated exits) and
+    # no phi nodes: the form numba_vulkan.structurize needs to rearrange
+    # control flow.
+    "lower_switch",
     "loop_simplify",
     "register_to_memory",
 )

@@ -26,16 +26,18 @@ LLVM's SPIR-V structurizer is meant to repair such graphs, but in LLVM 22
 it emits invalid modules for many of them. `structurize` therefore brings
 the graph into properly nested form itself, in three steps:
 
-0. `_unify_loop_exits` gives every loop a single exit block;
-1. `_duplicate_joins` copies every block that is entered from several
-   places without being a merge block, once per entry, so that only proper
-   merge blocks have more than one predecessor;
+0. `_unify_loop_exits` makes every loop leave through its latch only;
+1. `_resolve_joins` deals with every block that is entered from several
+   places without being a merge block: a small one is copied once per
+   entry, a large one is guarded by a flag, so that only proper merge
+   blocks have more than one predecessor;
 2. `_split_merges` gives each selection that shares its merge block with
    an enclosing one a fresh merge block that forwards to the shared one.
 
-Loops. A ``return`` inside a loop leaves it towards a block that is not
-the loop's merge block. `_unify_loop_exits` routes all exits of a loop
-through one exit block and dispatches from there, which runs first.
+Loops. A ``return`` or ``break`` inside a loop leaves it from a nested
+position. `_unify_loop_exits` records the wanted target in a flag, jumps to
+the loop's latch instead and dispatches on the flag after the loop, which
+turns the loop body into an acyclic region with early exits.
 
 The transformation works on textual LLVM IR, because it has to run after
 all LLVM passes and llvmlite offers no API for editing a module.
@@ -53,9 +55,9 @@ _CONDITIONAL = re.compile(rf"\s*br i1 (\S+), label ({_NAME}), label ({_NAME})")
 # Names that need no quotes: identifiers, or the numbers of unnamed values.
 _PLAIN = re.compile(r"[-a-zA-Z$._][-a-zA-Z$._0-9]*|[0-9]+")
 _DEF = re.compile(rf"^\s*({_NAME}) = ")
-# Duplicating joins can grow a function exponentially. Beyond this size the
-# graph is handed to LLVM as it is, which then usually reports an error.
-_MAX_BLOCKS = 600
+# Beyond this size the graph is handed to LLVM as it is, which then usually
+# reports an error; restructuring it would take minutes.
+_MAX_BLOCKS = 4000
 _DEFINE = re.compile(r"^define [^\n]*\{\n(.*?)^\}", re.MULTILINE | re.DOTALL)
 
 
@@ -345,18 +347,72 @@ class _Graph:
         return _dominates(self.idom, a, b)
 
 
+def _fresh(blocks, name):
+    """A block name based on `name` that is not in use yet."""
+    while name in blocks:
+        name += "_"
+    return name
+
+
+def _dispatch(blocks, name, slot, targets):
+    """Add blocks that branch to the target whose number is in a slot.
+
+    Parameters
+    ----------
+    blocks : dict of str to _Block
+        The function; receives the new blocks.
+    name : str
+        Name of the first new block.
+    slot : str
+        The ``i32`` stack slot; target ``k`` is selected by ``k + 1``.
+    targets : list of str
+        The blocks to dispatch to.
+    """
+    # A chain of tests. Each reloads the slot, so no value crosses a block.
+    current = blocks[name] = _Block(name)
+    for k, target in enumerate(targets[:-1]):
+        current.body = [
+            f"  {slot}.v{k} = load i32, ptr {slot}",
+            f"  {slot}.c{k} = icmp eq i32 {slot}.v{k}, {k + 1}",
+        ]
+        if k + 2 < len(targets):
+            nxt = _Block(_fresh(blocks, f"{name}.test{k + 1}"))
+            blocks[nxt.name] = nxt
+            other = nxt.name
+        else:
+            nxt, other = None, targets[-1]
+        current.term = [
+            f"  br i1 {slot}.c{k}, label {_ref(target)}, label {_ref(other)}"
+        ]
+        current = nxt
+    if len(targets) == 1:
+        current.term = [f"  br label {_ref(targets[0])}"]
+
+
 def _unify_loop_exits(blocks):
-    """Give every loop a single exit block that only the loop branches to.
+    """Make every loop leave through its latch only.
 
-    A ``return`` inside a loop, or a ``break`` out of nested selections,
-    leaves the loop towards a block that is not the loop's merge block. Each
-    such loop gets one exit block; the edges leaving the loop record which
-    target they wanted in a stack slot, and a chain of tests after the exit
-    block dispatches to it. Inner loops are handled first, so an exit that
-    crosses several loops is passed outwards one level at a time.
+    A ``return`` or ``break`` inside a loop leaves it from a nested
+    position, towards a block that need not be the loop's merge block.
+    LLVM's structurizer mishandles many such loops, so each loop that is
+    left from anywhere but its header is rewritten into the shape ::
 
-    The function requires phi-free IR (LLVM's ``reg2mem``); loops whose exit
-    targets still have phi nodes are left alone.
+        head:   flag = 0                 ; new loop header
+                br body
+        body:   ...                      ; the old header and body
+        leave:  flag = k                 ; one per leaving edge
+                br latch
+        latch:  br (flag != 0), exit, head
+        exit:   dispatch on flag to the original targets
+
+    Inside the loop every path now ends at the latch, so a ``break`` is an
+    early jump within an acyclic region, which `_resolve_joins` and
+    `_split_merges` know how to nest. Inner loops are handled first, so an
+    exit that crosses several loops is passed outwards one level at a time
+    by the dispatch blocks.
+
+    The function requires phi-free IR (LLVM's ``reg2mem``); loops whose
+    header or exit targets still have phi nodes are left alone.
 
     Returns
     -------
@@ -379,16 +435,15 @@ def _unify_loop_exits(blocks):
                 if t not in body
             ]
             targets = list(dict.fromkeys(t for _, t in exits))
-            if not exits or any(blocks[t].phis for t in targets):
+            if not exits or blocks[header].phis or any(blocks[t].phis for t in targets):
                 continue
-            # A block leaving towards two targets must end in a two-way branch.
-            if any(
-                len({t for b2, t in exits if b2 == b}) > 1
-                and not _CONDITIONAL.match(blocks[b].term[0])
-                for b, _ in exits
+            # An ordinary ``while`` loop: left from its header only, towards
+            # a block of its own.
+            if (
+                all(b == header for b, _ in exits)
+                and len(targets) == 1
+                and all(p in body for p in graph.preds[targets[0]])
             ):
-                continue
-            if len(targets) == 1 and all(p in body for p in graph.preds[targets[0]]):
                 continue
             break
         else:
@@ -396,64 +451,38 @@ def _unify_loop_exits(blocks):
 
         counter += 1
         slot = f"%nv.exit{counter}"
-        merge = f"{header}.exit"
-        while merge in blocks:
-            merge += "_"
-        many = len(targets) > 1
-        if many:
-            blocks[graph.entry].body.insert(0, f"  {slot} = alloca i32")
-        # The exiting blocks branch to the exit block directly, as a break
-        # must. Each records its target just before leaving; a block that
-        # stays in the loop on one arm stores needlessly, which is harmless
-        # because the slot is only read after the loop.
-        for block in dict.fromkeys(b for b, _ in exits):
-            leaving = [t for b, t in exits if b == block]
-            if many:
-                wanted = [targets.index(t) for t in leaving]
-                cond = _CONDITIONAL.match(blocks[block].term[0])
-                if len(set(wanted)) == 1:
-                    value = str(wanted[0])
-                else:
-                    first, second = (
-                        cond.group(2)[1:].strip('"'),
-                        cond.group(3)[1:].strip('"'),
-                    )
-                    value = f"{slot}.s{len(blocks)}"
-                    blocks[block].body.append(
-                        f"  {value} = select i1 {cond.group(1)}, "
-                        f"i32 {targets.index(first)}, i32 {targets.index(second)}"
-                    )
-                blocks[block].body.append(f"  store i32 {value}, ptr {slot}")
-            for target in leaving:
-                blocks[block].retarget(target, merge)
-        current = _Block(merge)
-        blocks[merge] = current
-        for k, target in enumerate(targets[:-1]):
-            nxt = _Block(f"{merge}.test{k + 1}")
-            # Every test reloads the slot, so no value crosses a block.
-            current.body = [
-                f"  {slot}.v{k} = load i32, ptr {slot}",
-                f"  {slot}.c{k} = icmp eq i32 {slot}.v{k}, {k}",
-            ]
-            current.term = [
-                f"  br i1 {slot}.c{k}, label {_ref(target)}, label {_ref(nxt.name)}"
-            ]
-            if k + 1 < len(targets) - 1:
-                blocks[nxt.name] = nxt
-                current = nxt
-            else:
-                # the last test falls through to the last target directly
-                current.term = [
-                    f"  br i1 {slot}.c{k}, label {_ref(target)}, label {_ref(targets[-1])}"
-                ]
-        if not current.term:
-            current.term = [f"  br label {_ref(targets[-1])}"]
+        blocks[graph.entry].body.insert(0, f"  {slot} = alloca i32")
+        head = _fresh(blocks, f"{header}.head")
+        latch = _fresh(blocks, f"{header}.latch")
+        merge = _fresh(blocks, f"{header}.exit")
+        done.add(head)
+
+        for pred in graph.preds[header]:
+            blocks[pred].retarget(header, latch if pred in body else head)
+        for n, (block, target) in enumerate(dict.fromkeys(exits)):
+            leave = _Block(_fresh(blocks, f"{header}.leave{n}"))
+            leave.body = [f"  store i32 {targets.index(target) + 1}, ptr {slot}"]
+            leave.term = [f"  br label {_ref(latch)}"]
+            blocks[block].retarget(target, leave.name)
+            blocks[leave.name] = leave
+
+        new = blocks[head] = _Block(head)
+        new.body = [f"  store i32 0, ptr {slot}"]
+        new.term = [f"  br label {_ref(header)}"]
+        new = blocks[latch] = _Block(latch)
+        new.body = [
+            f"  {slot}.l = load i32, ptr {slot}",
+            f"  {slot}.d = icmp ne i32 {slot}.l, 0",
+        ]
+        new.term = [f"  br i1 {slot}.d, label {_ref(merge)}, label {_ref(head)}"]
+
+        _dispatch(blocks, merge, slot, targets)
         changed = True
     return changed
 
 
-def _unstructured_join(graph):
-    """Find a block entered from several places that is no merge block.
+def _unstructured_joins(graph):
+    """Find the blocks entered from several places that are no merge blocks.
 
     A join is a proper merge block when it post-dominates its immediate
     dominator: then every path out of that dominator's selection passes
@@ -461,11 +490,10 @@ def _unstructured_join(graph):
 
     Returns
     -------
-    tuple or None
-        ``(join, region)`` for the innermost such block, where ``region``
-        is the set of blocks it dominates, or ``None`` if there is none (or
-        none that can be duplicated safely).
+    list of str
+        The unstructured joins, innermost first.
     """
+    found = []
     for join in sorted(graph.order, key=lambda n: -graph.depth[n]):
         if len(graph.preds[join]) < 2 or join in graph.headers or join == graph.entry:
             continue
@@ -474,53 +502,163 @@ def _unstructured_join(graph):
             continue
         if graph.loop_of[join] != graph.loop_of[dominator]:
             continue
-        region = {n for n in graph.order if graph.dominates(join, n)}
-        # Copying a latch would give its loop a second continue block.
-        if any(
-            s in graph.headers and s not in region
-            for n in region
-            for s in graph.succs[n]
-        ):
-            continue
-        return join, region
-    return None
+        found.append(join)
+    return found
 
 
-def _duplicate_joins(blocks):
-    """Copy unstructured joins so that each copy has a single entry.
+# Joins are copied while that stays cheap, and guarded by a flag otherwise.
+_COPY_LIMIT = 6
+_COPY_BUDGET = 200
+
+
+def _copy_join(blocks, graph, join, tag):
+    """Give every entry of an unstructured join its own copy of it.
+
+    The copies include all blocks the join dominates.
+
+    Returns
+    -------
+    bool
+        Whether the join was copied; it is left alone when that would be
+        expensive or would give a loop a second latch.
+    """
+    region = {n for n in graph.order if graph.dominates(join, n)}
+    extra = len(region) * (len(graph.preds[join]) - 1)
+    if extra > _COPY_LIMIT or len(blocks) + extra > _COPY_BUDGET:
+        return False
+    if any(
+        s in graph.headers and s not in region for n in region for s in graph.succs[n]
+    ):
+        return False
+    defined = [d for n in region for d in blocks[n].definitions()]
+    frontier = {s for n in region for s in graph.succs[n] if s not in region}
+    # The first predecessor keeps the original; every other gets a copy.
+    for k, pred in enumerate(graph.preds[join][1:]):
+        suffix = f".dup{tag}" + (f"_{k}" if k else "")
+        mapping = {n: n + suffix for n in region}
+        mapping.update({d: d + suffix for d in defined})
+        for n in region:
+            blocks[mapping[n]] = blocks[n].renamed(mapping[n], mapping)
+        twin = blocks[mapping[join]]
+        twin.phis = [_keep_entries(line, lambda b: b == pred) for line in twin.phis]
+        blocks[pred].retarget(join, mapping[join])
+        blocks[join].phis = [
+            _keep_entries(line, lambda b: b != pred) for line in blocks[join].phis
+        ]
+        # Blocks after the region now also receive values from the copy.
+        for name in frontier:
+            blocks[name].phis = [
+                _add_copies(line, region, mapping) for line in blocks[name].phis
+            ]
+    return True
+
+
+def _guard_join(blocks, graph, join, tag):
+    """Make an unstructured join a merge block by guarding it with a flag.
+
+    The join is unstructured because some paths from its dominator bypass
+    it, as the ``return`` does in ::
+
+        if a:
+            if b: return x
+            X
+        Y                      # the join
+
+    Those paths are sent to the join as well, after recording in a flag
+    where they were heading; a new block in front of the join tests the
+    flag and either enters the join or continues to the recorded target::
+
+        dominator:  flag = 0 ...
+        bypass:     flag = k; br guard
+        guard:      br (flag != 0), dispatch, join
+
+    The function requires phi-free IR (LLVM's ``reg2mem``).
+
+    Returns
+    -------
+    bool
+        Whether the join was guarded.
+    """
+    dominator = graph.idom[join]
+    # Back edges of the loops around the join do not count as paths to it.
+    heads = {h for h, body in graph.loops.items() if join in body}
+    before, work = {dominator}, [dominator]
+    while work:
+        for succ in graph.succs[work.pop()]:
+            if succ != join and succ not in heads and succ not in before:
+                before.add(succ)
+                work.append(succ)
+    region, work = set(), [join]
+    while work:
+        for pred in graph.preds[work.pop()]:
+            if pred in before and pred not in region:
+                region.add(pred)
+                if pred not in heads:
+                    work.append(pred)
+    bypasses = [
+        (b, t)
+        for b in graph.order
+        if b in region
+        for t in graph.succs[b]
+        if t not in region and t != join
+    ]
+    targets = list(dict.fromkeys(t for _, t in bypasses))
+    if (
+        not bypasses
+        or blocks[join].phis
+        or any(t in heads or blocks[t].phis for t in targets)
+        or any(p not in region for p in graph.preds[join])
+    ):
+        return False
+
+    slot = f"%nv.skip{tag}"
+    blocks[graph.entry].body.insert(0, f"  {slot} = alloca i32")
+    blocks[dominator].body.append(f"  store i32 0, ptr {slot}")
+    guard = _fresh(blocks, f"{join}.guard")
+    for pred in graph.preds[join]:
+        blocks[pred].retarget(join, guard)
+    for n, (block, target) in enumerate(bypasses):
+        leave = _Block(_fresh(blocks, f"{join}.skip{n}"))
+        leave.body = [f"  store i32 {targets.index(target) + 1}, ptr {slot}"]
+        leave.term = [f"  br label {_ref(guard)}"]
+        blocks[block].retarget(target, leave.name)
+        blocks[leave.name] = leave
+    if len(targets) == 1:
+        other = targets[0]
+    else:
+        other = _fresh(blocks, f"{join}.bypass")
+        _dispatch(blocks, other, slot, targets)
+    new = blocks[guard] = _Block(guard)
+    new.body = [
+        f"  {slot}.l = load i32, ptr {slot}",
+        f"  {slot}.d = icmp ne i32 {slot}.l, 0",
+    ]
+    new.term = [f"  br i1 {slot}.d, label {_ref(other)}, label {_ref(join)}"]
+    return True
+
+
+def _resolve_joins(blocks):
+    """Turn every unstructured join into a merge block or remove it.
+
+    Small joins are copied once per entry, which costs no run time; the
+    others are guarded by a flag, which costs no code size.
 
     Returns
     -------
     bool
         Whether anything changed.
     """
-    changed, copies = False, 0
+    changed, tag = False, 0
     while len(blocks) < _MAX_BLOCKS:
         graph = _Graph(blocks)
-        found = _unstructured_join(graph)
-        if found is None:
+        for join in _unstructured_joins(graph):
+            tag += 1
+            if _copy_join(blocks, graph, join, tag) or _guard_join(
+                blocks, graph, join, tag
+            ):
+                break
+        else:
             break
-        join, region = found
-        defined = [d for n in region for d in blocks[n].definitions()]
-        frontier = {s for n in region for s in graph.succs[n] if s not in region}
-        # The first predecessor keeps the original; every other gets a copy.
-        for pred in graph.preds[join][1:]:
-            copies += 1
-            mapping = {n: f"{n}.dup{copies}" for n in region}
-            mapping.update({d: f"{d}.dup{copies}" for d in defined})
-            for n in region:
-                blocks[mapping[n]] = blocks[n].renamed(mapping[n], mapping)
-            twin = blocks[mapping[join]]
-            twin.phis = [_keep_entries(line, lambda b: b == pred) for line in twin.phis]
-            blocks[pred].retarget(join, mapping[join])
-            blocks[join].phis = [
-                _keep_entries(line, lambda b: b != pred) for line in blocks[join].phis
-            ]
-            # Blocks after the region now also receive values from the copy.
-            for name in frontier:
-                blocks[name].phis = [
-                    _add_copies(line, region, mapping) for line in blocks[name].phis
-                ]
         changed = True
     return changed
 
@@ -633,7 +771,7 @@ def structurize(text):
         if not blocks:
             return match.group(0)
         unified = _unify_loop_exits(blocks)
-        duplicated = _duplicate_joins(blocks)
+        duplicated = _resolve_joins(blocks)
         split = _split_merges(blocks)
         if not (unified or duplicated or split):
             return match.group(0)

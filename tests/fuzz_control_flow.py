@@ -1,11 +1,13 @@
 """Fuzz the control-flow handling with random programs.
 
 Each seed generates a function made of nested if/elif/else, and/or
-conditions, for loops, break, continue and early returns. It is compiled
+conditions, for loops, break, continue and early returns; with ``--rich``
+also while loops and one more level of nesting. It is compiled
 for Vulkan, run on the selected devices and compared with plain Python.
 
     uv run python tests/fuzz_control_flow.py 0 100          # all devices
     uv run python tests/fuzz_control_flow.py 0 100 --cpu    # CPU devices only
+    uv run python tests/fuzz_control_flow.py 0 100 --rich   # also while loops
     uv run python tests/fuzz_control_flow.py --show 42      # print one program
 
 A failure is either a compile error (loud) or a wrong result (silent in
@@ -44,25 +46,33 @@ def gen_cond(rng, depth=0):
     return f"({gen_cond(rng, depth + 1)}) {rng.choice(['and', 'or'])} ({gen_cond(rng, depth + 1)})"
 
 
-def gen_block(rng, indent, depth, in_loop):
+def gen_block(rng, indent, depth, in_loop, rich=False):
     lines = []
     for _ in range(rng.randint(1, 3)):
         r = rng.random()
         pad = "    " * indent
-        if depth >= 3 or r < 0.3:
+        if rich and depth < 4 and r >= 0.6 and rng.random() < 0.5:
+            # a while loop; the counter moves first so `continue` is safe
+            lines.append(f"{pad}k{depth} = 0")
+            lines.append(
+                f"{pad}while k{depth} < {rng.randint(1, 4)} and {gen_cond(rng, 2)}:"
+            )
+            lines.append(f"{pad}    k{depth} += 1")
+            lines += gen_block(rng, indent + 1, depth + 1, True, rich)
+        elif depth >= (4 if rich else 3) or r < 0.3:
             lines.append(f"{pad}{rng.choice('ab')} = {gen_expr(rng)} * C0")
         elif r < 0.6:
             lines.append(f"{pad}if {gen_cond(rng)}:")
-            lines += gen_block(rng, indent + 1, depth + 1, in_loop)
+            lines += gen_block(rng, indent + 1, depth + 1, in_loop, rich)
             for _ in range(rng.randint(0, 2)):
                 lines.append(f"{pad}elif {gen_cond(rng)}:")
-                lines += gen_block(rng, indent + 1, depth + 1, in_loop)
+                lines += gen_block(rng, indent + 1, depth + 1, in_loop, rich)
             if rng.random() < 0.6:
                 lines.append(f"{pad}else:")
-                lines += gen_block(rng, indent + 1, depth + 1, in_loop)
+                lines += gen_block(rng, indent + 1, depth + 1, in_loop, rich)
         elif r < 0.75:
             lines.append(f"{pad}for j{depth} in range({rng.randint(1, 4)}):")
-            lines += gen_block(rng, indent + 1, depth + 1, True)
+            lines += gen_block(rng, indent + 1, depth + 1, True, rich)
         elif r < 0.85:
             lines.append(f"{pad}if {gen_cond(rng)}:")
             lines.append(f"{pad}    return {gen_expr(rng)}")
@@ -74,18 +84,18 @@ def gen_block(rng, indent, depth, in_loop):
     return lines
 
 
-def make(seed):
+def make(seed, rich=False):
     rng = random.Random(seed)
     src = (
         ["def f(x, y):", "    a = x", "    b = y"]
-        + gen_block(rng, 1, 0, False)
+        + gen_block(rng, 1, 0, False, rich)
         + ["    return a + b"]
     )
     return "\n".join(src)
 
 
-def run(seed, devices):
-    src = make(seed)
+def run(seed, devices, rich=False):
+    src = make(seed, rich)
     ns = {f"C{i}": c for i, c in enumerate(C)}
     exec(src, ns)
     pyf = ns["f"]
@@ -123,7 +133,7 @@ def run(seed, devices):
 
 def main(argv):
     if argv and argv[0] == "--show":
-        print(make(int(argv[1])))
+        print(make(int(argv[1]), "--rich" in argv))
         return 0
     lo, hi = int(argv[0]), int(argv[1])
     devices = [
@@ -131,7 +141,7 @@ def main(argv):
     ]
     counts = {"ok": 0, "compile error": 0, "WRONG RESULT": 0}
     for seed in range(lo, hi):
-        res, _ = run(seed, devices)
+        res, _ = run(seed, devices, "--rich" in argv)
         kind = (
             "ok"
             if res is None
