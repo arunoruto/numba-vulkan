@@ -16,31 +16,30 @@ uv run pytest tests/test_known_issues.py -rxX
 Numbers are not reused: KI-02, KI-03, KI-07, KI-13, KI-24 and KI-25 (NumPy
 functions on scalars, missing `math` functions, complex numbers, all data
 copied on every call, nested loop exits that failed to compile, libclc
-linked in full for every kernel) have been fixed, and KI-01 no longer
-applies when libclc is installed.
+linked in full for every kernel) have been fixed.
 
 ## Language and library coverage
 
-### KI-01: `float64` math needs libclc
+### KI-01: `float64` math needs libclc in a source checkout
 
 ```python
 out[i] = math.sin(x[i])     # x is float64
 out[i] = x[i] ** 2.5        # x is float64, or float32 with a Python float
 ```
 
-These work, with full double accuracy, when libclc is installed (see
-{doc}`math_library`). Without it:
+Wheels contain libclc, and the devenv shell provides it, so these work
+with full double accuracy (see {doc}`math_library`). A plain source
+checkout or `pip install git+https://...` does not have it:
 
 **Symptom:** `VulkanUnsupportedError: math.pow on float64 needs libclc`.
 
 **Cause:** Vulkan's own math library defines `sin`, `exp`, `log`, `pow` and
-friends for 32-bit floats only.
+friends for 32-bit floats only, and libclc's bitcode is a 2.7 MB binary
+that is not kept in the repository.
 
-**Workaround:** install libclc, keep the computation in `float32`, or use
+**Workaround:** install from a wheel, point `NUMBA_VULKAN_LIBCLC` at
+`clspv--.bc`, keep the computation in `float32`, or use
 `@nv.jit(narrow_math=True)`.
-
-**Fix:** bundle libclc's `clspv--.bc` with the package, so that it is
-always available.
 
 ### KI-04: slices, array methods and iteration
 
@@ -246,14 +245,17 @@ observed with NVIDIA driver 580.x and llvmlite 0.50 (LLVM 22). They should
 be re-evaluated when either changes. The benchmark dependency group pins
 `numpy<2.5`, because numba-cuda 0.30.4 does not import with NumPy 2.5.
 
-### KI-26: libclc is not packaged
+### KI-26: the bundled libclc is tied to an old nixpkgs revision
 
-The math library depends on a file, `clspv--.bc`, that `pip` cannot
-install and that distributions are dropping (current nixpkgs has removed
-libclc; the devenv shell pins an older revision for it). It must also come
-from an LLVM no newer than the one inside llvmlite.
+Wheels bundle `clspv--.bc`, which `build-dist` copies from the Nix store.
+Current nixpkgs has removed libclc, so the devenv shell pins an older
+revision for it (input `nixpkgs-libclc`). The file must come from an LLVM
+no newer than the one inside llvmlite, so the bundled copy (LLVM 22) relies
+on the `llvmlite>=0.50` requirement, and a newer libclc cannot be bundled
+until llvmlite moves on.
 
-**Fix:** bundle the file in the package, as clspv does.
+**Fix:** build libclc's clspv target from the LLVM sources in a small Nix
+derivation of this project's own, pinned to llvmlite's LLVM version.
 
 ### KI-22: lint warnings
 

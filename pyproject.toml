@@ -3,8 +3,9 @@ name = "numba-vulkan"
 version = "0.0.1"
 description = "Proof of concept: a Vulkan compute target for Numba"
 readme = "README.md"
-license = "BSD-2-Clause"
-license-files = ["LICENSE"]
+# Distributions bundle libclc's bitcode, which is under LLVM's licence.
+license = "BSD-2-Clause AND Apache-2.0 WITH LLVM-exception"
+license-files = ["LICENSE", "src/numba_vulkan/data/LICENSE-libclc.txt"]
 authors = [{ name = "Mirza Arnaut", email = "mirza.arnaut@tu-dortmund.de" }]
 requires-python = ">=3.11"
 dependencies = [
@@ -48,7 +49,7 @@ testpaths = ["tests"]
 python_files = "test_*.py"
 
 [build-system]
-requires = ["uv_build >= 0.8.0, <0.10.0"]
+requires = ["uv_build >= 0.8.0, <0.13.0"]
 build-backend = "uv_build"
 
 [tool.uv.build-backend]

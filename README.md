@@ -107,7 +107,8 @@ where it hurts; it is not ready for real workloads.
 ### Prerequisites
 
 - libclc's `clspv--.bc` from LLVM 22 or older, for float64 and accurate
-  float32 math (the devenv shell provides it; see the
+  float32 math. Wheels bundle it and the devenv shell provides it; only a
+  bare source checkout needs it installed (see the
   [math library docs](docs/source/math_library.md)).
 - A Vulkan 1.2 driver. [lavapipe](https://docs.mesa3d.org/drivers/llvmpipe.html)
   (Mesa's CPU implementation) is enough to try it without a GPU.
@@ -290,8 +291,9 @@ Does not work:
 
 - **float64 math without libclc.** Vulkan's math library is 32-bit only, so
   `sin`, `exp`, `pow` and friends in float64 come from libclc, LLVM's OpenCL
-  math library. It is not bundled yet; without it such calls raise, unless
-  you opt in to float32 precision with `@nv.jit(narrow_math=True)`.
+  math library. Wheels bundle it; in a source checkout without it such calls
+  raise, unless you opt in to float32 precision with
+  `@nv.jit(narrow_math=True)`.
 - **Slices, array views, NumPy functions on whole arrays, array allocation,
   `try`/`except`, recursion.**
 - **Devices without float64, int64 or int8 support.** Numba types Python
@@ -327,7 +329,7 @@ ones most likely to bite:
 
 | | Issue | Workaround |
 | --- | --- | --- |
-| KI-01 | float64 `math.sin(x)`, `x ** 2.5`... need libclc, which is not bundled | install libclc, or stay in float32 |
+| KI-01 | float64 `math.sin(x)`, `x ** 2.5`... need libclc, which a source checkout lacks | install a wheel, or set `NUMBA_VULKAN_LIBCLC` |
 | KI-04 | no slices, array methods or iteration over arrays | index explicitly |
 | KI-06 | global NumPy arrays cannot be used in kernels | pass them as arguments |
 | KI-10 | no bounds checks unless asked for; integer division by zero is not reported | `@nv.jit(boundscheck=True)` while debugging |
@@ -359,7 +361,8 @@ To continue the work, start with the
 - [ ] Slices and array views
 - [ ] A float32-by-default typing mode, so kernels run on devices without float64
 - [x] float64 math, through libclc
-- [ ] Bundle libclc so that `pip install` is self-contained
+- [x] Bundle libclc in wheels
+- [ ] Publish to PyPI
 - [ ] `@vectorize`-style ufuncs
 - [ ] Shared memory, atomics and barriers
 - [ ] On-disk caching of compiled kernels

@@ -68,11 +68,13 @@ order:
 
 1. the path in the `NUMBA_VULKAN_LIBCLC` environment variable (the file, or
    the directory containing it);
-2. `numba_vulkan/data/` inside the installed package;
+2. `numba_vulkan/data/` inside the installed package, where wheels carry a
+   copy (with its licence, Apache-2.0 with LLVM exceptions);
 3. `/usr/share/clc`, `/usr/lib/clc`, `/usr/lib64/clc`, `/usr/local/share/clc`.
 
-The devenv shell sets the variable. Elsewhere, install your distribution's
-libclc package, or copy the file from a clspv or LLVM build.
+The devenv shell sets the variable. In a source checkout elsewhere, install
+your distribution's libclc package, or copy the file from a clspv or LLVM
+build.
 
 The first kernel that needs libclc rewrites it into a form that links
 quickly (a few seconds, once) and stores the result in
