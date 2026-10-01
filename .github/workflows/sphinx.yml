@@ -17,10 +17,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Setup | Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup | Install uv
-        uses: astral-sh/setup-uv@v4
+        uses: astral-sh/setup-uv@v10.2.0
 
       - name: Setup | Install docs dependencies
         run: |
@@ -29,11 +29,11 @@ jobs:
       - name: Build | Run Sphinx
         run: |
           cd docs
-          uv run --no-sync sphinx-build -M html ./source ./build
+          uv run --no-sync sphinx-build -M html ./source ./build -W --keep-going
 
       - name: Deploy | Create artifact of website
         if: github.ref == 'refs/heads/main'
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-pages-artifact@v5
         with:
           path: docs/build/html/
 
@@ -51,4 +51,4 @@ jobs:
     steps:
       - name: Deploy | GitHub Pages
         id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5
