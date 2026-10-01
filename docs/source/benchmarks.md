@@ -31,7 +31,9 @@ includes compilation.
   SPIR-V backend.
 - llvmpipe executes the shader on the CPU, so its numbers show the overhead
   of the Vulkan path rather than any hardware speed-up.
-- All backends agree with the CPU result to `float32` rounding.
+- All backends agree with the CPU result to `float32` rounding; `saxpy` is
+  bit-identical on Vulkan, because shaders are compiled without fused
+  multiply-add.
 
 These are results of a single run on one machine. Repeated runs vary by
 around 25 %, so small differences between rows are not meaningful.

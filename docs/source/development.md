@@ -13,9 +13,12 @@ src/numba_vulkan/
     vkdecl.py       typing of global_id
     vkimpl.py       lowering of global_id and array indexing
     mathimpl.py     lowering of the math module and integer powers
+    mathfuncs.py    math functions written in Python (hypot, erf, gamma...)
+    ufuncs.py       which implementation each NumPy ufunc loop uses
     buffers.py      buffer access placeholders and their expansion
     compiler.py     Numba pipeline, kernel entry point
     codegen.py      code library: link, optimise, emit and check SPIR-V
+    structurize.py  control-flow restructuring on LLVM IR text
     _emit.py        child process running LLVM's SPIR-V backend
     dispatcher.py   @nv.jit, VulkanDispatcher, forall
     runtime.py      Vulkan devices, buffers, pipelines, dispatch
@@ -24,6 +27,10 @@ src/numba_vulkan/
 tests/
     test_kernels.py        language features, per device
     test_target.py         target extension API features, per device
+    test_math.py           math functions and NumPy ufuncs, per device
+    test_control_flow.py   early exits, short-circuit conditions, per device
+    test_structurize.py    unit tests of the control-flow restructuring
+    fuzz_control_flow.py   random-program fuzzer (a tool, not collected)
     test_known_issues.py   expected failures, one per known issue
 benchmarks/bench.py
 docs/source/
@@ -79,7 +86,7 @@ Where a failure comes from tells you where to look:
 | `No definition for lowering ...` | lowering lookup | `vkimpl.py`, `mathimpl.py` |
 | `VulkanUnsupportedError` | lowering | the message names the construct |
 | `SpirvCodegenError: LLVM's SPIR-V backend failed` | LLVM | `compiled.llvm_ir`; reduce the kernel |
-| `SpirvCodegenError: generated SPIR-V is invalid` | LLVM or the passes | `spirv-dis` output around the reported line |
+| `SpirvCodegenError: generated SPIR-V is invalid` | LLVM or the passes | `spirv-dis` output around the reported line; for control flow, `structurize.py` |
 | `VulkanSupportError` | device features | `runtime.DeviceInfo`, `compiled.capabilities` |
 | `VkError...` or a crash in the driver | driver | run on llvmpipe; validate the shader |
 
@@ -89,26 +96,45 @@ Functions that map to one LLVM intrinsic are a table entry in `mathimpl.py`:
 add them to `_F32_ONLY` if GLSL.std.450 lacks a `float64` version, to
 `_ANY_FLOAT` otherwise.
 
-Anything else is a lowering function:
+Functions that can be written in Python go into `mathfuncs.py`. A factory
+receives the float type and returns the implementation; all constants are
+created in that type, because a Python literal would promote the
+computation to `float64`:
 
 ```python
-@lower(math.isnan, types.Float)
-def lower_isnan(context, builder, sig, args):
-    """Lower ``math.isnan``."""
-    return builder.fcmp_unordered("uno", args[0], args[0])
+def _log1p(ty):
+    one = ty(1)
+
+    def log1p(x):
+        u = one + x
+        if u == one:
+            return x
+        return math.log(u) * x / (u - one)
+
+    return log1p
 ```
 
-Functions that can be written in Python are easier as overloads, since they
-are compiled by Numba like user code:
+Register the factory in the `_UNARY` or `_BINARY` table of that module.
 
-```python
-@overload(math.hypot, target="vulkan")
-def ol_hypot(x, y):
-    return lambda x, y: math.sqrt(x * x + y * y)
+Anything that needs raw LLVM instructions is a lowering function in
+`mathimpl.py`; `lower_copysign` and `_classify` are examples.
+
+To make the matching NumPy ufunc work as well, add it to the tables in
+`ufuncs.py`. Then add a case to `tests/test_math.py`.
+
+## Fuzzing control flow
+
+`tests/fuzz_control_flow.py` generates random functions made of nested
+`if`/`elif`/`else`, `and`/`or`, loops, `break`, `continue` and early
+`return`s, runs them on Vulkan and compares with plain Python:
+
+```sh
+uv run python tests/fuzz_control_flow.py 0 100          # seeds 0..99, all devices
+uv run python tests/fuzz_control_flow.py 0 100 --cpu    # llvmpipe only
+uv run python tests/fuzz_control_flow.py --show 42      # print one program
 ```
 
-Then move the case from `tests/test_known_issues.py` to a regular test and
-update {doc}`known_issues`.
+Use it after any change to `structurize.py` or to the pass list.
 
 ## Rules that were learned the hard way
 
@@ -127,6 +153,24 @@ Do not create pointers into buffers before optimisation
   `buffers.load_element` and `buffers.store_element`, which stay opaque
   until after optimisation.
 
+Do not trust LLVM's structurizer
+: It produces invalid SPIR-V for early returns, short-circuit conditions and
+  returns inside loops. `structurize.py` exists to hand it a graph that
+  needs no repair. A wrong result here would be silent, so every change
+  needs the fuzzer and a validator.
+
+instcombine re-creates what you avoided
+: Spelling out `copysign` as bit operations, or a NaN test as `x != x`, does
+  not help: instcombine recognises the pattern and emits the intrinsic or
+  comparison the backend cannot handle. Such things are rewritten on the IR
+  text *after* the passes have run (`codegen._expand_copysign`,
+  `codegen._expand_fcmp_ordering`).
+
+Helpers compiled by `compile_internal` need the NumPy error model
+: Numba's default adds a zero-division check, and an extra exit, to every
+  division. `VulkanTargetContext._compile_subroutine_no_cache` selects the
+  NumPy error model for that reason.
+
 Do not add LLVM passes casually
 : `instcombine` is required (the backend miscompiles the aggregates Numba
   builds), NewGVN was tried and breaks the backend, and the standard
@@ -140,6 +184,12 @@ A lowering registry cannot override Numba's concrete registrations
   for example). Those win over class-level entries in the target's
   registries. Intercept them in `VulkanTargetContext.get_function`, as
   `mathimpl.power_override` does.
+
+Shader compilers do not keep float arithmetic as written
+: Without the `NoContraction` decoration that `codegen.mark_exact` adds, all
+  three tested drivers folded `(1 + x) - 1` to `x`. Algorithms that depend
+  on rounding behaviour need it, and they still cannot rely on accurate
+  `log`/`exp` near their critical points.
 
 Check results on more than one device
 : The same valid shader gave different integer results on NVIDIA than on

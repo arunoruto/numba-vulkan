@@ -26,9 +26,9 @@ It follows the structure of Numba's CUDA target:
 | --- | --- | --- |
 | Target and contexts | {py:mod}`numba_vulkan.target` | typing context, target context, calling convention |
 | Types and data models | {py:mod}`numba_vulkan.vktypes`, {py:mod}`numba_vulkan.models` | the array type and its LLVM representation |
-| Typing and lowering | {py:mod}`numba_vulkan.vkdecl`, {py:mod}`numba_vulkan.vkimpl`, {py:mod}`numba_vulkan.mathimpl` | `global_id`, array indexing, `math` |
+| Typing and lowering | {py:mod}`numba_vulkan.vkdecl`, {py:mod}`numba_vulkan.vkimpl`, {py:mod}`numba_vulkan.mathimpl`, {py:mod}`numba_vulkan.mathfuncs`, {py:mod}`numba_vulkan.ufuncs` | `global_id`, array indexing, `math`, NumPy ufuncs |
 | Pipeline | {py:mod}`numba_vulkan.compiler` | Numba compiler pipeline and the kernel entry point |
-| Code generation | {py:mod}`numba_vulkan.codegen`, {py:mod}`numba_vulkan.buffers` | linking, optimisation, SPIR-V emission |
+| Code generation | {py:mod}`numba_vulkan.codegen`, {py:mod}`numba_vulkan.structurize`, {py:mod}`numba_vulkan.buffers` | linking, optimisation, control-flow restructuring, SPIR-V emission |
 | Dispatcher | {py:mod}`numba_vulkan.dispatcher` | `@nv.jit`, `forall`, specialisation cache |
 | Runtime | {py:mod}`numba_vulkan.runtime` | devices, buffers, pipelines, dispatch |
 
@@ -76,11 +76,42 @@ Numba's calling convention returns values through pointers and reports
 errors through status codes. Neither survives in a shader, so all functions
 are inlined into a single entry point and cleaned up with a small, fixed set
 of LLVM passes (inlining, scalar replacement of aggregates, instruction
-combining, CFG simplification, dead code elimination).
+combining, CFG simplification, dead code elimination, loop simplification
+and demotion of phi nodes to memory).
 
 LLVM's full optimisation pipeline is deliberately not used: it produces
 constructs, such as vector operations and lookup tables, that the SPIR-V
 backend does not handle.
+
+## Structured control flow
+
+SPIR-V requires structured control flow: every conditional branch names a
+merge block, selections nest properly, and a loop has one continue block and
+one merge block. Python code does not look like that after compilation:
+
+- several early `return`s all jump to the same continuation;
+- `if a or b: ... else: ...` enters its first branch from two places;
+- a `return` inside a loop leaves the loop without passing its exit.
+
+LLVM's SPIR-V backend contains a structurizer for such graphs, but in LLVM
+22 it produces invalid modules for many of them. {py:mod}`numba_vulkan.structurize`
+therefore brings the graph into properly nested form before code
+generation, in three steps:
+
+1. **Loop exits.** Every loop gets a single exit block. Blocks that leave
+   the loop record which target they wanted in a stack slot, and a chain of
+   tests after the exit block dispatches to it.
+2. **Unstructured joins.** A block entered from several places that is not
+   the merge block of a selection is copied, once per entry.
+3. **Shared merge blocks.** A selection that shares its merge block with an
+   enclosing one gets a merge block of its own that forwards to the shared
+   one.
+
+To make these rewrites simple, the IR is first brought into a form without
+phi nodes (LLVM's `reg2mem`) and with canonical loops (`loop-simplify`).
+
+This step is the least mature part of the compiler; see KI-24 in
+{doc}`known_issues`.
 
 ## SPIR-V emission
 
@@ -90,8 +121,10 @@ a child process, because it aborts the whole process on input it cannot
 handle; a failure then surfaces as
 {py:class}`~numba_vulkan.errors.SpirvCodegenError`.
 
-Before a module is handed to a driver it is checked for constructs known to
-crash drivers.
+Two things happen to the binary afterwards. Every float operation is
+decorated `NoContraction`, because shader compilers otherwise reassociate
+arithmetic freely, which Numba code does not expect. And the module is
+checked for constructs known to crash drivers before it is handed to one.
 
 ## Runtime
 
@@ -110,3 +143,9 @@ Pipelines are cached per device and kernel specialisation.
 | The SPIR-V backend miscompiles nested aggregate inserts | aggregates are folded away before emission |
 | The SPIR-V backend aborts the process on unsupported input | emission runs in a child process |
 | Numba's integer power falls back to a `float64` `pow` | integer exponents are implemented with multiplications |
+| LLVM's structurizer emits invalid SPIR-V for early exits and short-circuit conditions | control flow is restructured before code generation |
+| The SPIR-V backend emits `OpUnordered`/`OpOrdered`, which shaders may not use | NaN comparisons are rewritten as tests on the bit pattern |
+| The SPIR-V backend cannot select `llvm.copysign`, and instcombine creates it from bit operations | calls are expanded after optimisation |
+| All tested drivers reassociate float arithmetic, e.g. `(1 + x) - 1` becomes `x` | every float operation is decorated `NoContraction` |
+| The `log` of GPU drivers is imprecise close to 1 | `log1p` and `expm1` use series for small arguments |
+| Vulkan has no math library beyond GLSL.std.450 | `hypot`, `log1p`, `erf`, `gamma`... are implemented in Python |

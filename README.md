@@ -225,12 +225,12 @@ One run on an Intel i9-9900K (8 cores), NVIDIA TITAN X (Pascal) and Intel UHD
 
 | Backend | Mandelbrot 2048², 200 iter. | Option pricing, 4.2M | saxpy, 4.2M |
 | --- | ---: | ---: | ---: |
-| Numba CPU, 1 thread | 458.6 | 108.3 | 2.6 |
-| Numba CPU, parallel | 92.5 | 22.8 | 8.0 |
-| **numba-vulkan**, NVIDIA TITAN X | 18.4 | 33.1 | 18.8 |
-| **numba-vulkan**, Intel UHD 630 | 47.7 | 41.0 | 33.1 |
-| **numba-vulkan**, llvmpipe (CPU) | 74.1 | 24.4 | 18.0 |
-| numba-cuda, NVIDIA TITAN X | 12.4 | 15.6 | 14.2 |
+| Numba CPU, 1 thread | 460.4 | 106.8 | 2.4 |
+| Numba CPU, parallel | 91.9 | 22.2 | 5.5 |
+| **numba-vulkan**, NVIDIA TITAN X | 19.7 | 29.0 | 22.8 |
+| **numba-vulkan**, Intel UHD 630 | 51.2 | 28.9 | 23.4 |
+| **numba-vulkan**, llvmpipe (CPU) | 61.7 | 25.5 | 18.8 |
+| numba-cuda, NVIDIA TITAN X | 12.6 | 18.2 | 11.1 |
 
 Reading the numbers:
 
@@ -241,7 +241,8 @@ Reading the numbers:
   arguments on every call and has no device arrays yet.
 - First-call (compile) time is about 0.5 s for Vulkan, against 0.05 to 0.3 s
   for CUDA.
-- All backends agree with the CPU result to float32 rounding.
+- All backends agree with the CPU result to float32 rounding; saxpy is
+  bit-identical on Vulkan.
 - Repeated runs vary by around 25 %, so small differences are not meaningful.
 
 The [documentation](docs/source/benchmarks.md) has the full tables, including
@@ -256,9 +257,11 @@ Works:
 - `int32`/`int64`/`float32`/`float64`/`bool` scalars and C-contiguous N-d
   arrays of `bool`, 8 to 64-bit integers, `float32` and `float64`, with
   integer indexing (including negative indices), `.shape`, `.size` and `len()`
-- arithmetic, comparisons, bit operations, casts, tuples, `if`/`while`/`for
-  ... in range(...)`, `min`/`max`/`abs`
-- `math` functions, and `**` with integer exponents
+- arithmetic, comparisons, bit operations, casts, tuples, complex numbers,
+  `if`/`while`/`for ... in range(...)`, early `return`s, `min`/`max`/`abs`
+- the `math` module (including `hypot`, `log1p`, `erf`, `gamma`, `isnan`...)
+  and `**` with integer exponents
+- NumPy functions on scalars, such as `np.sqrt(x[i])` or `np.maximum(a, b)`
 - calling other `@nv.jit` and `@njit` functions; `@overload(target="vulkan")`
 
 Does not work:
@@ -266,8 +269,8 @@ Does not work:
 - **float64 `sin`/`exp`/`pow`/...** Vulkan's math library is 32-bit only.
   Such calls raise unless you opt in with `@nv.jit(narrow_math=True)`, which
   computes them in float32.
-- **Slices, array views, NumPy functions, array allocation, exceptions,
-  recursion.** Errors raised inside a kernel are silently dropped.
+- **Slices, array views, NumPy functions on whole arrays, array allocation,
+  exceptions, recursion.** Errors raised inside a kernel are silently dropped.
 - **Devices without float64, int64 or int8 support.** Numba types Python
   literals as float64/int64, and the SPIR-V backend currently forces int8, so
   most kernels need all three. Desktop GPUs have them; many mobile GPUs and
@@ -284,6 +287,10 @@ Things found along the way:
 - float32 `sin` on Intel/Mesa is only accurate to about 1e-4.
 - LLVM's SPIR-V backend miscompiles nested aggregate inserts and aborts on
   several unsupported inputs.
+- LLVM's SPIR-V structurizer emits invalid shaders for early returns and
+  short-circuit conditions; control flow is restructured beforehand.
+- All three drivers reassociate float arithmetic unless told not to, so
+  every float operation is marked exact.
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
@@ -296,8 +303,7 @@ ones most likely to bite:
 | | Issue | Workaround |
 | --- | --- | --- |
 | KI-01 | `x ** 2.5` and `math.sin(x)` fail for float64, and for float32 mixed with Python float literals | stay in float32 (`np.float32(2.5)`), or `narrow_math=True` |
-| KI-02 | NumPy functions such as `np.sqrt(x[i])` are not lowered | use the `math` module |
-| KI-03 | `math.hypot`, `log1p`, `erf`, `isnan`, `isfinite` and others are missing | compose from supported functions |
+| KI-24 | some deeply nested loops with `return`/`break` fail to compile | simplify the loop exits |
 | KI-04 | no slices, array methods or iteration over arrays | index explicitly |
 | KI-06 | global NumPy arrays cannot be used in kernels | pass them as arguments |
 | KI-10 | errors raised in kernels are dropped; no bounds checks | check inputs on the host |

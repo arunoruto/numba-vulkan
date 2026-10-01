@@ -4,14 +4,17 @@ This page lists what is currently broken or missing, as opposed to the
 fundamental constraints described in {doc}`limitations`. It is meant as a
 starting point for anyone, human or AI, who continues the work.
 
-Entries KI-01 to KI-09 are reproduced by `tests/test_known_issues.py`. Those
-tests are expected to fail and are marked strict: when an issue gets fixed,
+The language-coverage entries are reproduced by `tests/test_known_issues.py`.
+Those tests are expected to fail and are marked strict: when an issue gets fixed,
 its test turns red until the case is moved into the regular test suite and
 the entry is removed from this page.
 
 ```sh
 uv run pytest tests/test_known_issues.py -rxX
 ```
+
+Numbers are not reused: KI-02, KI-03 and KI-07 (NumPy functions on scalars,
+missing `math` functions, complex numbers) have been fixed.
 
 ## Language and library coverage
 
@@ -34,38 +37,10 @@ even for a `float32` array.
 or use `@nv.jit(narrow_math=True)`. Powers with integer exponents and
 `math.sqrt` work in both precisions.
 
+Functions that are built from these (`log1p`, `expm1`, `asinh`, `erf`,
+`gamma`... and the matching NumPy ufuncs) inherit the restriction.
+
 **Fix:** a software `float64` math library, in `mathimpl.py`.
-
-### KI-02: NumPy functions on scalars
-
-```python
-out[i] = np.sqrt(x[i])
-```
-
-**Symptom:** `No definition for lowering <ufunc 'sqrt'>(float32,) -> float32`.
-
-**Cause:** the target has no ufunc support. Typing succeeds, because Numba's
-NumPy declarations are installed, but nothing lowers the call.
-
-**Workaround:** use the `math` module.
-
-**Fix:** implement `get_ufunc_info` on `VulkanTargetContext`, mapping ufunc
-loops to the implementations in `mathimpl.py`. Numba's CUDA target does this
-in `numba/cuda/ufuncs.py`.
-
-### KI-03: missing `math` functions
-
-**Symptom:** `No definition for lowering <built-in function hypot>...`.
-
-**Affected:** confirmed for `math.hypot`, `math.log1p`, `math.erf` and
-`math.isfinite`. Anything not listed in the tables at the top of
-`mathimpl.py` is missing, which includes `expm1`, `erfc`, `gamma`,
-`lgamma`, `isnan`, `isinf` and `copysign`.
-
-**Fix:** `isnan`/`isinf`/`isfinite` are float comparisons, and `hypot`,
-`log1p` and `expm1` can be composed from existing functions. `erf` and
-`gamma` need polynomial approximations. See
-[Adding a `math` function](development.md#adding-a-math-function).
 
 ### KI-04: slices, array methods and iteration
 
@@ -118,13 +93,6 @@ pointer, which the SPIR-V backend cannot translate.
 **Fix:** `VulkanTargetContext.make_constant_array` could upload the data as
 an additional read-only buffer and return a `VulkanArray` bound to it.
 
-### KI-07: complex numbers
-
-**Symptom:** `No definition for lowering <built-in function isnan>`.
-
-**Cause:** Numba's complex arithmetic calls `math.isnan` (KI-03). Complex
-arrays are also not accepted as buffers.
-
 ### KI-08: `print`
 
 **Symptom:** `No definition for lowering <built-in function print>`.
@@ -166,6 +134,50 @@ exceptions is already kept in the compile result.
 
 Rejected with a clear error, because all functions are inlined into the
 entry point. SPIR-V forbids recursion, so this will not change.
+
+### KI-24: some deeply nested control flow fails to compile
+
+```python
+for j in range(n):
+    for k in range(m):
+        if a and b:
+            ...
+        elif c or d:
+            return x      # return from inside nested loops
+    if e:
+        break
+```
+
+**Symptom:** `SpirvCodegenError: generated SPIR-V is invalid` (with
+`NUMBA_VULKAN_VALIDATE=1`), or `LLVM ERROR: No valid candidate in the
+queue. Is the graph reducible?`.
+
+**Cause:** SPIR-V needs structured control flow. LLVM's structurizer is
+unreliable, so `structurize.py` restructures the graph first (see
+{doc}`how_it_works`), but it does not cover everything: selections that
+leave a loop from a nested position (`break`, `continue` and `return` under
+several levels of `if` inside loops) are still left to LLVM.
+
+**How common:** with `tests/fuzz_control_flow.py`, 104 of 120 random
+programs compile and give correct results; without the restructuring step
+it was 53 of 120. None of the 120 gave a wrong result. Typical kernels are
+far simpler than the fuzzer's programs.
+
+**Workaround:** simplify the exits of the loop, for example by setting a
+flag and testing it in the loop condition instead of returning from inside.
+
+**Fix:** convert exits from nested positions into guard variables, so that
+every selection inside a loop has its merge block inside the loop. Without
+`spirv-val`, an invalid module reaches the driver unchecked, so a built-in
+structural check of the generated module would also be worth having.
+
+### KI-23: accuracy of `erf`, `erfc`, `gamma` and `lgamma`
+
+These are implemented in Python (`mathfuncs.py`) with approximations that
+suit `float32`: `erf` and `erfc` have an absolute error of about 1.5e-7,
+which becomes a large *relative* error where `erfc` is tiny; `gamma` and
+`lgamma` are accurate to about 1e-5 relative. With `narrow_math=True` the
+`float64` versions are no better than that.
 
 ## Performance
 
@@ -226,11 +238,13 @@ be expected.
 
 ### KI-19: LLVM IR is rewritten as text
 
-Three steps patch textual LLVM IR with regular expressions: the shader
-attributes on the entry point (`compiler.compile_kernel`), the `srem`
-rewrite (`codegen._expand_srem`) and the buffer access expansion
-(`buffers.expand_buffer_access`). They depend on how LLVM 22 prints IR and
-may break with other LLVM versions.
+Several steps patch textual LLVM IR with regular expressions: the shader
+attributes on the entry point (`compiler.compile_kernel`), the rewrites of
+`srem`, `fcmp uno`/`ord` and `llvm.copysign` (`codegen.py`), the
+control-flow restructuring (`structurize.py`) and the buffer access
+expansion (`buffers.expand_buffer_access`). They depend on how LLVM 22
+prints IR and may break with other LLVM versions. A small IR library that
+can parse and edit modules would replace all of them.
 
 ### KI-20: the dispatcher is not a Numba `Dispatcher`
 

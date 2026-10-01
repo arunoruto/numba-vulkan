@@ -29,12 +29,14 @@ _F32_ONLY = {
     math.log10: "llvm.log10",
     math.pow: "llvm.pow",
     math.atan2: "llvm.atan2",
+    math.exp2: "llvm.exp2",
 }
 # ... and these for doubles as well.
 _ANY_FLOAT = {
     math.sqrt: "llvm.sqrt",
     math.fabs: "llvm.fabs",
 }
+_BINARY = (math.pow, math.atan2)
 _ROUNDING = {
     math.floor: "llvm.floor",
     math.ceil: "llvm.ceil",
@@ -129,7 +131,7 @@ def _register(pyfn, name, f32_only):
     f32_only : bool
         Whether GLSL.std.450 lacks a float64 version of the function.
     """
-    nargs = 2 if pyfn in (math.pow, math.atan2) else 1
+    nargs = 2 if pyfn in _BINARY else 1
 
     def impl(context, builder, sig, args):
         """Lowering registered for `pyfn`; see `_float_math`."""
@@ -173,6 +175,125 @@ def _register_rounding(pyfn, name):
 
 for _fn, _name in _ROUNDING.items():
     _register_rounding(_fn, _name)
+
+
+def _classify(builder, value, kind):
+    """Test a float for NaN, infinity or finiteness.
+
+    Parameters
+    ----------
+    builder : llvmlite.ir.IRBuilder
+        Builder positioned where the code is emitted.
+    value : llvmlite.ir.Value
+        A float value.
+    kind : {'nan', 'inf', 'finite'}
+        The test to perform.
+
+    Returns
+    -------
+    llvmlite.ir.Value
+        The ``i1`` result.
+    """
+    # The tests work on the bit pattern. Float comparisons would be simpler,
+    # but LLVM turns them into OpUnordered, which shaders may not use, and
+    # drivers with fast-math enabled are free to fold them away.
+    bits = ir.IntType(64 if isinstance(value.type, ir.DoubleType) else 32)
+    exponent = bits((0x7FF << 52) if bits.width == 64 else (0xFF << 23))
+    magnitude = builder.and_(
+        builder.bitcast(value, bits), bits((1 << (bits.width - 1)) - 1)
+    )
+    if kind == "nan":
+        return builder.icmp_unsigned(">", magnitude, exponent)
+    if kind == "inf":
+        return builder.icmp_unsigned("==", magnitude, exponent)
+    return builder.icmp_unsigned("<", magnitude, exponent)
+
+
+def _register_classification(pyfn, kind):
+    """Register the lowering of ``math.isnan``, ``isinf`` or ``isfinite``.
+
+    Parameters
+    ----------
+    pyfn : callable
+        The ``math`` function.
+    kind : {'nan', 'inf', 'finite'}
+        The test it performs.
+    """
+
+    @lower(pyfn, types.Float)
+    def impl(context, builder, sig, args):
+        """Classify a float; see `_classify`."""
+        return _classify(builder, args[0], kind)
+
+    @lower(pyfn, types.Integer)
+    def impl_int(context, builder, sig, args):
+        """Integers are always finite."""
+        return ir.Constant(ir.IntType(1), int(kind == "finite"))
+
+
+for _fn, _kind in ((math.isnan, "nan"), (math.isinf, "inf"), (math.isfinite, "finite")):
+    _register_classification(_fn, _kind)
+
+
+@lower(math.copysign, types.Float, types.Float)
+def lower_copysign(context, builder, sig, args):
+    """Lower ``math.copysign`` by combining bit patterns.
+
+    The SPIR-V backend cannot select ``llvm.copysign``.
+
+    Parameters
+    ----------
+    context : VulkanTargetContext
+        The target context.
+    builder : llvmlite.ir.IRBuilder
+        Builder positioned where the code is emitted.
+    sig : numba.core.typing.Signature
+        Signature the call was typed with.
+    args : sequence of llvmlite.ir.Value
+        Argument values, in the types of ``sig.args``.
+
+    Returns
+    -------
+    llvmlite.ir.Value
+        The magnitude of the first argument with the sign of the second.
+    """
+    ty = sig.return_type
+    magnitude, sign = (context.cast(builder, a, t, ty) for a, t in zip(args, sig.args))
+    bits = ir.IntType(64 if isinstance(magnitude.type, ir.DoubleType) else 32)
+    sign_bit = bits(1 << (bits.width - 1))
+    combined = builder.or_(
+        builder.and_(
+            builder.bitcast(magnitude, bits), bits((1 << (bits.width - 1)) - 1)
+        ),
+        builder.and_(builder.bitcast(sign, bits), sign_bit),
+    )
+    return builder.bitcast(combined, magnitude.type)
+
+
+@lower(math.fmod, types.Float, types.Float)
+def lower_fmod(context, builder, sig, args):
+    """Lower ``math.fmod``: the remainder with the sign of the dividend.
+
+    Parameters
+    ----------
+    context : VulkanTargetContext
+        The target context.
+    builder : llvmlite.ir.IRBuilder
+        Builder positioned where the code is emitted.
+    sig : numba.core.typing.Signature
+        Signature the call was typed with.
+    args : sequence of llvmlite.ir.Value
+        Argument values, in the types of ``sig.args``.
+
+    Returns
+    -------
+    llvmlite.ir.Value
+        The remainder, as a value of the return type.
+    """
+    vals = [
+        context.cast(builder, a, t, sig.return_type) for a, t in zip(args, sig.args)
+    ]
+    return builder.frem(*vals)
 
 
 def _power_by_squaring(builder, base, exponent, one, mul):

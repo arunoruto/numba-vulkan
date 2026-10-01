@@ -6,6 +6,7 @@ import llvmlite.binding as llvm
 from numba.core import datamodel, itanium_mangler, typing
 from numba.core.base import BaseContext, _wrap_impl
 from numba.core.callconv import MinimalCallConv
+from numba.core.compiler import Flags
 from numba.core.descriptors import TargetDescriptor
 from numba.core.dispatcher import Dispatcher
 from numba.core.options import TargetOptions
@@ -160,8 +161,11 @@ class VulkanTargetContext(BaseContext):
         )
         from numba.np import arrayobj  # noqa: F401
 
-        from numba_vulkan import mathimpl, vkimpl
+        from numba.np import npyimpl
 
+        from numba_vulkan import mathfuncs, mathimpl, vkimpl  # noqa: F401
+
+        self.install_registry(npyimpl.registry)
         self.install_registry(vkimpl.registry)
         self.install_registry(mathimpl.registry)
 
@@ -195,6 +199,58 @@ class VulkanTargetContext(BaseContext):
         if impl is not None:
             return _wrap_impl(impl, self, sig)
         return super().get_function(fn, sig, _firstcall)
+
+    def _compile_subroutine_no_cache(self, builder, impl, sig, locals=None, flags=None):
+        """Compile a Python helper used by a lowering implementation.
+
+        Numba's default flags select the Python error model, which adds a
+        zero-division check and an early exit to every division. Shaders
+        cannot raise, and the extra exits produce control flow that LLVM's
+        SPIR-V structurizer mishandles, so the NumPy error model is used.
+
+        Parameters
+        ----------
+        builder : llvmlite.ir.IRBuilder
+            Builder of the calling function.
+        impl : function
+            The Python helper.
+        sig : numba.core.typing.Signature
+            Signature to compile it for.
+        locals : dict, optional
+            Type annotations for local variables.
+        flags : numba.core.compiler.Flags, optional
+            Compiler flags; defaults suited to this target when omitted.
+
+        Returns
+        -------
+        numba.core.compiler.CompileResult
+        """
+        if flags is None:
+            flags = Flags()
+            flags.error_model = "numpy"
+        return super()._compile_subroutine_no_cache(builder, impl, sig, locals, flags)
+
+    def get_ufunc_info(self, ufunc_key):
+        """Look up how a NumPy ufunc is lowered.
+
+        Parameters
+        ----------
+        ufunc_key : numpy.ufunc
+            The ufunc.
+
+        Returns
+        -------
+        dict
+            Loop signature to implementation; see `numba_vulkan.ufuncs`.
+
+        Raises
+        ------
+        KeyError
+            If the ufunc is not supported on Vulkan.
+        """
+        from numba_vulkan import ufuncs
+
+        return ufuncs.get_ufunc_info(ufunc_key)
 
     def make_constant_array(self, builder, aryty, arr):
         """Reject NumPy arrays used as global constants.

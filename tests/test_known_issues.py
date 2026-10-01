@@ -52,41 +52,6 @@ def _(x, out):
         out[i] = math.sin(x[i])
 
 
-@known_issue("KI-02 NumPy ufunc on a scalar (np.sqrt)", XF, np.sqrt)
-def _(x, out):
-    i = nv.global_id(0)
-    if i < x.size:
-        out[i] = np.sqrt(x[i])
-
-
-@known_issue("KI-03 math.hypot", XF, lambda x: np.hypot(x, 2))
-def _(x, out):
-    i = nv.global_id(0)
-    if i < x.size:
-        out[i] = math.hypot(x[i], f32(2.0))
-
-
-@known_issue("KI-03 math.log1p", XF, np.log1p)
-def _(x, out):
-    i = nv.global_id(0)
-    if i < x.size:
-        out[i] = math.log1p(x[i])
-
-
-@known_issue("KI-03 math.erf", XF, lambda x: np.array([math.erf(v) for v in x]))
-def _(x, out):
-    i = nv.global_id(0)
-    if i < x.size:
-        out[i] = math.erf(x[i])
-
-
-@known_issue("KI-03 math.isfinite", XF, np.ones_like)
-def _(x, out):
-    i = nv.global_id(0)
-    if i < x.size:
-        out[i] = 1.0 if math.isfinite(x[i]) else 0.0
-
-
 @known_issue("KI-04 slicing", XF, lambda x: np.append(x[1:], 0))
 def _(x, out):
     i = nv.global_id(0)
@@ -127,14 +92,6 @@ def _(x, out):
         out[i] = x[i] + TABLE[i % 4]
 
 
-@known_issue("KI-07 complex numbers", XF, lambda x: x * x)
-def _(x, out):
-    i = nv.global_id(0)
-    if i < x.size:
-        z = complex(x[i], x[i])
-        out[i] = (z * z).imag / 2
-
-
 @known_issue("KI-08 print()", XF, lambda x: x)
 def _(x, out):
     i = nv.global_id(0)
@@ -150,7 +107,9 @@ def _(x, out):
         out[i] = x[i]
 
 
-@known_issue("KI-09 non-contiguous array", np.arange(2 * N, dtype=f32)[::2], lambda x: x)
+@known_issue(
+    "KI-09 non-contiguous array", np.arange(2 * N, dtype=f32)[::2], lambda x: x
+)
 def _(x, out):
     i = nv.global_id(0)
     if i < x.size:
@@ -177,5 +136,18 @@ def test_known_issue(issue):
     want = expected(x)
     if x.dtype.names is None:
         np.testing.assert_allclose(
-            out.astype(np.float64), np.asarray(want, dtype=np.float64), rtol=2e-3, atol=1e-5
+            out.astype(np.float64),
+            np.asarray(want, dtype=np.float64),
+            rtol=2e-3,
+            atol=1e-5,
         )
+
+
+@pytest.mark.xfail(strict=True, reason="KI-24 in docs/source/known_issues.md")
+def test_known_issue_deeply_nested_control_flow():
+    # One of the random programs that still fails to compile: a return
+    # and a break inside nested loops and conditionals.
+    from fuzz_control_flow import run as run_program
+
+    failure, source = run_program(42, [nv.get_device().info.index])
+    assert failure is None, failure
