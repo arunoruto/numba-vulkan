@@ -279,6 +279,7 @@ def compile_kernel(cres, ndim, exact=True):
     numthreads = ",".join(map(str, local))
     text += f'\nattributes #0 = {{ "hlsl.numthreads"="{numthreads}" "hlsl.shader"="compute" }}\n'
     library.add_ir_module(text)
+    library.first_constant_binding = 1 + len(argtypes)
     library.finalize()
 
     spirv = library.get_spirv(exact)
@@ -291,4 +292,5 @@ def compile_kernel(cres, ndim, exact=True):
         local_size=local,
         capabilities=spirv_capabilities(spirv),
         written_bindings=set(library.written_bindings),
+        constants=dict(library.constants),
     )

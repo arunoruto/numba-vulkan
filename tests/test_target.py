@@ -227,17 +227,3 @@ def test_recursion_is_rejected():
 
     with pytest.raises(nv.VulkanUnsupportedError, match="recursive"):
         kernel.forall(4)(np.zeros(4, dtype=np.int64))
-
-
-LOOKUP = np.arange(4, dtype=np.float32)
-
-
-def test_global_arrays_are_rejected_with_a_hint():
-    @nv.jit
-    def kernel(out):
-        i = nv.global_id(0)
-        if i < out.shape[0]:
-            out[i] = LOOKUP[i % 4]
-
-    with pytest.raises(errors.NumbaError, match="pass the array as an argument"):
-        kernel.forall(4)(np.zeros(4, dtype=np.float32))

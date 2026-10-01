@@ -270,7 +270,7 @@ class Device:
         """
         key = id(kernel)
         if key in self._pipelines:
-            return self._pipelines[key][:3]
+            return self._pipelines[key][:4]
         self.check_support(kernel)
         dev = self.handle
         module = vk.vkCreateShaderModule(
@@ -353,10 +353,17 @@ class Device:
             ),
         )[0]
         # The kernel is kept alive alongside its pipeline so id() stays unique.
+        # Constant arrays are uploaded once and live as long as the pipeline.
+        constants = []
+        for binding in sorted(kernel.constants):
+            data = kernel.constants[binding].reshape(-1).view(np.uint8)
+            buffer = self._acquire(max(data.size, 4), host=False)
+            self._upload(buffer, data)
+            constants.append((buffer, max(data.size, 4)))
         self._pipelines[key] = (
-            pipeline, layout, desc_set, set_layout, pool, module, kernel
+            pipeline, layout, desc_set, constants, set_layout, pool, module, kernel
         )  # fmt: skip
-        return pipeline, layout, desc_set
+        return pipeline, layout, desc_set, constants
 
     # -- buffers ---------------------------------------------------------
 
@@ -594,7 +601,7 @@ class Device:
             If a device array belongs to another device.
         """
         dev = self.handle
-        pipeline, layout, desc_set = self._pipeline(kernel)
+        pipeline, layout, desc_set, constants = self._pipeline(kernel)
         buffers, transient = [], []
         try:
             for array in arrays:
@@ -610,6 +617,7 @@ class Device:
                 transient.append(buffer)
                 buffers.append((buffer, max(array.nbytes, 4)))
                 self._upload(buffer, array.reshape(-1).view(np.uint8))
+            buffers += constants
 
             writes = [
                 vk.VkWriteDescriptorSet(

@@ -3,7 +3,8 @@
 from functools import cached_property
 
 import llvmlite.binding as llvm
-from numba.core import datamodel, itanium_mangler, typing
+import numpy as np
+from numba.core import cgutils, datamodel, itanium_mangler, types, typing
 from numba.core.base import BaseContext, _wrap_impl
 from numba.core.callconv import MinimalCallConv, _MinimalCallHelper
 from numba.core.compiler import Flags
@@ -11,10 +12,13 @@ from numba.core.descriptors import TargetDescriptor
 from numba.core.dispatcher import Dispatcher
 from numba.core.options import TargetOptions
 from numba.core.target_extension import GPU, target_registry
+from numba.np import numpy_support
 
 from numba_vulkan import codegen
+from numba_vulkan.buffers import constant_binding
 from numba_vulkan.errors import VulkanUnsupportedError
 from numba_vulkan.models import vulkan_data_manager
+from numba_vulkan.vktypes import VulkanArray
 
 TARGET_NAME = "vulkan"
 
@@ -75,6 +79,15 @@ class VulkanTypingContext(typing.BaseContext):
                 disp = VulkanDispatcher(val.py_func)
                 val.__vulkan_dispatcher = disp
                 val = disp
+        # A NumPy array becomes a read-only array in a buffer of its own.
+        if isinstance(val, np.ndarray):
+            return VulkanArray(
+                numpy_support.from_dtype(val.dtype),
+                val.ndim,
+                "C",
+                constant_binding(val),
+                readonly=True,
+            )
         return super().resolve_value_type(val)
 
 
@@ -295,29 +308,41 @@ class VulkanTargetContext(BaseContext):
         return ufuncs.get_ufunc_info(ufunc_key)
 
     def make_constant_array(self, builder, aryty, arr):
-        """Reject NumPy arrays used as global constants.
+        """Build the value of a NumPy array used as a global constant.
 
-        Numba would emit the data as an LLVM global and index it through a
-        pointer, which the SPIR-V backend cannot translate.
+        The data is not emitted into the shader. The array's type names a
+        buffer that the runtime fills once per kernel (see
+        `numba_vulkan.buffers.constant_binding`); the value built here is
+        the metadata that goes with it.
 
         Parameters
         ----------
         builder : llvmlite.ir.IRBuilder
             Builder positioned where the code is emitted.
-        aryty : numba.types.Array
+        aryty : VulkanArray
             Type of the array.
         arr : numpy.ndarray
             The array.
 
-        Raises
-        ------
-        VulkanUnsupportedError
-            Always.
+        Returns
+        -------
+        llvmlite.ir.Value
         """
-        raise VulkanUnsupportedError(
-            "global NumPy arrays cannot be used inside Vulkan kernels yet; "
-            "pass the array as an argument instead"
-        )
+        from numba_vulkan.vkimpl import buffer_element_type
+
+        intp = self.get_value_type(types.intp)
+        itemsize = self.get_abi_sizeof(buffer_element_type(self, aryty.dtype))
+        strides, step = [], itemsize
+        for extent in reversed(arr.shape):
+            strides.insert(0, step)
+            step *= extent
+        proxy = cgutils.create_struct_proxy(aryty)(self, builder)
+        proxy.nitems = intp(arr.size)
+        proxy.itemsize = intp(itemsize)
+        proxy.shape = cgutils.pack_array(builder, [intp(n) for n in arr.shape], ty=intp)
+        proxy.strides = cgutils.pack_array(builder, [intp(n) for n in strides], ty=intp)
+        proxy.offset = intp(0)
+        return proxy._getvalue()
 
     def codegen(self):
         """The code generator of this context.

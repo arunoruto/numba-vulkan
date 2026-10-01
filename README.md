@@ -333,7 +333,6 @@ ones most likely to bite:
 | --- | --- | --- |
 | KI-01 | float64 `math.sin(x)`, `x ** 2.5`... need libclc, which a source checkout lacks | install a wheel, or set `NUMBA_VULKAN_LIBCLC` |
 | KI-04 | nothing that creates an array: `a * 2`, `a[mask]`, `np.zeros`, `axis=` reductions | work on elements and views |
-| KI-06 | global NumPy arrays cannot be used in kernels | pass them as arguments |
 | KI-10 | no bounds checks unless asked for; integer division by zero is not reported | `@nv.jit(boundscheck=True)` while debugging |
 | KI-17 | most kernels need the optional float64/int64/int8 device features | none yet |
 

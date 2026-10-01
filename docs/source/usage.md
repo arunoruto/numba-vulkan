@@ -70,6 +70,23 @@ iteration (also with `enumerate` and `zip`), `sum`, `prod`, `mean`, `min`,
 two 1-d arrays. Whatever would create a new array (`a * 2`, `a[mask]`,
 `np.zeros`) is not available; see {doc}`limitations`.
 
+NumPy arrays defined outside a kernel can be used inside it, and inside
+functions it calls, as read-only lookup tables:
+
+```python
+WEIGHTS = np.array([0.25, 0.5, 0.25], dtype=np.float32)
+
+@nv.jit
+def smooth(x, out):
+    i = nv.global_id(0)
+    if 0 < i < x.shape[0] - 1:
+        out[i] = np.dot(x[i - 1 : i + 2], WEIGHTS)
+```
+
+As in Numba on the CPU, the values are frozen when the kernel is first
+compiled; later changes to the array are not seen. The data is uploaded to
+the device once, not on every call.
+
 A reduction is a loop inside one invocation. `a[i].sum()` in a kernel over
 rows is the intended use; `a.sum()` in every invocation repeats the whole
 sum each time.
