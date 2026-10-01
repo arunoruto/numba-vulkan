@@ -51,9 +51,9 @@ Devices without `float64`, `int64` or `int8`
   raises {py:class}`~numba_vulkan.errors.VulkanSupportError`.
 
 Data transfer
-: Every call copies all arguments to the device and all written arrays back.
-  There are no device arrays yet, which dominates the run time of
-  memory-bound kernels (see {doc}`benchmarks`).
+: NumPy arguments are copied to the device on every call, and written ones
+  back. Use device arrays to keep data on the device (see {doc}`usage`);
+  they support transfers only, no indexing or arithmetic from Python.
 
 Workgroup size
 : The workgroup size is fixed per grid dimensionality (64, 8×8 or 4×4×4).

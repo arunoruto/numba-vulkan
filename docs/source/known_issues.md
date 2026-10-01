@@ -13,10 +13,10 @@ the entry is removed from this page.
 uv run pytest tests/test_known_issues.py -rxX
 ```
 
-Numbers are not reused: KI-02, KI-03, KI-07 and KI-24 (NumPy functions on
-scalars, missing `math` functions, complex numbers, nested loop exits that
-failed to compile) have been fixed, and KI-01 no longer applies when libclc
-is installed.
+Numbers are not reused: KI-02, KI-03, KI-07, KI-13 and KI-24 (NumPy
+functions on scalars, missing `math` functions, complex numbers, all data
+copied on every call, nested loop exits that failed to compile) have been
+fixed, and KI-01 no longer applies when libclc is installed.
 
 ## Language and library coverage
 
@@ -158,16 +158,22 @@ generated module would be worth having.
 
 ## Performance
 
-### KI-13: all data is copied on every call
+### KI-28: launches are synchronous and cost about 0.4 ms
 
-Each call creates new buffers, uploads every argument and reads back every
-array the kernel writes to. This dominates memory-bound kernels (see
-{doc}`benchmarks`).
+Every launch waits for the kernel to finish, and takes about 0.4 ms even
+for a tiny kernel on device arrays (numba-cuda: about 0.2 ms). Most of it is spent in the Python Vulkan bindings: scalars and
+array shapes are uploaded as small buffers and the descriptor set is
+rewritten on each call.
 
-**Fix:** a device array type that owns a buffer and can be passed to
-kernels, plus buffer reuse in `runtime.Device.run`. Buffers currently use
-host-visible memory; device-local memory with staging copies would be
-faster on discrete GPUs.
+**Fix:** pass scalars and shapes as push constants, keep descriptor sets
+per argument combination, and offer an asynchronous launch that returns a
+handle to wait on.
+
+### KI-29: device arrays are bare buffers
+
+A `DeviceArray` can be created, passed to kernels and copied; it has no
+indexing, slicing, views or arithmetic, and no `__cuda_array_interface__`
+equivalent for sharing memory with other libraries.
 
 ### KI-14: compilation is slow and not cached
 

@@ -10,9 +10,11 @@ unchanged for every backend, plus a thin per-backend driver.
 | `option` | Black-Scholes call price: `log`, `exp`, `sqrt` per element |
 | `saxpy` | memory-bound: one multiply-add per element |
 
-Timings are wall-clock for a complete call with NumPy arrays as arguments,
-so GPU numbers **include copying data to and from the device**. "First call"
-includes compilation.
+Timings are wall-clock for a complete call. Each GPU backend appears twice:
+with NumPy arrays as arguments, which **includes copying data to and from
+the device**, and with device arrays, which leaves the kernel and the launch
+overhead. "First call" includes compilation, except in the device-array
+rows, which reuse the kernels compiled for the rows above.
 
 ## Results
 
@@ -22,10 +24,18 @@ includes compilation.
 ## Reading the numbers
 
 - On the compute-bound workload, Vulkan beats the parallel CPU on both GPUs
-  and is roughly 1.5x slower than CUDA on the same card.
-- On the memory-bound workload every GPU backend, CUDA included, loses to a
-  single CPU thread: the time goes into copying arrays. numba-vulkan copies
-  all arguments on every call and has no device arrays yet.
+  and is within about 20 % of CUDA on the same card.
+- With NumPy arguments, the memory-bound workload is slower on every GPU
+  backend than on a single CPU thread: the time goes into copying arrays.
+  Vulkan copies somewhat faster than CUDA here, because it maps buffers
+  that are kept from call to call.
+- With device arrays nothing is copied. `saxpy` over 4 million elements
+  then takes about 0.5 ms on the discrete GPU, several times faster than
+  the CPU. CUDA is two to three times faster still on such short kernels:
+  a Vulkan launch costs about 0.4 ms and waits for the kernel to finish
+  (KI-28 in {doc}`known_issues`).
+- The integrated GPU and llvmpipe share memory with the CPU and gain less
+  from device arrays; `saxpy` is limited by memory bandwidth there.
 - Compiling a Vulkan kernel takes 0.5 to 0.9 s, several times longer than
   CUDA. The time goes into starting the child process that runs LLVM's
   SPIR-V backend and, for kernels that call math functions, into linking

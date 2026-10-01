@@ -5,6 +5,7 @@ import functools
 import numpy as np
 from numba import typeof
 from numba.core import types, typing, utils
+from numba.np import numpy_support
 from numba.core.target_extension import (
     dispatcher_registry,
     jit_registry,
@@ -316,12 +317,14 @@ class VulkanDispatcher:
         device : int, str or None
             Device to run on.
         args : tuple
-            Kernel arguments: C-contiguous NumPy arrays and scalars.
+            Kernel arguments: C-contiguous NumPy arrays, device arrays and
+            scalars.
 
         Raises
         ------
         ValueError
-            If an array is not C-contiguous.
+            If an array is not C-contiguous, or if a device array is on
+            another device.
         VulkanSupportError
             If the device lacks a capability the kernel needs.
 
@@ -332,7 +335,12 @@ class VulkanDispatcher:
         """
         argtypes, hosts, shapes, staged = [], [], [], []
         for arg in args:
-            if isinstance(arg, np.ndarray):
+            if isinstance(arg, runtime.DeviceArray):
+                dtype = numpy_support.from_dtype(arg.dtype)
+                argtypes.append(types.Array(dtype, arg.ndim, "C"))
+                shapes.extend(arg.shape)
+                hosts.append(arg)
+            elif isinstance(arg, np.ndarray):
                 if not arg.flags.c_contiguous:
                     raise ValueError("only C-contiguous arrays are supported")
                 argtypes.append(typeof(arg).copy(readonly=False))
