@@ -1,0 +1,488 @@
+"""Rewrites of LLVM IR that the SPIR-V backend cannot translate for shaders.
+
+LLVM's SPIR-V backend aborts on, or miscompiles, a number of constructs
+that ordinary optimised code contains. Each function here replaces one of
+them by an equivalent the backend handles. They work on textual IR and run
+after LLVM's passes, because the optimiser would otherwise recreate the
+original forms (it recognises a hand-written ``copysign`` or NaN test and
+emits the intrinsic or comparison again).
+
+Most of these constructs come from libclc, whose ``clspv`` build expects
+the clspv compiler to legalise them.
+"""
+
+import re
+
+_NAME = r'%(?:"[^"]+"|[-a-zA-Z$._0-9]+)'
+# Parameter and return attributes, such as ``noundef`` or ``range(i32 0, 33)``.
+_ATTRS = r"(?:[a-z_]+(?:\([^)]*\))? )*"
+_COUNTER = iter(range(1 << 62))
+
+_SREM = re.compile(r"^(\s*)(%\S+) = srem (\S+) ([^,]+), (.+)$", re.MULTILINE)
+_FCMP_ORDERING = re.compile(
+    r"^(\s*)(%\S+) = fcmp (?:[a-z]+ )*?(uno|ord) (float|double) ([^,]+), (.+)$",
+    re.MULTILINE,
+)
+_COPYSIGN = re.compile(
+    rf"^(\s*)(%\S+) = (?:tail )?call {_ATTRS}(float|double) @llvm\.copysign\.f(?:32|64)"
+    rf"\((?:float|double) {_ATTRS}([^,]+), (?:float|double) {_ATTRS}([^)]+)\).*$",
+    re.MULTILINE,
+)
+_FMULADD = re.compile(
+    rf"^(\s*)(%\S+) = (?:tail )?call {_ATTRS}(float|double) @llvm\.fmuladd\.f(?:32|64)"
+    rf"\((?:float|double) {_ATTRS}([^,]+), (?:float|double) {_ATTRS}([^,]+), "
+    rf"(?:float|double) {_ATTRS}([^)]+)\).*$",
+    re.MULTILINE,
+)
+_CTLZ = re.compile(
+    rf"^(\s*)(%\S+) = (?:tail )?call {_ATTRS}i(32|64) @llvm\.ctlz\.i(?:32|64)"
+    rf"\(i(?:32|64) {_ATTRS}([^,]+), i1 (?:true|false)\).*$",
+    re.MULTILINE,
+)
+_FSHL = re.compile(
+    rf"^(\s*)(%\S+) = (?:tail )?call {_ATTRS}i(32|64) @llvm\.fsh(l|r)\.i(?:32|64)"
+    rf"\(i(?:32|64) {_ATTRS}([^,]+), i(?:32|64) {_ATTRS}([^,]+), i(?:32|64) {_ATTRS}([^)]+)\).*$",
+    re.MULTILINE,
+)
+_MUL_HI = re.compile(
+    rf"^(\s*)(%\S+) = (?:tail )?call {_ATTRS}i32 @_Z12__clc_mul_hi(jj|ii)"
+    rf"\(i32 {_ATTRS}([^,]+), i32 {_ATTRS}([^)]+)\).*$",
+    re.MULTILINE,
+)
+_MUL_HI_DECLARATION = re.compile(
+    r"^declare [^\n]*@_Z12__clc_mul_hi(?:jj|ii)\([^\n]*\n", re.MULTILINE
+)
+_ZERO = r"-?0\.0+e\+00"
+_FCMP_ZERO = re.compile(
+    rf"^(\s*)(%\S+) = fcmp (olt|ult|ogt|ugt) (float|double) "
+    rf"(?:({_ZERO}), ([^,\n]+)|([^,\n]+), ({_ZERO}))$",
+    re.MULTILINE,
+)
+_COMPLEMENT = {"olt": "uge", "ult": "oge", "ogt": "ule", "ugt": "ole"}
+_BYTE_TABLE = re.compile(r"^@(\S+) = [^\n]*constant \[(\d+) x i8\]", re.MULTILINE)
+_BYTE_GEP = re.compile(
+    rf"^\s*({_NAME}) = getelementptr (?:inbounds )?(?:nuw )?i8, ptr (addrspace\(\d+\) )?"
+    rf"(@\S+|{_NAME}), i64 (\S+)$"
+)
+_INT_LOAD = re.compile(
+    rf"^(\s*)({_NAME}) = load i(8|16|32|64), ptr (addrspace\(\d+\) )?({_NAME})(?:,.*)?$"
+)
+
+_FLOAT_BITS = {
+    "float": ("i32", 0xFF << 23, (1 << 31) - 1, 32),
+    "double": ("i64", 0x7FF << 52, (1 << 63) - 1, 64),
+}
+
+
+def expand_srem(text):
+    """Rewrite ``srem`` instructions as ``a - (a / b) * b``.
+
+    OpSRem returns wrong results for negative 64-bit operands on NVIDIA's
+    driver, so signed remainders are derived from the quotient instead.
+
+    Parameters
+    ----------
+    text : str
+        Textual LLVM IR.
+
+    Returns
+    -------
+    str
+        The rewritten LLVM IR.
+    """
+
+    def repl(match):
+        """Replacement text for one match."""
+        indent, res, ty, lhs, rhs = match.groups()
+        n = next(_COUNTER)
+        return (
+            f"{indent}%srem.q{n} = sdiv {ty} {lhs}, {rhs}\n"
+            f"{indent}%srem.m{n} = mul {ty} %srem.q{n}, {rhs}\n"
+            f"{indent}{res} = sub {ty} {lhs}, %srem.m{n}"
+        )
+
+    return _SREM.sub(repl, text)
+
+
+def expand_fcmp_ordering(text):
+    """Rewrite ``fcmp uno`` and ``fcmp ord`` as tests on the bit pattern.
+
+    The SPIR-V backend emits OpUnordered and OpOrdered for them, which only
+    OpenCL-flavoured SPIR-V may use. Numba's own number and ufunc
+    implementations produce these comparisons when they check for NaN.
+
+    Parameters
+    ----------
+    text : str
+        Textual LLVM IR.
+
+    Returns
+    -------
+    str
+        The rewritten LLVM IR.
+    """
+
+    def repl(match):
+        """Replacement text for one match."""
+        indent, res, pred, ty, lhs, rhs = match.groups()
+        bits, exponent, mask, _ = _FLOAT_BITS[ty]
+        code, flags = [], []
+        for operand in (lhs, rhs):
+            if not operand.startswith("%"):
+                continue  # a finite constant is never NaN
+            n = next(_COUNTER)
+            code += [
+                f"{indent}%nan.b{n} = bitcast {ty} {operand} to {bits}",
+                f"{indent}%nan.m{n} = and {bits} %nan.b{n}, {mask}",
+                f"{indent}%nan.f{n} = icmp ugt {bits} %nan.m{n}, {exponent}",
+            ]
+            flags.append(f"%nan.f{n}")
+        if not flags:
+            unordered = "false"
+        elif len(flags) == 1 or flags[0] == flags[1]:
+            unordered = flags[0]
+        else:
+            n = next(_COUNTER)
+            code.append(f"{indent}%nan.o{n} = or i1 {flags[0]}, {flags[1]}")
+            unordered = f"%nan.o{n}"
+        if pred == "uno":
+            code.append(f"{indent}{res} = or i1 {unordered}, false")
+        else:
+            code.append(f"{indent}{res} = xor i1 {unordered}, true")
+        return "\n".join(code)
+
+    return _FCMP_ORDERING.sub(repl, text)
+
+
+def expand_copysign(text):
+    """Rewrite calls to ``llvm.copysign`` as operations on the bit pattern.
+
+    The SPIR-V backend cannot select the intrinsic, and instcombine
+    introduces it even where the source spelled out the bit operations.
+
+    Parameters
+    ----------
+    text : str
+        Textual LLVM IR.
+
+    Returns
+    -------
+    str
+        The rewritten LLVM IR.
+    """
+
+    def repl(match):
+        """Replacement text for one match."""
+        indent, res, ty, magnitude, sign = match.groups()
+        bits, _, _, width = _FLOAT_BITS[ty]
+        n = next(_COUNTER)
+        return "\n".join(
+            [
+                f"{indent}%cs.m{n} = bitcast {ty} {magnitude} to {bits}",
+                f"{indent}%cs.s{n} = bitcast {ty} {sign} to {bits}",
+                f"{indent}%cs.a{n} = and {bits} %cs.m{n}, {(1 << (width - 1)) - 1}",
+                f"{indent}%cs.b{n} = and {bits} %cs.s{n}, {-(1 << (width - 1))}",
+                f"{indent}%cs.o{n} = or {bits} %cs.a{n}, %cs.b{n}",
+                f"{indent}{res} = bitcast {bits} %cs.o{n} to {ty}",
+            ]
+        )
+
+    return _COPYSIGN.sub(repl, text)
+
+
+def expand_fmuladd(text):
+    """Rewrite ``llvm.fmuladd`` as a multiplication and an addition.
+
+    The intrinsic means "multiply and add, fused or not", and the SPIR-V
+    backend fails on it. libclc uses it throughout.
+
+    Parameters
+    ----------
+    text : str
+        Textual LLVM IR.
+
+    Returns
+    -------
+    str
+        The rewritten LLVM IR.
+    """
+
+    def repl(match):
+        """Replacement text for one match."""
+        indent, res, ty, a, b, c = match.groups()
+        n = next(_COUNTER)
+        return f"{indent}%fma.m{n} = fmul {ty} {a}, {b}\n{indent}{res} = fadd {ty} %fma.m{n}, {c}"
+
+    return _FMULADD.sub(repl, text)
+
+
+def expand_ctlz(text):
+    """Rewrite ``llvm.ctlz`` as a binary search for the highest set bit.
+
+    The backend cannot legalise the intrinsic. The result for zero is the
+    bit width, as LLVM defines it.
+
+    Parameters
+    ----------
+    text : str
+        Textual LLVM IR.
+
+    Returns
+    -------
+    str
+        The rewritten LLVM IR.
+    """
+
+    def repl(match):
+        """Replacement text for one match."""
+        indent, res, width, value = match.groups()
+        n, ty, width = next(_COUNTER), f"i{match.group(3)}", int(match.group(3))
+        code, current, position, shift, step = [], value, "0", width // 2, 0
+        while shift:
+            p = f"%clz{n}.{step}"
+            code += [
+                f"{indent}{p}.t = lshr {ty} {current}, {shift}",
+                f"{indent}{p}.c = icmp ne {ty} {p}.t, 0",
+                f"{indent}{p}.v = select i1 {p}.c, {ty} {p}.t, {ty} {current}",
+                f"{indent}{p}.s = select i1 {p}.c, {ty} {shift}, {ty} 0",
+                f"{indent}{p}.p = add {ty} {position}, {p}.s",
+            ]
+            current, position, shift, step = f"{p}.v", f"{p}.p", shift // 2, step + 1
+        code += [
+            f"{indent}%clz{n}.n = sub {ty} {width - 1}, {position}",
+            f"{indent}%clz{n}.z = icmp eq {ty} {value}, 0",
+            f"{indent}{res} = select i1 %clz{n}.z, {ty} {width}, {ty} %clz{n}.n",
+        ]
+        return "\n".join(code)
+
+    return _CTLZ.sub(repl, text)
+
+
+def expand_funnel_shift(text):
+    """Rewrite ``llvm.fshl`` and ``llvm.fshr`` as shifts and an ``or``.
+
+    Parameters
+    ----------
+    text : str
+        Textual LLVM IR.
+
+    Returns
+    -------
+    str
+        The rewritten LLVM IR.
+    """
+
+    def repl(match):
+        """Replacement text for one match."""
+        indent, res, width, direction, high, low, amount = match.groups()
+        n, ty, width = next(_COUNTER), f"i{width}", int(width)
+        p = f"%fsh{n}"
+        # fshl keeps the high bits of (high:low) << amount, fshr the low bits
+        # of (high:low) >> amount; an amount of zero must not shift by width.
+        first, second = ("shl", "lshr") if direction == "l" else ("lshr", "shl")
+        a, b = (high, low) if direction == "l" else (low, high)
+        return "\n".join(
+            [
+                f"{indent}{p}.a = and {ty} {amount}, {width - 1}",
+                f"{indent}{p}.r = sub {ty} {width}, {p}.a",
+                f"{indent}{p}.x = {first} {ty} {a}, {p}.a",
+                f"{indent}{p}.y = {second} {ty} {b}, {p}.r",
+                f"{indent}{p}.o = or {ty} {p}.x, {p}.y",
+                f"{indent}{p}.z = icmp eq {ty} {p}.a, 0",
+                f"{indent}{res} = select i1 {p}.z, {ty} {a}, {ty} {p}.o",
+            ]
+        )
+
+    return _FSHL.sub(repl, text)
+
+
+def expand_mul_hi(text):
+    """Rewrite libclc's 32-bit ``mul_hi`` helper as a 64-bit multiplication.
+
+    ``__clc_mul_hi`` returns the upper half of a product. libclc's clspv
+    build leaves it undefined, because the clspv compiler supplies it.
+
+    Parameters
+    ----------
+    text : str
+        Textual LLVM IR.
+
+    Returns
+    -------
+    str
+        The rewritten LLVM IR.
+    """
+
+    def repl(match):
+        """Replacement text for one match."""
+        indent, res, kind, a, b = match.groups()
+        n, extend = next(_COUNTER), "zext" if kind == "jj" else "sext"
+        shift = "lshr" if kind == "jj" else "ashr"
+        p = f"%mulhi{n}"
+        return "\n".join(
+            [
+                f"{indent}{p}.a = {extend} i32 {a} to i64",
+                f"{indent}{p}.b = {extend} i32 {b} to i64",
+                f"{indent}{p}.m = mul i64 {p}.a, {p}.b",
+                f"{indent}{p}.h = {shift} i64 {p}.m, 32",
+                f"{indent}{res} = trunc i64 {p}.h to i32",
+            ]
+        )
+
+    return _MUL_HI_DECLARATION.sub("", _MUL_HI.sub(repl, text))
+
+
+def avoid_faceforward(text):
+    """Rewrite strict comparisons with zero as negated complements.
+
+    The SPIR-V backend has a combine that turns
+    ``select(fcmp(a * b, 0), n, -n)`` into the GLSL ``faceforward``
+    function. For scalars it crashes or trips an internal assertion, and
+    the pattern is common: ``x = a * b`` followed by ``-y if x < 0 else y``,
+    which is also how ``copysign`` and rounding are usually written. The
+    combine only matches the four strict predicates, so ``x < 0`` is
+    emitted as ``not (x >= 0 or unordered)``, which is equivalent.
+
+    Parameters
+    ----------
+    text : str
+        Textual LLVM IR.
+
+    Returns
+    -------
+    str
+        The rewritten LLVM IR.
+    """
+
+    def repl(match):
+        """Replacement text for one match."""
+        indent, res, pred, ty = match.group(1, 2, 3, 4)
+        lhs, rhs = (
+            (match.group(5), match.group(6)) if match.group(5) else match.group(7, 8)
+        )
+        n = next(_COUNTER)
+        return (
+            f"{indent}%ff.c{n} = fcmp {_COMPLEMENT[pred]} {ty} {lhs}, {rhs}\n"
+            f"{indent}{res} = xor i1 %ff.c{n}, true"
+        )
+
+    return _FCMP_ZERO.sub(repl, text)
+
+
+def rename_minimumnum(text):
+    """Replace ``llvm.minimumnum``/``maximumnum`` by ``minnum``/``maxnum``.
+
+    The backend cannot legalise the newer intrinsics. They differ from the
+    older ones only in how signalling NaNs and signed zeros are ordered.
+
+    Parameters
+    ----------
+    text : str
+        Textual LLVM IR.
+
+    Returns
+    -------
+    str
+        The rewritten LLVM IR.
+    """
+    return text.replace("@llvm.minimumnum.", "@llvm.minnum.").replace(
+        "@llvm.maximumnum.", "@llvm.maxnum."
+    )
+
+
+def expand_byte_table_loads(text):
+    """Rewrite integer loads from byte tables as loads of single bytes.
+
+    libclc stores some constants as byte arrays and reads 32- or 64-bit
+    integers from arbitrary byte offsets. Shaders address memory by element,
+    not by byte, so such a load is assembled from the individual bytes
+    (little-endian), each reached through a structured ``getelementptr``.
+
+    Parameters
+    ----------
+    text : str
+        Textual LLVM IR.
+
+    Returns
+    -------
+    str
+        The rewritten LLVM IR.
+    """
+    tables = {f"@{name}": int(size) for name, size in _BYTE_TABLE.findall(text)}
+    if not tables:
+        return text
+    pointers, out = {}, []
+    for line in text.splitlines():
+        gep = _BYTE_GEP.match(line)
+        if gep:
+            name, space, base, offset = gep.groups()
+            if base in tables:
+                pointers[name] = (base, space or "", [offset])
+                continue
+            if base in pointers:
+                table, space, offsets = pointers[base]
+                pointers[name] = (table, space, offsets + [offset])
+                continue
+        load = _INT_LOAD.match(line)
+        if load and load.group(5) in pointers:
+            indent, res, width, _, pointer = load.groups()
+            table, space, offsets = pointers[pointer]
+            n, width, size = next(_COUNTER), int(width), tables[table]
+            p = f"%bt{n}"
+            position = offsets[0]
+            for i, term in enumerate(offsets[1:]):
+                out.append(f"{indent}{p}.o{i} = add i64 {position}, {term}")
+                position = f"{p}.o{i}"
+            value = None
+            for k in range(width // 8):
+                out += [
+                    f"{indent}{p}.i{k} = add i64 {position}, {k}",
+                    f"{indent}{p}.p{k} = getelementptr inbounds [{size} x i8], "
+                    f"ptr {space}{table}, i64 0, i64 {p}.i{k}",
+                    f"{indent}{p}.b{k} = load i8, ptr {space}{p}.p{k}",
+                ]
+                if width == 8:
+                    value = f"{p}.b{k}"
+                    break
+                out += [
+                    f"{indent}{p}.e{k} = zext i8 {p}.b{k} to i{width}",
+                    f"{indent}{p}.s{k} = shl i{width} {p}.e{k}, {8 * k}",
+                ]
+                if value is None:
+                    value = f"{p}.s{k}"
+                else:
+                    out.append(f"{indent}{p}.v{k} = or i{width} {value}, {p}.s{k}")
+                    value = f"{p}.v{k}"
+            out.append(f"{indent}{res} = or i{width} {value}, 0")
+            continue
+        out.append(line)
+    return "\n".join(out) + "\n"
+
+
+def legalize(text):
+    """Apply all rewrites.
+
+    Parameters
+    ----------
+    text : str
+        Textual LLVM IR after optimisation.
+
+    Returns
+    -------
+    str
+        IR that the SPIR-V backend can translate.
+    """
+    for rewrite in (
+        expand_srem,
+        expand_fcmp_ordering,
+        expand_copysign,
+        expand_fmuladd,
+        expand_ctlz,
+        expand_funnel_shift,
+        expand_mul_hi,
+        avoid_faceforward,
+        rename_minimumnum,
+        expand_byte_table_loads,
+    ):
+        text = rewrite(text)
+    return text

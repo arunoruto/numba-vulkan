@@ -15,9 +15,11 @@ src/numba_vulkan/
     mathimpl.py     lowering of the math module and integer powers
     mathfuncs.py    math functions written in Python (hypot, erf, gamma...)
     ufuncs.py       which implementation each NumPy ufunc loop uses
+    libclc.py       locating and calling libclc, the math library
     buffers.py      buffer access placeholders and their expansion
     compiler.py     Numba pipeline, kernel entry point
     codegen.py      code library: link, optimise, emit and check SPIR-V
+    legalize.py     rewrites of IR the SPIR-V backend cannot translate
     structurize.py  control-flow restructuring on LLVM IR text
     _emit.py        child process running LLVM's SPIR-V backend
     dispatcher.py   @nv.jit, VulkanDispatcher, forall
@@ -76,6 +78,7 @@ Useful environment variables:
 | --- | --- |
 | `NUMBA_VULKAN_VALIDATE=1` | run every shader through `spirv-val`; the test suite sets this |
 | `NUMBA_VULKAN_DEVICE=llvmpipe` | default device, by name substring or index |
+| `NUMBA_VULKAN_LIBCLC=/path/clspv--.bc` | where to find libclc; the devenv shell sets it |
 | `NUMBA_DUMP_IR=1`, `NUMBA_DUMP_LLVM=1` | Numba's own dumps of its IR and of unoptimised LLVM IR |
 
 Where a failure comes from tells you where to look:
@@ -92,32 +95,30 @@ Where a failure comes from tells you where to look:
 
 ## Adding a `math` function
 
-Functions that map to one LLVM intrinsic are a table entry in `mathimpl.py`:
-add them to `_F32_ONLY` if GLSL.std.450 lacks a `float64` version, to
-`_ANY_FLOAT` otherwise.
+Check libclc first: if it has the function, add it to the `_LIBCLC` table
+in `mathimpl.py` (and register a lowering, as the functions next to it do).
+It then works in both precisions. A function that makes LLVM's backend
+fail usually needs one more rewrite in `legalize.py`; see
+{doc}`math_library`.
 
-Functions that can be written in Python go into `mathfuncs.py`. A factory
-receives the float type and returns the implementation; all constants are
-created in that type, because a Python literal would promote the
-computation to `float64`:
+Functions that map to one LLVM intrinsic and are exact (like `sqrt`) are a
+table entry in `mathimpl.py`: `_F32_ONLY` if GLSL.std.450 lacks a `float64`
+version, `_ANY_FLOAT` otherwise.
+
+Fallbacks written in Python go into `mathfuncs.py`. A factory receives the
+float type and returns the implementation; all constants are created in
+that type, because a Python literal would promote the computation to
+`float64`:
 
 ```python
-def _log1p(ty):
+def _acosh(ty):
     one = ty(1)
 
-    def log1p(x):
-        u = one + x
-        if u == one:
-            return x
-        return math.log(u) * x / (u - one)
+    def acosh(x):
+        return math.log(x + math.sqrt(x * x - one))
 
-    return log1p
+    return acosh
 ```
-
-Register the factory in the `_UNARY` or `_BINARY` table of that module.
-
-Anything that needs raw LLVM instructions is a lowering function in
-`mathimpl.py`; `lower_copysign` and `_classify` are examples.
 
 To make the matching NumPy ufunc work as well, add it to the tables in
 `ufuncs.py`. Then add a case to `tests/test_math.py`.
@@ -163,8 +164,17 @@ instcombine re-creates what you avoided
 : Spelling out `copysign` as bit operations, or a NaN test as `x != x`, does
   not help: instcombine recognises the pattern and emits the intrinsic or
   comparison the backend cannot handle. Such things are rewritten on the IR
-  text *after* the passes have run (`codegen._expand_copysign`,
-  `codegen._expand_fcmp_ordering`).
+  text *after* the passes have run, in `legalize.py`.
+
+Never emit `select(a * b < 0, x, -x)` as is
+: LLVM's SPIR-V backend rewrites that shape into GLSL's `faceforward` and
+  crashes for scalars. `legalize.avoid_faceforward` hides the comparison;
+  do not remove it because it "looks redundant".
+
+Call libclc with its calling convention
+: libclc functions are `spir_func`. A call with the default convention is
+  undefined behaviour, which LLVM silently turns into unreachable code.
+  Always go through `libclc.call`.
 
 Helpers compiled by `compile_internal` need the NumPy error model
 : Numba's default adds a zero-division check, and an extra exit, to every

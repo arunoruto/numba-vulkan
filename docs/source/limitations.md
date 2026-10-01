@@ -27,11 +27,12 @@ are tracked in {doc}`known_issues`.
 
 ## What does not work
 
-64-bit transcendental functions
+`float64` math without libclc
 : Vulkan's math library (GLSL.std.450) defines `sin`, `cos`, `exp`, `log`,
-  `pow` and friends for 32-bit floats only. Calling them with `float64`
-  raises an error. `@nv.jit(narrow_math=True)` evaluates them in `float32`
-  instead. `sqrt`, `fabs`, `floor` and `ceil` work in both precisions.
+  `pow` and friends for 32-bit floats only. numba-vulkan takes the
+  double-precision versions from libclc (see {doc}`math_library`); if that
+  is not installed, calling them with `float64` raises an error, unless
+  `@nv.jit(narrow_math=True)` asks for `float32` precision.
 
 Slices, views and NumPy functions
 : Only full integer indexing is supported. Array slicing, array-valued
@@ -60,10 +61,11 @@ Workgroup size
 ## Differences between drivers
 
 Float arithmetic follows IEEE rules (shaders are compiled without
-reassociation or fused multiply-add), but library functions are not
-bit-identical across devices. In particular, `float32`
-`sin` on Intel's Mesa driver is only accurate to about 1e-4, against about
-1e-6 on NVIDIA and llvmpipe. `round()` of halfway values is wrong on
+reassociation or fused multiply-add), and math functions come from libclc,
+so results agree across devices to within the last digit. That no longer
+holds with `fastmath=True` or without libclc, when the drivers' own
+functions are used. In that case `float32` `sin` on Intel's Mesa driver is only
+accurate to about 1e-4, against about 1e-6 on NVIDIA and llvmpipe. `round()` of halfway values is wrong on
 llvmpipe.
 
 ## Tested hardware

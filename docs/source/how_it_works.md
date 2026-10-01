@@ -26,9 +26,9 @@ It follows the structure of Numba's CUDA target:
 | --- | --- | --- |
 | Target and contexts | {py:mod}`numba_vulkan.target` | typing context, target context, calling convention |
 | Types and data models | {py:mod}`numba_vulkan.vktypes`, {py:mod}`numba_vulkan.models` | the array type and its LLVM representation |
-| Typing and lowering | {py:mod}`numba_vulkan.vkdecl`, {py:mod}`numba_vulkan.vkimpl`, {py:mod}`numba_vulkan.mathimpl`, {py:mod}`numba_vulkan.mathfuncs`, {py:mod}`numba_vulkan.ufuncs` | `global_id`, array indexing, `math`, NumPy ufuncs |
+| Typing and lowering | {py:mod}`numba_vulkan.vkdecl`, {py:mod}`numba_vulkan.vkimpl`, {py:mod}`numba_vulkan.mathimpl`, {py:mod}`numba_vulkan.mathfuncs`, {py:mod}`numba_vulkan.ufuncs`, {py:mod}`numba_vulkan.libclc` | `global_id`, array indexing, `math`, NumPy ufuncs, the math library |
 | Pipeline | {py:mod}`numba_vulkan.compiler` | Numba compiler pipeline and the kernel entry point |
-| Code generation | {py:mod}`numba_vulkan.codegen`, {py:mod}`numba_vulkan.structurize`, {py:mod}`numba_vulkan.buffers` | linking, optimisation, control-flow restructuring, SPIR-V emission |
+| Code generation | {py:mod}`numba_vulkan.codegen`, {py:mod}`numba_vulkan.legalize`, {py:mod}`numba_vulkan.structurize`, {py:mod}`numba_vulkan.buffers` | linking, optimisation, IR rewrites, control-flow restructuring, SPIR-V emission |
 | Dispatcher | {py:mod}`numba_vulkan.dispatcher` | `@nv.jit`, `forall`, specialisation cache |
 | Runtime | {py:mod}`numba_vulkan.runtime` | devices, buffers, pipelines, dispatch |
 
@@ -147,5 +147,7 @@ Pipelines are cached per device and kernel specialisation.
 | The SPIR-V backend emits `OpUnordered`/`OpOrdered`, which shaders may not use | NaN comparisons are rewritten as tests on the bit pattern |
 | The SPIR-V backend cannot select `llvm.copysign`, and instcombine creates it from bit operations | calls are expanded after optimisation |
 | All tested drivers reassociate float arithmetic, e.g. `(1 + x) - 1` becomes `x` | every float operation is decorated `NoContraction` |
-| The `log` of GPU drivers is imprecise close to 1 | `log1p` and `expm1` use series for small arguments |
-| Vulkan has no math library beyond GLSL.std.450 | `hypot`, `log1p`, `erf`, `gamma`... are implemented in Python |
+| The `log` of GPU drivers is imprecise close to 1 | the fallback `log1p` and `expm1` use series for small arguments |
+| Vulkan has no math library beyond GLSL.std.450 | math functions are linked in from libclc; see {doc}`math_library` |
+| The SPIR-V backend mistakes `x = a * b; (x < 0) ? -y : y` for GLSL's `faceforward` and crashes | strict comparisons with zero are emitted as negated complements |
+| The SPIR-V backend cannot legalise `llvm.ctlz`, `llvm.fshl` and `llvm.minimumnum`, nor loads from byte tables | each is expanded on the IR text |

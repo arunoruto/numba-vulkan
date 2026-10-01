@@ -1,4 +1,8 @@
 inputs:
   nixpkgs:
     url: github:cachix/devenv-nixpkgs/rolling
+  # libclc was removed from current nixpkgs; this revision still builds it
+  # for LLVM 22, the version inside llvmlite.
+  nixpkgs-libclc:
+    url: github:NixOS/nixpkgs/7fc6f2c20af09cdcaf48b92ec3121860139ec668
 allow_unfree: true

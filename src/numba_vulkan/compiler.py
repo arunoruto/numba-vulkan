@@ -113,7 +113,7 @@ class VulkanCompiler(CompilerBase):
 
 
 @global_compiler_lock
-def compile_vulkan(pyfunc, return_type, args, narrow_math=False):
+def compile_vulkan(pyfunc, return_type, args, narrow_math=False, fast_math=False):
     """Run ``pyfunc`` through Numba's pipeline down to LLVM IR.
 
     Parameters
@@ -125,7 +125,10 @@ def compile_vulkan(pyfunc, return_type, args, narrow_math=False):
     args : tuple of numba.types.Type
         Argument types.
     narrow_math : bool
-        Compute float64 transcendental functions in float32.
+        Compute float64 transcendental functions in float32 when libclc is
+        not available.
+    fast_math : bool
+        Use the device's built-in float32 math functions instead of libclc.
 
     Returns
     -------
@@ -136,7 +139,9 @@ def compile_vulkan(pyfunc, return_type, args, narrow_math=False):
     flags.no_cpython_wrapper = True
     flags.no_cfunc_wrapper = True
     flags.error_model = "numpy"
-    targetctx = vulkan_target.target_context.subtarget(narrow_math=narrow_math)
+    targetctx = vulkan_target.target_context.subtarget(
+        narrow_math=narrow_math, fast_math=fast_math
+    )
     with target_override(TARGET_NAME):
         cres = compiler.compile_extra(
             typingctx=vulkan_target.typing_context,
@@ -201,7 +206,7 @@ def _load_argument(context, builder, index, ty, shape_offset):
 
 
 @global_compiler_lock
-def compile_kernel(cres, ndim):
+def compile_kernel(cres, ndim, exact=True):
     """Wrap a compiled function in a shader entry point and emit SPIR-V.
 
     Parameters
@@ -210,6 +215,9 @@ def compile_kernel(cres, ndim):
         The compiled kernel body; it must return ``None``.
     ndim : int
         Dimensionality of the dispatch grid (selects the workgroup size).
+    exact : bool
+        Whether drivers must keep float arithmetic as written; see
+        `numba_vulkan.codegen.mark_exact`.
 
     Returns
     -------
@@ -247,7 +255,7 @@ def compile_kernel(cres, ndim):
     library.add_ir_module(text)
     library.finalize()
 
-    spirv = library.get_spirv()
+    spirv = library.get_spirv(exact)
     return CompiledKernel(
         name=fndesc.qualname,
         spirv=spirv,

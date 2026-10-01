@@ -49,6 +49,7 @@ and {doc}`known_issues`.
 getting_started
 usage
 how_it_works
+math_library
 limitations
 known_issues
 benchmarks

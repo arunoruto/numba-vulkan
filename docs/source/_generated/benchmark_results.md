@@ -14,31 +14,31 @@
 
 | Backend | First call (ms) | Best (ms) | Speed-up | Agreement with CPU |
 | --- | ---: | ---: | ---: | --- |
-| numba cpu (1 thread) | 839.2 | 460.42 | 1.00x | 100.00% equal |
-| numba cpu (parallel) | 487.0 | 91.86 | 5.01x | 100.00% equal |
-| vulkan: NVIDIA TITAN X (Pascal) | 479.1 | 19.70 | 23.37x | 100.00% equal |
-| vulkan: Intel(R) UHD Graphics 630 (CFL GT2) | 484.9 | 51.24 | 8.99x | 100.00% equal |
-| vulkan: llvmpipe (LLVM 21.1.8, 256 bits) | 512.6 | 61.72 | 7.46x | 100.00% equal |
-| numba-cuda: NVIDIA TITAN X (Pascal) | 414.5 | 12.63 | 36.47x | 100.00% equal |
+| numba cpu (1 thread) | 787.6 | 462.46 | 1.00x | 100.00% equal |
+| numba cpu (parallel) | 488.9 | 90.37 | 5.12x | 100.00% equal |
+| vulkan: NVIDIA TITAN X (Pascal) | 506.7 | 22.89 | 20.20x | 100.00% equal |
+| vulkan: Intel(R) UHD Graphics 630 (CFL GT2) | 554.4 | 56.45 | 8.19x | 100.00% equal |
+| vulkan: llvmpipe (LLVM 21.1.8, 256 bits) | 656.9 | 71.61 | 6.46x | 100.00% equal |
+| numba-cuda: NVIDIA TITAN X (Pascal) | 301.0 | 14.16 | 32.66x | 100.00% equal |
 
 ### option (4,194,304 options)
 
 | Backend | First call (ms) | Best (ms) | Speed-up | Agreement with CPU |
 | --- | ---: | ---: | ---: | --- |
-| numba cpu (1 thread) | 326.6 | 106.84 | 1.00x | max err 0.0e+00 |
-| numba cpu (parallel) | 336.8 | 22.23 | 4.81x | max err 0.0e+00 |
-| vulkan: NVIDIA TITAN X (Pascal) | 459.8 | 29.01 | 3.68x | max err 3.4e-07 |
-| vulkan: Intel(R) UHD Graphics 630 (CFL GT2) | 461.2 | 28.92 | 3.69x | max err 3.4e-07 |
-| vulkan: llvmpipe (LLVM 21.1.8, 256 bits) | 495.4 | 25.49 | 4.19x | max err 3.4e-07 |
-| numba-cuda: NVIDIA TITAN X (Pascal) | 124.6 | 18.17 | 5.88x | max err 2.9e-07 |
+| numba cpu (1 thread) | 292.3 | 109.57 | 1.00x | max err 0.0e+00 |
+| numba cpu (parallel) | 351.0 | 23.27 | 4.71x | max err 0.0e+00 |
+| vulkan: NVIDIA TITAN X (Pascal) | 861.0 | 31.59 | 3.47x | max err 3.4e-07 |
+| vulkan: Intel(R) UHD Graphics 630 (CFL GT2) | 881.1 | 30.49 | 3.59x | max err 3.4e-07 |
+| vulkan: llvmpipe (LLVM 21.1.8, 256 bits) | 1008.1 | 48.91 | 2.24x | max err 2.5e-07 |
+| numba-cuda: NVIDIA TITAN X (Pascal) | 107.1 | 16.68 | 6.57x | max err 2.9e-07 |
 
 ### saxpy (4,194,304 elements)
 
 | Backend | First call (ms) | Best (ms) | Speed-up | Agreement with CPU |
 | --- | ---: | ---: | ---: | --- |
-| numba cpu (1 thread) | 145.1 | 2.40 | 1.00x | max err 0.0e+00 |
-| numba cpu (parallel) | 285.4 | 5.50 | 0.44x | max err 0.0e+00 |
-| vulkan: NVIDIA TITAN X (Pascal) | 411.8 | 22.79 | 0.11x | max err 0.0e+00 |
-| vulkan: Intel(R) UHD Graphics 630 (CFL GT2) | 419.7 | 23.40 | 0.10x | max err 0.0e+00 |
-| vulkan: llvmpipe (LLVM 21.1.8, 256 bits) | 443.6 | 18.81 | 0.13x | max err 0.0e+00 |
-| numba-cuda: NVIDIA TITAN X (Pascal) | 63.8 | 11.13 | 0.22x | max err 6.8e-08 |
+| numba cpu (1 thread) | 313.3 | 2.78 | 1.00x | max err 0.0e+00 |
+| numba cpu (parallel) | 288.9 | 5.96 | 0.47x | max err 0.0e+00 |
+| vulkan: NVIDIA TITAN X (Pascal) | 469.4 | 23.08 | 0.12x | max err 0.0e+00 |
+| vulkan: Intel(R) UHD Graphics 630 (CFL GT2) | 466.7 | 22.19 | 0.13x | max err 0.0e+00 |
+| vulkan: llvmpipe (LLVM 21.1.8, 256 bits) | 414.5 | 17.64 | 0.16x | max err 0.0e+00 |
+| numba-cuda: NVIDIA TITAN X (Pascal) | 55.8 | 11.35 | 0.25x | max err 6.8e-08 |

@@ -4,9 +4,11 @@ import math
 
 import numpy as np
 import pytest
+from numba import float32 as nb_float32
 from numba.core import errors
 
 import numba_vulkan as nv
+from numba_vulkan import libclc
 
 f32 = np.float32
 _rng = np.random.default_rng(0)
@@ -117,10 +119,102 @@ def test_float64_classification_and_sign_functions(run):
     )
 
 
-def test_float64_versions_inherit_the_32_bit_restriction():
+def test_float64_versions_need_libclc(monkeypatch):
+    monkeypatch.setattr(libclc, "available", lambda: False)
     x = np.linspace(0.1, 1, 8)
-    with pytest.raises(errors.NumbaError, match="float64"):
+    with pytest.raises(errors.NumbaError, match="needs libclc"):
         _elementwise(math.log1p, 1).forall(8)(x, np.zeros(8))
+
+
+DOUBLE = {
+    "sin": (math.sin, np.sin, SYM),
+    "cos": (math.cos, np.cos, SYM),
+    "tan": (math.tan, np.tan, UNIT),
+    "asin": (math.asin, np.arcsin, UNIT),
+    "acos": (math.acos, np.arccos, UNIT),
+    "atan": (math.atan, np.arctan, SYM),
+    "sinh": (math.sinh, np.sinh, SYM),
+    "cosh": (math.cosh, np.cosh, SYM),
+    "tanh": (math.tanh, np.tanh, SYM),
+    "asinh": (math.asinh, np.arcsinh, SYM),
+    "acosh": (math.acosh, np.arccosh, POS + 1),
+    "atanh": (math.atanh, np.arctanh, UNIT),
+    "exp": (math.exp, np.exp, SYM),
+    "expm1": (math.expm1, np.expm1, UNIT),
+    "log": (math.log, np.log, POS),
+    "log2": (math.log2, np.log2, POS),
+    "log10": (math.log10, np.log10, POS),
+    "log1p": (math.log1p, np.log1p, UNIT),
+    "erf": (math.erf, np.vectorize(math.erf), SYM),
+    "erfc": (math.erfc, np.vectorize(math.erfc), SYM),
+}
+
+
+@pytest.mark.skipif(not libclc.available(), reason="libclc is not installed")
+@pytest.mark.parametrize("name", DOUBLE)
+def test_float64_math_function(run, name):
+    fn, reference, x = DOUBLE[name]
+    x = x.astype(np.float64)
+    _check(run, ("double", name), fn, (x,), reference(x), rtol=1e-13, atol=1e-15)
+
+
+@pytest.mark.skipif(not libclc.available(), reason="libclc is not installed")
+def test_float64_gamma_functions(run):
+    # Not from libclc: this package's Lanczos approximation, in double.
+    x = (POS * 3).astype(np.float64)
+    _check(
+        run,
+        ("double", "gamma"),
+        math.gamma,
+        (x,),
+        np.vectorize(math.gamma)(x),
+        rtol=1e-8,
+    )
+    _check(
+        run,
+        ("double", "lgamma"),
+        math.lgamma,
+        (x,),
+        np.vectorize(math.lgamma)(x),
+        rtol=1e-8,
+        atol=1e-9,
+    )
+
+
+@nv.jit
+def _power(a, b):
+    return a**b
+
+
+@pytest.mark.skipif(not libclc.available(), reason="libclc is not installed")
+def test_float64_binary_math_and_power(run):
+    x, y = POS.astype(np.float64), SYM.astype(np.float64)
+    _check(run, ("double", "atan2"), math.atan2, (y, x), np.arctan2(y, x), rtol=1e-13)
+    _check(run, ("double", "hypot"), math.hypot, (y, x), np.hypot(y, x), rtol=1e-13)
+    _check(run, ("double", "pow"), math.pow, (x, y), np.power(x, y), rtol=1e-13)
+    _check(run, ("double", "operator"), _power, (x, y), x**y, rtol=1e-13)
+    _check(run, ("double", "np.power"), np.power, (x, y), np.power(x, y), rtol=1e-13)
+
+
+@pytest.mark.skipif(not libclc.available(), reason="libclc is not installed")
+def test_float32_math_is_accurate_and_identical_across_devices(run):
+    # libclc replaces the drivers' own sin, which is only good to 1e-4 on some.
+    _check(run, ("exact", "sin"), math.sin, (SYM,), np.sin(SYM), rtol=3e-7, atol=1e-7)
+    _check(run, ("exact", "exp"), math.exp, (SYM,), np.exp(SYM), rtol=3e-7)
+
+
+def test_fastmath_uses_the_device_functions(run):
+    @nv.jit(fastmath=True)
+    def kernel(a, out):
+        i = nv.global_id(0)
+        if i < a.shape[0]:
+            out[i] = math.sin(a[i]) * math.exp(a[i])
+
+    out = np.zeros_like(SYM)
+    run(kernel, SYM.size, SYM, out)
+    np.testing.assert_allclose(out, np.sin(SYM) * np.exp(SYM), rtol=3e-3, atol=1e-4)
+    compiled = kernel.compile((nb_float32[::1], nb_float32[::1]))
+    assert "@llvm.sin.f32" in compiled.llvm_ir
 
 
 UNARY_UFUNCS = {

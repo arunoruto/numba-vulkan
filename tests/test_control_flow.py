@@ -164,3 +164,26 @@ def test_random_control_flow_program(device, seed):
 
     failure, source = run_program(seed, [device])
     assert failure is None, f"{failure}\n{source}"
+
+
+@nv.jit
+def sign_flip_kernel(a, out):
+    i = nv.global_id(0)
+    if i < a.shape[0]:
+        x = a[i] * f32(0.75)
+        out[i, 0] = -x if x < 0 else x
+        s = f32(-0.5) if x < 0 else f32(0.5)
+        out[i, 1] = x * f32(0.75) + s
+
+
+def test_product_compared_with_zero_selecting_a_sign(run):
+    # LLVM's SPIR-V backend used to crash on this shape: it mistakes it for
+    # GLSL's faceforward() and mishandles the scalar case.
+    a = np.linspace(-3, 3, 64, dtype=f32)
+    out = np.zeros((64, 2), dtype=f32)
+    run(sign_flip_kernel, 64, a, out)
+    x = a * f32(0.75)
+    np.testing.assert_allclose(out[:, 0], np.abs(x), rtol=1e-6)
+    np.testing.assert_allclose(
+        out[:, 1], x * f32(0.75) + np.where(x < 0, -0.5, 0.5), rtol=1e-6
+    )

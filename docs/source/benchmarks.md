@@ -26,9 +26,13 @@ includes compilation.
 - On the memory-bound workload every GPU backend, CUDA included, loses to a
   single CPU thread: the time goes into copying arrays. numba-vulkan copies
   all arguments on every call and has no device arrays yet.
-- Compiling a Vulkan kernel takes about half a second, several times longer
-  than CUDA. Much of that is starting the child process that runs LLVM's
-  SPIR-V backend.
+- Compiling a Vulkan kernel takes 0.5 to 0.9 s, several times longer than
+  CUDA. The time goes into starting the child process that runs LLVM's
+  SPIR-V backend and, for kernels that call math functions, into linking
+  libclc.
+- The `option` workload calls `log`, `exp` and `sqrt` from libclc. On the
+  GPUs that costs little compared with the built-in functions; on llvmpipe
+  it roughly doubles the run time.
 - llvmpipe executes the shader on the CPU, so its numbers show the overhead
   of the Vulkan path rather than any hardware speed-up.
 - All backends agree with the CPU result to `float32` rounding; `saxpy` is

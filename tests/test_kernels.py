@@ -6,6 +6,7 @@ from numba import types
 from numba.core import errors
 
 import numba_vulkan as nv
+from numba_vulkan import libclc
 
 
 @nv.jit
@@ -176,17 +177,29 @@ def test_generated_spirv_is_valid(validate):
     )
 
 
-def test_float64_transcendentals_are_rejected_unless_narrowed(run):
-    def body(x, out):
-        i = nv.global_id(0)
-        if i < x.shape[0]:
-            out[i] = math.sin(x[i])
+def _sine_body(x, out):
+    i = nv.global_id(0)
+    if i < x.shape[0]:
+        out[i] = math.sin(x[i])
 
+
+@pytest.mark.skipif(not libclc.available(), reason="libclc is not installed")
+def test_float64_transcendentals_use_libclc(run):
     x = np.linspace(0, 3, 64)
     out = np.zeros(64)
-    with pytest.raises(errors.NumbaError, match="float64"):
-        nv.jit(body).forall(64)(x, out)
-    run(nv.jit(narrow_math=True)(body), 64, x, out)
+    run(nv.jit(_sine_body), 64, x, out)
+    np.testing.assert_allclose(out, np.sin(x), rtol=1e-14, atol=1e-15)
+
+
+def test_float64_transcendentals_without_libclc(run, monkeypatch):
+    # Without libclc there is no float64 math library: the call is rejected
+    # unless narrow_math asks for float32 precision.
+    monkeypatch.setattr(libclc, "available", lambda: False)
+    x = np.linspace(0, 3, 64)
+    out = np.zeros(64)
+    with pytest.raises(errors.NumbaError, match="needs libclc"):
+        nv.jit(_sine_body).forall(64)(x, out)
+    run(nv.jit(narrow_math=True)(_sine_body), 64, x, out)
     np.testing.assert_allclose(out, np.sin(x), rtol=2e-3, atol=1e-6)
 
 

@@ -31,27 +31,6 @@ def known_issue(issue, x, expected):
     return register
 
 
-@known_issue("KI-01 float64 ** float", XD, lambda x: x**2.5)
-def _(x, out):
-    i = nv.global_id(0)
-    if i < x.size:
-        out[i] = x[i] ** 2.5
-
-
-@known_issue("KI-01 float32 ** Python float literal", XF, lambda x: x**2.5)
-def _(x, out):
-    i = nv.global_id(0)
-    if i < x.size:
-        out[i] = x[i] ** 2.5
-
-
-@known_issue("KI-01 float64 transcendental (math.sin)", XD, np.sin)
-def _(x, out):
-    i = nv.global_id(0)
-    if i < x.size:
-        out[i] = math.sin(x[i])
-
-
 @known_issue("KI-04 slicing", XF, lambda x: np.append(x[1:], 0))
 def _(x, out):
     i = nv.global_id(0)
