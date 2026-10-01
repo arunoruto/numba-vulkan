@@ -1,5 +1,12 @@
 # numba-vulkan
 
+```{image} _static/logo.svg
+:alt: numba-vulkan logo
+:width: 140px
+:align: center
+:class: dark-light
+```
+
 A proof-of-concept Vulkan compute target for [Numba](https://numba.pydata.org/):
 write a kernel in Python and run it on any GPU with a Vulkan driver.
 

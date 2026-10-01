@@ -34,6 +34,14 @@ that requires contributions generated with an LLM to be attributed as such.
 If any part of this project is ever proposed to Numba or a related project,
 that policy applies and this disclosure has to accompany it.
 
+## The logo
+
+The logo is an original drawing: a snake forming an N (blue, for Numba) and
+a V (red, for Vulkan), with a lightning bolt for a tail. The bolt is a
+deliberate nod to Numba's own logo. It does not reuse any part of the Numba
+or Vulkan logos, both of which are trademarks of their respective owners,
+and it does not imply endorsement by either project.
+
 ## Future contributions
 
 Contributions written with AI tools are welcome under the same terms:

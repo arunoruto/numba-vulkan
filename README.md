@@ -1,6 +1,7 @@
 <a id="readme-top"></a>
 
 <div align="center">
+  <img src="docs/source/_static/logo.svg" alt="numba-vulkan logo" width="160" />
   <h1 align="center">numba-vulkan</h1>
 
   <p align="center">

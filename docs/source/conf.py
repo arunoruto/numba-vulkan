@@ -84,6 +84,8 @@ napoleon_use_ivar = True
 
 html_theme = "pydata_sphinx_theme"
 html_static_path = ["_static"]
+html_logo = "_static/logo.svg"
+html_favicon = "_static/logo.svg"
 html_css_files = []
 html_context = dict(
     github_user="arunoruto",
@@ -96,6 +98,7 @@ html_context = dict(
 html_theme_options = {
     "github_url": f"https://github.com/{html_context['github_user']}/{html_context['github_repo']}",
     "use_edit_page_button": True,
+    "logo": {"text": "numba-vulkan", "alt_text": "numba-vulkan"},
 }
 
 # The name of the Pygments (syntax highlighting) style to use.

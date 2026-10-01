@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title" viewBox="15.6 32.0 235.9 235.9">
+  <title id="title">numba-vulkan</title>
+  <defs>
+    <!-- Across the V: blue for the first quarter (so the bar on top merges
+         with the diagonal), red for the last quarter, and an S-shaped blend
+         centred on the bend in between. -->
+    <linearGradient id="blend" gradientUnits="userSpaceOnUse" x1="92" y1="0" x2="230" y2="0">
+      <stop offset="0.250" stop-color="#00a3e0"/>
+      <stop offset="0.300" stop-color="#059fdb"/>
+      <stop offset="0.350" stop-color="#1294cd"/>
+      <stop offset="0.400" stop-color="#2585b9"/>
+      <stop offset="0.450" stop-color="#3d71a1"/>
+      <stop offset="0.500" stop-color="#565c86"/>
+      <stop offset="0.550" stop-color="#6f486b"/>
+      <stop offset="0.600" stop-color="#873453"/>
+      <stop offset="0.650" stop-color="#9a253f"/>
+      <stop offset="0.700" stop-color="#a71a31"/>
+      <stop offset="0.750" stop-color="#ac162c"/>
+    </linearGradient>
+  </defs>
+  <!-- the V (Vulkan): the snake's neck and head -->
+  <path d="M108 62 L162 184 L214 62" stroke="url(#blend)" stroke-width="32" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+  <!-- the left bar of the N (Numba) -->
+  <path d="M64.4 164.3 L108 62" stroke="#00a3e0" stroke-width="32" stroke-linecap="round" fill="none"/>
+  <!-- the tail: a lightning bolt -->
+  <path d="M50.5 156.2 L79.9 168.7 L78.3 172.4 L103.8 168.4 L47.5 253.9 L65.7 183.0 L37.1 187.5 Z" fill="#00a3e0"/>
+  <!-- eye -->
+  <circle cx="215.9" cy="60.7" r="4.2" fill="#fff"/>
+</svg>
