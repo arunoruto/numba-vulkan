@@ -7,7 +7,7 @@ from llvmlite import ir
 from numba.core import cgutils, types
 from numba.core.imputils import Registry
 
-from numba_vulkan import libclc
+from numba_vulkan import libclc, narrowing
 from numba_vulkan.errors import VulkanUnsupportedError
 
 registry = Registry("vkmathimpl")
@@ -176,7 +176,7 @@ def _float_math(context, builder, pyfn, name, f32_only, sig, args):
     from_libclc = libclc_name(context, pyfn, ty)
     if from_libclc is not None:
         return libclc.call(builder, from_libclc, vals)
-    if f32_only and ty == types.float64:
+    if f32_only and ty == types.float64 and not narrowing.current.floats:
         if not context.narrow_math:
             raise VulkanUnsupportedError(
                 f"math.{pyfn.__name__} on float64 needs libclc, which was not found "
@@ -247,6 +247,15 @@ for _fn, _name in _ROUNDING.items():
     _register_rounding(_fn, _name)
 
 
+def _single(builder, value):
+    """Convert a float64 value to float32 when compiling without float64.
+
+    Bit manipulation must happen at the width the value will have on the
+    device; see `numba_vulkan.narrowing`.
+    """
+    return narrowing.to_single(builder, value) if narrowing.current.floats else value
+
+
 def _classify(builder, value, kind):
     """Test a float for NaN, infinity or finiteness.
 
@@ -267,6 +276,7 @@ def _classify(builder, value, kind):
     # The tests work on the bit pattern. Float comparisons would be simpler,
     # but LLVM turns them into OpUnordered, which shaders may not use, and
     # drivers with fast-math enabled are free to fold them away.
+    value = _single(builder, value)
     bits = ir.IntType(64 if isinstance(value.type, ir.DoubleType) else 32)
     exponent = bits((0x7FF << 52) if bits.width == 64 else (0xFF << 23))
     magnitude = builder.and_(
@@ -329,6 +339,8 @@ def lower_copysign(context, builder, sig, args):
     """
     ty = sig.return_type
     magnitude, sign = (context.cast(builder, a, t, ty) for a, t in zip(args, sig.args))
+    wide = magnitude.type
+    magnitude, sign = _single(builder, magnitude), _single(builder, sign)
     bits = ir.IntType(64 if isinstance(magnitude.type, ir.DoubleType) else 32)
     sign_bit = bits(1 << (bits.width - 1))
     combined = builder.or_(
@@ -337,7 +349,8 @@ def lower_copysign(context, builder, sig, args):
         ),
         builder.and_(builder.bitcast(sign, bits), sign_bit),
     )
-    return builder.bitcast(combined, magnitude.type)
+    result = builder.bitcast(combined, magnitude.type)
+    return result if result.type == wide else narrowing.to_double(builder, result)
 
 
 @lower(math.fmod, types.Float, types.Float)

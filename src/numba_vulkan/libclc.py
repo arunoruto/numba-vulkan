@@ -18,6 +18,8 @@ from functools import lru_cache
 import llvmlite.binding as llvm
 from llvmlite import ir
 
+from numba_vulkan import narrowing
+
 CALLING_CONVENTION = "spir_func"
 ENV_VAR = "NUMBA_VULKAN_LIBCLC"
 CACHE_ENV_VAR = "NUMBA_VULKAN_CACHE_DIR"
@@ -227,6 +229,15 @@ def call(builder, name, args, restype=None):
     with any other convention is undefined behaviour that LLVM turns into
     unreachable code.
     """
+    if narrowing.current.floats and any(
+        isinstance(a.type, ir.DoubleType) for a in args
+    ):
+        # The device has no float64: evaluate in float32. The values around
+        # the call become float32 as well when the kernel is narrowed.
+        single, double = ir.FloatType(), ir.DoubleType()
+        args = [narrowing.to_single(builder, a) for a in args]
+        result = call(builder, name, args, single if restype == double else restype)
+        return narrowing.to_double(builder, result)
     argtypes = [a.type for a in args]
     symbol = mangle(name, argtypes)
     fn = builder.module.globals.get(symbol)

@@ -1,6 +1,8 @@
 """Dispatcher and ``jit`` decorator of the Vulkan target."""
 
 import functools
+import os
+import warnings
 
 import numpy as np
 from numba import typeof
@@ -12,10 +14,10 @@ from numba.core.target_extension import (
     target_registry,
 )
 
-from numba_vulkan import runtime
+from numba_vulkan import narrowing, runtime
 from numba_vulkan.buffers import STATUS_INDEX, arg_binding
 from numba_vulkan.compiler import compile_kernel, compile_vulkan
-from numba_vulkan.errors import VulkanUnsupportedError
+from numba_vulkan.errors import VulkanPrecisionWarning, VulkanUnsupportedError
 from numba_vulkan.target import TARGET_NAME, exception_table, vulkan_target
 from numba_vulkan.vktypes import VulkanArray, VulkanDispatcherType
 
@@ -46,6 +48,9 @@ class VulkanDispatcher:
         when libclc is unavailable.
     boundscheck : bool
         Whether array indices are checked.
+    narrow : bool or None
+        Whether 64-bit types are narrowed to 32 bits: always, never, or
+        (``None``) on devices that lack them; see `jit`.
     overloads : dict
         Compile results by tuple of argument types.
 
@@ -66,6 +71,21 @@ class VulkanDispatcher:
     """
 
     targetdescr = vulkan_target
+
+    @property
+    def overloads(self):
+        """Compile results by tuple of argument types.
+
+        Functions compiled without float64 (see `numba_vulkan.narrowing`)
+        are kept apart from the ordinary ones; the property gives those of
+        the mode being compiled in.
+
+        Returns
+        -------
+        dict
+        """
+        return self._overloads.setdefault(narrowing.current.floats, {})
+
     _can_compile = True
 
     def __init__(self, py_func, targetoptions=None):
@@ -74,7 +94,10 @@ class VulkanDispatcher:
         self.narrow_math = bool(self.targetoptions.get("narrow_math", False))
         self.fastmath = bool(self.targetoptions.get("fastmath", False))
         self.boundscheck = bool(self.targetoptions.get("boundscheck", False))
-        self.overloads = {}
+        self.narrow = self.targetoptions.get("narrow")
+        if self.narrow is None and os.environ.get("NUMBA_VULKAN_NARROW", "0") != "0":
+            self.narrow = True
+        self._overloads = {}
         self._kernels = {}
         self._compiling = 0
         functools.update_wrapper(self, py_func)
@@ -257,7 +280,7 @@ class VulkanDispatcher:
 
     # -- kernel launch --------------------------------------------------------
 
-    def compile(self, argtypes, ndim=1):
+    def compile(self, argtypes, ndim=1, mode=narrowing.Mode()):
         """Compile (or fetch) the kernel specialisation for ``argtypes``.
 
         Parameters
@@ -266,6 +289,8 @@ class VulkanDispatcher:
             Argument types; arrays are bound to consecutive storage buffers.
         ndim : int
             Dimensionality of the dispatch grid.
+        mode : numba_vulkan.narrowing.Mode
+            The 64-bit types the kernel must do without.
 
         Returns
         -------
@@ -282,10 +307,20 @@ class VulkanDispatcher:
                     readonly=not ty.mutable,
                 )
             bound.append(ty)
-        key = (tuple(bound), ndim)
+        key = (tuple(bound), ndim, mode)
         if key not in self._kernels:
-            cres = self.compile_device(key[0])
-            self._kernels[key] = compile_kernel(cres, ndim, exact=not self.fastmath)
+            with narrowing.using(mode):
+                cres = self.compile_device(key[0])
+                kernel = compile_kernel(cres, ndim, exact=not self.fastmath)
+            if kernel.narrowed.floats and self.narrow is None:
+                warnings.warn(
+                    f"kernel '{self.py_func.__name__}' uses float64, which the "
+                    "device does not support; it is computed in float32 instead. "
+                    "Pass narrow=True to @jit to accept this silently.",
+                    VulkanPrecisionWarning,
+                    stacklevel=4,
+                )
+            self._kernels[key] = kernel
         return self._kernels[key]
 
     def forall(self, extent, device=None):
@@ -351,13 +386,25 @@ class VulkanDispatcher:
 
         Notes
         -----
-        Scalars are passed as one-element buffers. Boolean arrays are
-        converted to and from int32 on the host, and arrays that are not
-        C-contiguous are passed as contiguous copies.
+        Scalars are passed as one-element buffers. Arrays are converted on
+        the host where the device stores them differently: booleans as
+        int32, 64-bit types as 32-bit ones where the kernel is narrowed,
+        and arrays that are not C-contiguous as contiguous copies.
         """
+        target = runtime.get_device(device)
+        if self.narrow is None:
+            mode = target.mode
+        else:
+            mode = narrowing.Mode(floats=self.narrow, ints=self.narrow)
         argtypes, hosts, shapes, staged = [], [], [], []
         for arg in args:
             if isinstance(arg, runtime.DeviceArray):
+                if arg._stored != narrowing.stored_dtype(arg.dtype, mode):
+                    raise ValueError(
+                        f"a {arg.dtype} device array on {arg.device.info.name} holds "
+                        f"{arg._stored} elements, which does not match a kernel "
+                        f"compiled with narrow={self.narrow}"
+                    )
                 dtype = numpy_support.from_dtype(arg.dtype)
                 argtypes.append(types.Array(dtype, arg.ndim, "C"))
                 shapes.extend(arg.shape)
@@ -365,23 +412,21 @@ class VulkanDispatcher:
             elif isinstance(arg, np.ndarray):
                 argtypes.append(typeof(arg).copy(layout="C", readonly=False))
                 shapes.extend(arg.shape)
-                if arg.dtype == np.bool_:
-                    # Booleans are int32 on the device (SPIR-V has no
-                    # storable bool), so they are converted on the host.
+                stored = narrowing.stored_dtype(arg.dtype, mode)
+                if stored != arg.dtype or not arg.flags.c_contiguous:
+                    # Converted on the host: booleans are int32 on the device
+                    # (SPIR-V has no storable bool), 64-bit types are 32-bit
+                    # where the kernel is narrowed, and strided or
+                    # Fortran-ordered arrays travel as contiguous copies.
                     staged.append((len(hosts), arg))
-                    arg = arg.astype(np.int32)
-                elif not arg.flags.c_contiguous:
-                    # Strided and Fortran-ordered arrays travel as
-                    # contiguous copies.
-                    staged.append((len(hosts), arg))
-                    arg = np.ascontiguousarray(arg)
+                    arg = np.ascontiguousarray(arg, dtype=stored)
                 hosts.append(arg)
             else:
                 ty = typeof(arg)
                 argtypes.append(ty)
-                store = np.int32 if isinstance(ty, types.Boolean) else str(ty)
-                hosts.append(np.array([arg], dtype=store))
-        kernel = self.compile(argtypes, ndim=len(extent))
+                stored = narrowing.stored_dtype(np.dtype(str(ty)), mode)
+                hosts.append(np.array([arg], dtype=stored))
+        kernel = self.compile(argtypes, ndim=len(extent), mode=mode)
         groups = [1, 1, 1]
         for axis, n in enumerate(extent):
             groups[axis] = -(-int(n) // kernel.local_size[axis])
@@ -389,7 +434,7 @@ class VulkanDispatcher:
             return
         # Element 0 receives the status of the kernel, the shapes follow.
         meta = np.array([0, *shapes], dtype=np.int32)
-        runtime.get_device(device).run(kernel, tuple(groups), [meta, *hosts])
+        target.run(kernel, tuple(groups), [meta, *hosts])
         for index, original in staged:
             if arg_binding(index) in kernel.written_bindings:
                 copy = hosts[index]
@@ -423,7 +468,13 @@ class VulkanDispatcher:
 
 
 def jit(
-    pyfunc=None, *, fastmath=False, narrow_math=False, boundscheck=False, **options
+    pyfunc=None,
+    *,
+    fastmath=False,
+    narrow_math=False,
+    boundscheck=False,
+    narrow=None,
+    **options,
 ):
     """Compile a Python function for Vulkan.
 
@@ -445,6 +496,15 @@ def jit(
         read or corrupt unrelated memory of the buffer or are ignored,
         depending on the driver. The environment variable
         ``NUMBA_BOUNDSCHECK=1`` turns the check on everywhere.
+    narrow : bool or None
+        Whether a kernel computes with 32-bit floats and integers where its
+        code says ``float64`` and ``int64``, which Numba uses for Python
+        literals and all index arithmetic. ``None``, the default, narrows
+        on devices without 64-bit types and warns when that affects
+        floats; ``True`` always narrows, without a warning; ``False`` never
+        does, so the kernel fails on such devices. Arrays of 64-bit
+        elements are converted on the host. Only the setting of the kernel
+        matters, not that of the functions it calls.
     **options
         Accepted for compatibility with Numba's generic ``jit`` and ignored.
 
@@ -455,6 +515,7 @@ def jit(
     options["narrow_math"] = narrow_math
     options["fastmath"] = fastmath
     options["boundscheck"] = boundscheck
+    options["narrow"] = narrow
     if pyfunc is None:
         return lambda f: VulkanDispatcher(f, options)
     return VulkanDispatcher(pyfunc, options)

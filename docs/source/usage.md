@@ -211,6 +211,33 @@ def kernel(x, out):
         # out[i] = 0.5 * math.sin(x[i])     # promotes to float64
 ```
 
+### Devices without 64-bit types
+
+`float64` and `int64` are optional in Vulkan; many mobile GPUs and Apple
+devices lack one or both. Since Numba uses `int64` for every index, almost
+no kernel would run there as written. On such a device a kernel is
+therefore *narrowed*: every `float64` in it becomes a `float32` and every
+`int64` an `int32`, including the elements of arrays, which are converted
+on the host.
+
+```python
+@nv.jit                 # narrows where the device requires it (default)
+@nv.jit(narrow=True)    # always narrow: no optional features needed
+@nv.jit(narrow=False)   # never: fail on devices without 64-bit types
+```
+
+When narrowing changes float arithmetic, a
+{py:class}`~numba_vulkan.errors.VulkanPrecisionWarning` says so once per
+kernel; `narrow=True` accepts it silently. Results then agree with the
+64-bit ones to `float32` rounding, and integers wrap at 32 bits. Code that
+cannot work in 32 bits is rejected at compile time: integer constants
+beyond 32 bits, shifts by 32 or more, tricks on the bit pattern of a
+`float64`. `narrow=True` is also worth trying on desktop GPUs, where
+`float64` is slow. The environment variable `NUMBA_VULKAN_NARROW=1` makes
+it the default.
+
+### Exactness
+
 By default, math functions come from libclc and float arithmetic is kept
 exactly as written, so results match the CPU closely and agree between
 devices. `@nv.jit(fastmath=True)` trades that for speed: `float32` math

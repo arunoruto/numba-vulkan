@@ -16,6 +16,7 @@ from numba.core.compiler_machinery import LoweringPass, PassManager, register_pa
 from numba.core.target_extension import target_override
 from numba.core.typed_passes import AnnotateTypes, IRLegalization, NativeLowering
 
+from numba_vulkan import narrowing
 from numba_vulkan.buffers import (
     META_BINDING,
     STATUS_INDEX,
@@ -124,6 +125,9 @@ class VulkanCompiler(CompilerBase):
         return [pm]
 
 
+_NARROW_HELPERS = {}
+
+
 @global_compiler_lock
 def compile_vulkan(
     pyfunc, return_type, args, narrow_math=False, fast_math=False, boundscheck=False
@@ -157,9 +161,12 @@ def compile_vulkan(
     flags.no_cpython_wrapper = True
     flags.no_cfunc_wrapper = True
     flags.error_model = "numpy"
-    targetctx = vulkan_target.target_context.subtarget(
-        narrow_math=narrow_math, fast_math=fast_math
-    )
+    options = {"narrow_math": narrow_math, "fast_math": fast_math}
+    if narrowing.current.floats:
+        # Helper functions compiled without float64 are kept apart from the
+        # ordinary ones, which Numba caches per target context.
+        options["cached_internal_func"] = _NARROW_HELPERS
+    targetctx = vulkan_target.target_context.subtarget(**options)
     with target_override(TARGET_NAME):
         cres = compiler.compile_extra(
             typingctx=vulkan_target.typing_context,
@@ -280,6 +287,7 @@ def compile_kernel(cres, ndim, exact=True):
     text += f'\nattributes #0 = {{ "hlsl.numthreads"="{numthreads}" "hlsl.shader"="compute" }}\n'
     library.add_ir_module(text)
     library.first_constant_binding = 1 + len(argtypes)
+    library.mode = narrowing.current
     library.finalize()
 
     spirv = library.get_spirv(exact)
@@ -293,4 +301,6 @@ def compile_kernel(cres, ndim, exact=True):
         capabilities=spirv_capabilities(spirv),
         written_bindings=set(library.written_bindings),
         constants=dict(library.constants),
+        mode=library.mode,
+        narrowed=library.narrowed,
     )

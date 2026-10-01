@@ -7,6 +7,7 @@ from dataclasses import dataclass
 import numpy as np
 import vulkan as vk
 
+from numba_vulkan import narrowing
 from numba_vulkan.errors import VulkanSupportError
 
 _DEVICE_TYPES = {
@@ -157,6 +158,8 @@ class Device:
         The ``VkDevice`` handle.
     queue : object
         The compute queue.
+    mode : numba_vulkan.narrowing.Mode
+        The 64-bit types the device lacks.
     pool_limit : int
         Number of bytes of released buffers kept for reuse; set initially
         from the environment variable ``NUMBA_VULKAN_POOL_MB`` (default
@@ -216,6 +219,8 @@ class Device:
             ),
         )[0]
         self._pipelines = {}
+        # 64-bit types this device cannot use and kernels must do without.
+        self.mode = narrowing.Mode(floats=not info.float64, ints=not info.int64)
         # Released buffers by (size, mappable), kept for reuse.
         self._free = {}
         self._pooled = 0
@@ -720,7 +725,9 @@ class DeviceArray:
     shape : tuple of int
         Shape of the array.
     dtype : numpy.dtype
-        Element type. Boolean arrays are stored as ``int32`` on the device.
+        Element type. Boolean arrays are stored as ``int32`` on the device,
+        and 64-bit types as their 32-bit counterparts on devices that lack
+        them (see `numba_vulkan.narrowing`).
 
     Attributes
     ----------
@@ -743,7 +750,7 @@ class DeviceArray:
         self.device = device
         self.shape = tuple(int(n) for n in shape)
         self.dtype = np.dtype(dtype)
-        self._stored = np.dtype(np.int32) if self.dtype == np.bool_ else self.dtype
+        self._stored = narrowing.stored_dtype(self.dtype, device.mode)
         self._nbytes = self.size * self._stored.itemsize
         self._buffer = device._acquire(max(self._nbytes, 4), host=False)
         # The buffer returns to the device's pool when the array is dropped.
@@ -827,10 +834,10 @@ class DeviceArray:
             raise ValueError(
                 f"out must be a C-contiguous {self.dtype} array of shape {self.shape}"
             )
-        if self.dtype == np.bool_:
+        if self._stored != self.dtype:
             stored = np.empty(self.shape, dtype=self._stored)
             self.device._download(self._buffer, stored.reshape(-1).view(np.uint8))
-            out[...] = stored != 0
+            out[...] = stored != 0 if self.dtype == np.bool_ else stored
         else:
             self.device._download(self._buffer, out.reshape(-1).view(np.uint8))
         return out

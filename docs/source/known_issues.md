@@ -181,17 +181,18 @@ atomics and no barriers.
 
 ## Portability
 
-### KI-17: kernels need optional device features
+### KI-17: narrowing to 32-bit types is untested on real hardware
 
-Numba types Python literals and loop counters as `float64`/`int64`, so
-almost every kernel requires the `shaderInt64` feature and many require
-`shaderFloat64`. The SPIR-V backend additionally forces `shaderInt8`,
-because it needs a named string per buffer. Devices without these features
-(many mobile GPUs, Apple via MoltenVK) cannot run such kernels.
+Devices without `shaderFloat64` or `shaderInt64` run kernels narrowed to
+32-bit types (`narrowing.py`; see {doc}`how_it_works`). The tests exercise
+this on the three desktop devices, opened without those features, where
+the kernels also declare no optional capability at all. No device that
+really lacks the features has been tried, and such drivers tend to have
+restrictions of their own.
 
-**Fix:** a typing mode that defaults to 32-bit types (a custom typing
-context could type literals as `int32`/`float32`); stripping the unused
-`Int8` capability from the generated module.
+Narrowing is all or nothing per type: one `float64` value that is really
+needed, for example a sum that must not lose precision, cannot be kept.
+Kernels that use `int8` or `int16` arrays still need those features.
 
 ### KI-18: tested on three devices only
 

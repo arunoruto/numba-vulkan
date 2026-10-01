@@ -22,6 +22,14 @@ class SpirvCodegenError(errors.NumbaError):
     """
 
 
+class VulkanPrecisionWarning(UserWarning):
+    """A kernel computes in float32 where its code says float64.
+
+    Issued once per kernel when it is compiled for a device without
+    float64 support; see `numba_vulkan.narrowing`.
+    """
+
+
 class VulkanSupportError(RuntimeError):
     """A device lacks a capability that a kernel needs.
 

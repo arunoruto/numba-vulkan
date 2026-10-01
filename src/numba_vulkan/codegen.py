@@ -14,10 +14,11 @@ import time
 from dataclasses import dataclass, field
 
 import llvmlite.binding as llvm
+import numpy as np
 from llvmlite import ir
 from numba.core.codegen import Codegen, CodeLibrary
 
-from numba_vulkan import _emit, libclc
+from numba_vulkan import _emit, libclc, narrowing
 from numba_vulkan.buffers import expand_buffer_access, renumber_constants
 from numba_vulkan.errors import SpirvCodegenError, VulkanUnsupportedError
 from numba_vulkan.legalize import legalize
@@ -229,7 +230,7 @@ emitter = Emitter()
 atexit.register(emitter.close)
 
 
-def emit_spirv(llvm_ir, exact=True):
+def emit_spirv(llvm_ir, exact=True, narrow_ints=False):
     """Translate LLVM IR to a SPIR-V binary in a child process.
 
     Parameters
@@ -238,6 +239,9 @@ def emit_spirv(llvm_ir, exact=True):
         Textual LLVM IR of a module containing the shader entry point.
     exact : bool
         Whether float arithmetic is marked exact; see `mark_exact`.
+    narrow_ints : bool
+        Whether the module is meant for devices without 64-bit integers;
+        see `narrow_index_constants`.
 
     Returns
     -------
@@ -250,6 +254,9 @@ def emit_spirv(llvm_ir, exact=True):
         If the backend fails or the module does not pass `check_spirv`.
     """
     spirv = emitter.emit(llvm_ir)
+    if narrow_ints:
+        spirv = narrow_index_constants(spirv)
+    spirv = strip_unused(spirv)
     if exact:
         spirv = mark_exact(spirv)
     check_spirv(spirv)
@@ -290,6 +297,8 @@ class CompiledKernel:
     capabilities: set = field(default_factory=set)
     written_bindings: set = field(default_factory=set)
     constants: dict = field(default_factory=dict)
+    mode: narrowing.Mode = narrowing.Mode()
+    narrowed: narrowing.Mode = narrowing.Mode()
 
     @property
     def num_bindings(self):
@@ -326,6 +335,226 @@ def spirv_capabilities(spirv):
             caps.add(_SPV_CAPABILITIES[words[pos + 1]])
         pos += max(count, 1)
     return caps
+
+
+# Result-id position of the definitions that `strip_unused` may remove.
+_REMOVABLE = {
+    21: 1, 22: 1, 23: 1, 28: 1, 29: 1, 30: 1, 32: 1,  # types
+    41: 2, 42: 2, 43: 2, 44: 2, 46: 2,  # constants
+    59: 2,  # variables
+}  # fmt: skip
+# Instructions that name or decorate an id without using it.
+_ANNOTATIONS = {5, 6, 71, 72}
+_OP_CAPABILITY, _OP_TYPE_INT, _OP_TYPE_FLOAT, _OP_VARIABLE = 17, 21, 22, 59
+_STORAGE_FUNCTION = 7
+_OP_CONSTANT, _ACCESS_CHAINS = 43, {65, 66}
+# Instructions whose first operand is not a result type.
+_UNTYPED = _ANNOTATIONS | {
+    3,
+    4,
+    7,
+    8,
+    10,
+    11,
+    14,
+    15,
+    16,
+    17,
+    62,
+    63,
+    248,
+    249,
+    250,
+    251,
+}
+_UNTYPED |= set(range(19, 40))
+# Capability -> (type opcode, width) that requires it.
+_WIDTH_CAPABILITIES = {
+    10: (_OP_TYPE_FLOAT, 64),
+    11: (_OP_TYPE_INT, 64),
+    22: (_OP_TYPE_INT, 16),
+    39: (_OP_TYPE_INT, 8),
+}
+
+
+def _id_operands(inst):
+    """The operands of an instruction that are (or may be) ids.
+
+    Literal operands of the common instructions are left out, so that a
+    number which happens to equal an id is not taken for a use of it. For
+    instructions not known here, every operand is returned.
+
+    Parameters
+    ----------
+    inst : tuple of int
+        The words of one instruction.
+
+    Returns
+    -------
+    tuple of int
+    """
+    opcode = inst[0] & 0xFFFF
+    if opcode in (3, 7, 8, 10, 14, 17):  # source, strings, extension, capability
+        return ()
+    if opcode in (11, 16, 21, 22, 247):  # one id, then literals
+        return inst[1:2]
+    if opcode in (43, 246):  # two ids, then literals
+        return inst[1:3]
+    if opcode == 81:  # OpCompositeExtract: literal indices at the end
+        return inst[1:4]
+    if opcode == 82:  # OpCompositeInsert
+        return inst[1:5]
+    if opcode == 15:  # OpEntryPoint: model, id, name, interface ids
+        end = 3
+        while inst[end] >> 24:  # the name ends with a zero byte
+            end += 1
+        return inst[2:3] + inst[end + 1 :]
+    if opcode == 12:  # OpExtInst: the instruction number is a literal
+        return inst[1:4] + inst[5:]
+    if opcode == 32:  # OpTypePointer: storage class
+        return inst[1:2] + inst[3:]
+    if opcode in (54, 59):  # OpFunction, OpVariable: literal third operand
+        return inst[1:3] + inst[4:]
+    if opcode == 251:  # OpSwitch: literal, label pairs
+        return inst[1:3] + inst[4::2]
+    return inst[1:]
+
+
+def strip_unused(spirv):
+    """Remove unused variables, constants and types from a SPIR-V module.
+
+    LLVM's backend wants a name string for every buffer, and emits each as
+    a local array of 8-bit integers that nothing reads. Those arrays are
+    the only reason most shaders declare the ``Int8`` capability, an
+    optional device feature. This removes local variables, constants and
+    types that are never used, and then the capabilities for integer and
+    float widths that no longer occur.
+
+    Parameters
+    ----------
+    spirv : bytes
+        A SPIR-V module.
+
+    Returns
+    -------
+    bytes
+        The module without the unused definitions.
+
+    Notes
+    -----
+    Operands of instructions that `_id_operands` does not know all count as
+    uses, so a literal can keep a definition alive, but nothing that is
+    used is ever removed.
+    """
+    words = struct.unpack(f"<{len(spirv) // 4}I", spirv)
+    instructions, pos = [], 5
+    while pos < len(words):
+        count = max(words[pos] >> 16, 1)
+        instructions.append(words[pos : pos + count])
+        pos += count
+
+    while True:
+        seen, candidates = {}, {}
+        for inst in instructions:
+            opcode = inst[0] & 0xFFFF
+            if opcode in _ANNOTATIONS:
+                continue
+            ids = _id_operands(inst)
+            for word in ids:
+                seen[word] = seen.get(word, 0) + 1
+            at = _REMOVABLE.get(opcode)
+            if at is not None and (
+                opcode != _OP_VARIABLE or inst[3] == _STORAGE_FUNCTION
+            ):
+                candidates[inst[at]] = ids.count(inst[at])
+        # Unused: the id occurs nowhere but in its own definition.
+        dead = {i for i, own in candidates.items() if seen[i] == own}
+        if not dead:
+            break
+        instructions = [
+            inst
+            for inst in instructions
+            if not (
+                (inst[0] & 0xFFFF) in _ANNOTATIONS
+                and inst[1] in dead
+                or (inst[0] & 0xFFFF) in _REMOVABLE
+                and inst[_REMOVABLE[inst[0] & 0xFFFF]] in dead
+            )
+        ]
+
+    widths = {
+        (inst[0] & 0xFFFF, inst[2])
+        for inst in instructions
+        if (inst[0] & 0xFFFF) in (_OP_TYPE_INT, _OP_TYPE_FLOAT)
+    }
+    instructions = [
+        inst
+        for inst in instructions
+        if not (
+            (inst[0] & 0xFFFF) == _OP_CAPABILITY
+            and inst[1] in _WIDTH_CAPABILITIES
+            and _WIDTH_CAPABILITIES[inst[1]] not in widths
+        )
+    ]
+    out = list(words[:5])
+    for inst in instructions:
+        out += inst
+    return struct.pack(f"<{len(out)}I", *out)
+
+
+def narrow_index_constants(spirv):
+    """Turn 64-bit index constants in a SPIR-V module into 32-bit ones.
+
+    The backend indexes into constant tables with 64-bit constants of its
+    own making, whatever the width of the indices in the LLVM IR. In a
+    kernel compiled for a device without 64-bit integers they are the last
+    use of that type.
+
+    Parameters
+    ----------
+    spirv : bytes
+        A SPIR-V module.
+
+    Returns
+    -------
+    bytes
+        The module with the constants retyped, or `spirv` itself if it
+        uses 64-bit integers for anything but small constant indices of
+        access chains.
+    """
+    words = struct.unpack(f"<{len(spirv) // 4}I", spirv)
+    instructions, pos = [], 5
+    while pos < len(words):
+        count = max(words[pos] >> 16, 1)
+        instructions.append(words[pos : pos + count])
+        pos += count
+    wide = {i[1] for i in instructions if i[0] & 0xFFFF == _OP_TYPE_INT and i[2] == 64}
+    if not wide:
+        return spirv
+    narrow, constants = None, set()
+    for inst in instructions:
+        opcode = inst[0] & 0xFFFF
+        if opcode == _OP_TYPE_INT and inst[2] == 32 and not constants:
+            narrow = inst[1]  # declared before the first constant to retype
+        elif opcode == _OP_CONSTANT and inst[1] in wide:
+            if narrow is None or inst[4]:
+                return spirv
+            constants.add(inst[2])
+        elif len(inst) > 2 and inst[1] in wide and opcode not in _UNTYPED:
+            return spirv  # a 64-bit value is computed
+    for inst in instructions:
+        opcode = inst[0] & 0xFFFF
+        if opcode in _ANNOTATIONS or (opcode == _OP_CONSTANT and inst[2] in constants):
+            continue
+        used = set(_id_operands(inst)) & constants
+        if used and (opcode not in _ACCESS_CHAINS or used & set(inst[1:4])):
+            return spirv  # used as something other than an index
+    out = list(words[:5])
+    for inst in instructions:
+        if inst[0] & 0xFFFF == _OP_CONSTANT and inst[2] in constants:
+            inst = ((4 << 16) | _OP_CONSTANT, narrow, inst[2], inst[3])
+        out += inst
+    return struct.pack(f"<{len(out)}I", *out)
 
 
 def mark_exact(spirv):
@@ -489,6 +718,7 @@ class VulkanCodeLibrary(CodeLibrary):
         self.written_bindings = set()
         self.constants = {}
         self.first_constant_binding = 0
+        self.mode = self.narrowed = narrowing.Mode()
 
     def add_ir_module(self, module):
         """Add a module to the library.
@@ -631,7 +861,14 @@ class VulkanCodeLibrary(CodeLibrary):
                 "recursive functions are not supported on Vulkan "
                 f"(could not inline {', '.join(leftover)})"
             )
-        text = legalize(str(linked))
+        text = str(linked)
+        self.narrowed = narrowing.Mode(
+            self.mode.floats and re.search(r"\bdouble\b", text) is not None,
+            self.mode.ints and re.search(r"\bi64\b", text) is not None,
+        )
+        text = legalize(narrowing.narrow_ir(text, self.mode), self.mode.ints)
+        # Once more: some of the rewrites above introduce 64-bit indices.
+        text = narrowing.narrow_ir(text, self.mode)
         missing = _UNDEFINED_LIBCLC.findall(text)
         if missing:
             raise VulkanUnsupportedError(
@@ -639,7 +876,14 @@ class VulkanCodeLibrary(CodeLibrary):
                 + ", ".join(sorted(set(missing)))
             )
         text = structurize(text)
-        text, self.constants = renumber_constants(text, self.first_constant_binding)
+        text, constants = renumber_constants(text, self.first_constant_binding)
+        # Constant arrays hold the element type the kernel reads.
+        self.constants = {
+            binding: np.ascontiguousarray(
+                data, dtype=narrowing.stored_dtype(data.dtype, self.mode)
+            )
+            for binding, data in constants.items()
+        }
         text, self.written_bindings = expand_buffer_access(text)
         linked = llvm.parse_assembly(text)
         linked.verify()
@@ -684,7 +928,9 @@ class VulkanCodeLibrary(CodeLibrary):
             If code generation fails.
         """
         if exact not in self._spirv:
-            self._spirv[exact] = emit_spirv(self.get_optimized_llvm_str(), exact)
+            self._spirv[exact] = emit_spirv(
+                self.get_optimized_llvm_str(), exact, self.mode.ints
+            )
         return self._spirv[exact]
 
 
