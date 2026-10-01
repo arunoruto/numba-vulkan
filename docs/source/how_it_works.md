@@ -203,6 +203,9 @@ exception is raised.
 
 Buffers are recycled through a per-device pool, and pipelines, descriptor
 sets and the command buffer are kept per device and kernel specialisation.
+A launch that binds the same buffers as the previous one of that kernel,
+which is the usual case in a loop, neither rewrites the descriptor set nor
+records the commands again; it only submits.
 
 ## Workarounds for toolchain and driver behaviour
 
