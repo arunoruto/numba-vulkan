@@ -1,0 +1,51 @@
+name: "Build docs"
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "docs/**/*"
+      - "src/**/*.py"
+      - ".github/workflows/sphinx.yml"
+
+concurrency:
+  group: ${{ github.ref }}-${{ github.workflow }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Setup | Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup | Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Setup | Install docs dependencies
+        run: |
+          uv sync --only-group docs
+
+      - name: Build | Run Sphinx
+        run: |
+          cd docs
+          uv run --no-sync sphinx-build -M html ./source ./build
+
+      - name: Deploy | Create artifact of website
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs/build/html/
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    permissions:
+      pages: write
+      id-token: write
+    steps:
+      - name: Deploy | GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
