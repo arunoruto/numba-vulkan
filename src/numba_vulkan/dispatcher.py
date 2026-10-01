@@ -13,9 +13,9 @@ from numba.core.target_extension import (
 )
 
 from numba_vulkan import runtime
-from numba_vulkan.buffers import arg_binding
+from numba_vulkan.buffers import STATUS_INDEX, arg_binding
 from numba_vulkan.compiler import compile_kernel, compile_vulkan
-from numba_vulkan.target import TARGET_NAME, vulkan_target
+from numba_vulkan.target import TARGET_NAME, exception_table, vulkan_target
 from numba_vulkan.vktypes import VulkanArray, VulkanDispatcherType
 
 
@@ -31,7 +31,8 @@ class VulkanDispatcher:
     py_func : function
         The Python function.
     targetoptions : dict, optional
-        Options; ``fastmath`` and ``narrow_math`` are used.
+        Options; ``fastmath``, ``narrow_math`` and ``boundscheck`` are
+        used.
 
     Attributes
     ----------
@@ -42,6 +43,8 @@ class VulkanDispatcher:
     narrow_math : bool
         Whether float64 transcendental functions are computed in float32
         when libclc is unavailable.
+    boundscheck : bool
+        Whether array indices are checked.
     overloads : dict
         Compile results by tuple of argument types.
 
@@ -69,6 +72,7 @@ class VulkanDispatcher:
         self.targetoptions = dict(targetoptions or {})
         self.narrow_math = bool(self.targetoptions.get("narrow_math", False))
         self.fastmath = bool(self.targetoptions.get("fastmath", False))
+        self.boundscheck = bool(self.targetoptions.get("boundscheck", False))
         self.overloads = {}
         self._kernels = {}
         self._compiling = 0
@@ -130,7 +134,12 @@ class VulkanDispatcher:
             self._compiling += 1
             try:
                 cres = compile_vulkan(
-                    self.py_func, return_type, args, self.narrow_math, self.fastmath
+                    self.py_func,
+                    return_type,
+                    args,
+                    self.narrow_math,
+                    self.fastmath,
+                    self.boundscheck,
                 )
             finally:
                 self._compiling -= 1
@@ -325,6 +334,8 @@ class VulkanDispatcher:
         ValueError
             If an array is not C-contiguous, or if a device array is on
             another device.
+        Exception
+            Whatever an invocation of the kernel raised; see `_raise`.
         VulkanSupportError
             If the device lacks a capability the kernel needs.
 
@@ -362,14 +373,43 @@ class VulkanDispatcher:
             groups[axis] = -(-int(n) // kernel.local_size[axis])
         if 0 in groups:
             return
-        meta = np.array(shapes, dtype=np.int32)
+        # Element 0 receives the status of the kernel, the shapes follow.
+        meta = np.array([0, *shapes], dtype=np.int32)
         runtime.get_device(device).run(kernel, tuple(groups), [meta, *hosts])
         for index, original in staged:
             if arg_binding(index) in kernel.written_bindings:
                 original[...] = hosts[index] != 0
+        if meta[STATUS_INDEX]:
+            self._raise(int(meta[STATUS_INDEX]))
+
+    def _raise(self, code):
+        """Raise the exception that a kernel reported.
+
+        Parameters
+        ----------
+        code : int
+            Status code left by the kernel.
+
+        Raises
+        ------
+        Exception
+            The exception registered for `code`, with a note saying where
+            in the kernel it was raised.
+        """
+        exc, exc_args, location = exception_table.get_exception(code)
+        if exc is None:
+            exc, exc_args = RuntimeError, ("exception re-raised in a kernel",)
+        error = exc(*(exc_args or ()))
+        where = f"raised in Vulkan kernel '{self.py_func.__name__}'"
+        if location:
+            where += f", in {location[0]} at {location[1]}:{location[2]}"
+        error.add_note(where)
+        raise error
 
 
-def jit(pyfunc=None, *, fastmath=False, narrow_math=False, **options):
+def jit(
+    pyfunc=None, *, fastmath=False, narrow_math=False, boundscheck=False, **options
+):
     """Compile a Python function for Vulkan.
 
     Parameters
@@ -384,6 +424,12 @@ def jit(pyfunc=None, *, fastmath=False, narrow_math=False, **options):
     narrow_math : bool
         Without libclc installed, evaluate float64 transcendental functions
         in float32 precision instead of rejecting them.
+    boundscheck : bool
+        Check array indices in this function and raise ``IndexError`` from
+        the launch when one is out of bounds. Without it, such accesses
+        read or corrupt unrelated memory of the buffer or are ignored,
+        depending on the driver. The environment variable
+        ``NUMBA_BOUNDSCHECK=1`` turns the check on everywhere.
     **options
         Accepted for compatibility with Numba's generic ``jit`` and ignored.
 
@@ -393,6 +439,7 @@ def jit(pyfunc=None, *, fastmath=False, narrow_math=False, **options):
     """
     options["narrow_math"] = narrow_math
     options["fastmath"] = fastmath
+    options["boundscheck"] = boundscheck
     if pyfunc is None:
         return lambda f: VulkanDispatcher(f, options)
     return VulkanDispatcher(pyfunc, options)

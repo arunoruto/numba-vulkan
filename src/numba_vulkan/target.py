@@ -5,7 +5,7 @@ from functools import cached_property
 import llvmlite.binding as llvm
 from numba.core import datamodel, itanium_mangler, typing
 from numba.core.base import BaseContext, _wrap_impl
-from numba.core.callconv import MinimalCallConv
+from numba.core.callconv import MinimalCallConv, _MinimalCallHelper
 from numba.core.compiler import Flags
 from numba.core.descriptors import TargetDescriptor
 from numba.core.dispatcher import Dispatcher
@@ -78,15 +78,61 @@ class VulkanTypingContext(typing.BaseContext):
         return super().resolve_value_type(val)
 
 
+class _ExceptionTable(_MinimalCallHelper):
+    """The exceptions that compiled code can raise, by status code.
+
+    Numba numbers exceptions per function. Here all functions share one
+    table, so that a code returned by a function called from a kernel
+    still identifies its exception when it arrives at the kernel.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self._codes = {}
+
+    def _add_exception(self, exc, exc_args, locinfo):
+        """Register an exception and return its status code.
+
+        Parameters
+        ----------
+        exc : type
+            The exception class.
+        exc_args : tuple or None
+            Arguments of the exception.
+        locinfo : tuple or None
+            Function name, file name and line of the ``raise``.
+
+        Returns
+        -------
+        int
+            The status code; the same for equal exceptions.
+        """
+        key = (exc, exc_args, locinfo)
+        try:
+            known = self._codes.get(key)
+        except TypeError:  # unhashable arguments
+            return super()._add_exception(exc, exc_args, locinfo)
+        if known is None:
+            known = self._codes[key] = super()._add_exception(exc, exc_args, locinfo)
+        return known
+
+
+exception_table = _ExceptionTable()
+
+
 class VulkanCallConv(MinimalCallConv):
     """Calling convention of functions compiled for Vulkan.
 
     Numba's minimal convention: the return value is written through a
     pointer argument and the function returns a status code. It never
-    reaches the shader, because everything is inlined.
+    reaches the shader, because everything is inlined; the status of the
+    kernel itself is stored for the host by the entry point (see
+    `numba_vulkan.compiler.compile_kernel`).
     """
 
-    pass
+    def _make_call_helper(self, builder):
+        """All functions register their exceptions in `exception_table`."""
+        return exception_table
 
 
 class VulkanTargetContext(BaseContext):
@@ -120,16 +166,6 @@ class VulkanTargetContext(BaseContext):
     def __init__(self, typingctx, target=TARGET_NAME):
         super().__init__(typingctx, target)
         self.data_model_manager = vulkan_data_manager.chain(datamodel.default_manager)
-
-    @property
-    def enable_boundscheck(self):
-        """Bounds checking is always off; shaders cannot raise exceptions.
-
-        Returns
-        -------
-        bool
-        """
-        return False
 
     def create_module(self, name):
         """Create an empty LLVM module for this target.

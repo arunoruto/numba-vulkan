@@ -19,6 +19,8 @@ _AS_STORAGE_BUFFER = 11
 
 i32 = ir.IntType(32)
 META_BINDING = 0
+# Element of the shape buffer that receives the kernel's error status.
+STATUS_INDEX = 0
 
 _PREFIX = "numba_vulkan"
 _LLVM_TYPES = {
@@ -51,7 +53,7 @@ def arg_binding(index):
     Returns
     -------
     int
-        ``1 + index``; binding 0 holds the array shapes.
+        ``1 + index``; binding 0 holds the error status and the array shapes.
     """
     return 1 + index
 

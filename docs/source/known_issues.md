@@ -112,17 +112,18 @@ bits, `float32` and `float64`.
 
 ## Behaviour that differs from Numba on the CPU
 
-### KI-10: errors inside kernels are dropped
+### KI-10: only explicit errors are reported
 
-`raise` compiles but does nothing visible: the error status of the kernel is
-discarded, as `numba.cuda` does without `debug=True`. There is no bounds
-checking, and integer division by zero yields an unspecified value instead
-of raising.
+An exception raised with `raise` is reported by the launch (see
+{doc}`usage`), and `boundscheck=True` adds index checks. Everything else
+that raises on the CPU does not: integer division by zero yields an
+unspecified value, and array indices are unchecked by default, as in
+`numba.cuda`. There is no `try`/`except`, and an exception stops only the
+invocation that raised it.
 
-**Fix:** an error-code buffer written by the entry point wrapper in
-`compiler.compile_kernel` and checked after the dispatch in
-`dispatcher._launch`. The call helper needed to map codes back to
-exceptions is already kept in the compile result.
+**Fix:** arithmetic errors would need Numba's Python error model, which
+adds a test to every division; it could become an option like
+`boundscheck`.
 
 ### KI-11: `round()` on llvmpipe
 
