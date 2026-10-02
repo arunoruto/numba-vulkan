@@ -3,11 +3,10 @@
 import itertools
 import math
 import os
+import sys
 import warnings
 import weakref
 from dataclasses import dataclass, field
-
-import sys
 
 import numpy as np
 
