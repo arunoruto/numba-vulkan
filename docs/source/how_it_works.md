@@ -147,6 +147,30 @@ decorated `NoContraction`, because shader compilers otherwise reassociate
 arithmetic freely, which Numba code does not expect. And the module is
 checked for constructs known to crash drivers before it is handed to one.
 
+## Devices without 64-bit types
+
+`float64` and `int64` are optional device features, and Numba uses `int64`
+for every index. For a device that lacks them, a kernel is compiled in a
+narrow mode ({py:mod}`numba_vulkan.narrowing`), in three places:
+
+1. **Lowering.** Math functions called with `float64` values call their
+   `float32` versions, and code that works on bit patterns (`isnan`,
+   `copysign`) does so at 32 bits. The conversions around them are opaque
+   placeholder calls, so that LLVM cannot turn the `float32` code back into
+   operations on the bits of the `float64`.
+2. **LLVM IR.** After optimisation, every `double` becomes `float` and
+   every `i64` becomes `i32` in the text: types, constants, casts and
+   intrinsic names. Anything that depends on the width is rejected; shifts
+   that only extract the sign and the extreme values used as "no limit"
+   are translated.
+3. **SPIR-V.** The backend indexes constant tables with 64-bit constants
+   of its own; those are retyped, and unused definitions are stripped.
+   Stripping happens for every kernel: it removes the 8-bit name strings
+   that would otherwise make all shaders require the `Int8` feature.
+
+Buffers then hold 32-bit elements for 64-bit array types; the host converts
+NumPy arguments, and device arrays on such a device store the narrow type.
+
 ## Runtime
 
 {py:mod}`numba_vulkan.runtime` is a small Vulkan compute runtime on top of

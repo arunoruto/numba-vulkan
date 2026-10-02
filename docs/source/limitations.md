@@ -55,12 +55,14 @@ Exceptions and recursion
   by zero are not reported. Recursive functions cannot be compiled, because
   everything is inlined.
 
-Devices without `float64`, `int64` or `int8`
-: These are optional Vulkan features. Numba types Python literals as
-  `float64`/`int64`, and the SPIR-V backend currently forces `int8`, so most
-  kernels need all three. Desktop GPUs provide them; many mobile GPUs and
-  Apple devices do not. Launching a kernel on a device that lacks a feature
-  raises {py:class}`~numba_vulkan.errors.VulkanSupportError`.
+Devices without `float64` or `int64`
+: These are optional Vulkan features, missing on many mobile GPUs and on
+  Apple devices. Kernels are narrowed to 32-bit types there (see
+  {doc}`usage`), which changes results at the level of `float32` rounding
+  and limits integers to 32 bits. Code that depends on 64-bit values, such
+  as integer constants beyond 32 bits, is rejected. This path is tested on
+  desktop devices opened with the features switched off, not yet on
+  hardware that lacks them.
 
 Data transfer
 : NumPy arguments are copied to the device on every call, and written ones

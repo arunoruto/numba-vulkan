@@ -11,6 +11,7 @@ Most of these constructs come from libclc, whose ``clspv`` build expects
 the clspv compiler to legalise them.
 """
 
+import functools
 import re
 
 _NAME = r'%(?:"[^"]+"|[-a-zA-Z$._0-9]+)'
@@ -296,7 +297,7 @@ def expand_funnel_shift(text):
     return _FSHL.sub(repl, text)
 
 
-def expand_mul_hi(text):
+def expand_mul_hi(text, narrow=False):
     """Rewrite libclc's 32-bit ``mul_hi`` helper as a 64-bit multiplication.
 
     ``__clc_mul_hi`` returns the upper half of a product. libclc's clspv
@@ -306,6 +307,8 @@ def expand_mul_hi(text):
     ----------
     text : str
         Textual LLVM IR.
+    narrow : bool
+        Use 32-bit arithmetic only, for devices without 64-bit integers.
 
     Returns
     -------
@@ -319,6 +322,42 @@ def expand_mul_hi(text):
         n, extend = next(_COUNTER), "zext" if kind == "jj" else "sext"
         shift = "lshr" if kind == "jj" else "ashr"
         p = f"%mulhi{n}"
+        if narrow:
+            # Without 64-bit integers: multiply the 16-bit halves.
+            lines = [
+                f"{p}.al = and i32 {a}, 65535",
+                f"{p}.ah = lshr i32 {a}, 16",
+                f"{p}.bl = and i32 {b}, 65535",
+                f"{p}.bh = lshr i32 {b}, 16",
+                f"{p}.ll = mul i32 {p}.al, {p}.bl",
+                f"{p}.lh = mul i32 {p}.al, {p}.bh",
+                f"{p}.hl = mul i32 {p}.ah, {p}.bl",
+                f"{p}.hh = mul i32 {p}.ah, {p}.bh",
+                f"{p}.c0 = lshr i32 {p}.ll, 16",
+                f"{p}.c1 = and i32 {p}.lh, 65535",
+                f"{p}.c2 = and i32 {p}.hl, 65535",
+                f"{p}.c3 = add i32 {p}.c0, {p}.c1",
+                f"{p}.c4 = add i32 {p}.c3, {p}.c2",
+                f"{p}.c5 = lshr i32 {p}.c4, 16",
+                f"{p}.h0 = lshr i32 {p}.lh, 16",
+                f"{p}.h1 = lshr i32 {p}.hl, 16",
+                f"{p}.h2 = add i32 {p}.hh, {p}.h0",
+                f"{p}.h3 = add i32 {p}.h2, {p}.h1",
+            ]
+            if kind == "jj":
+                lines.append(f"{res} = add i32 {p}.h3, {p}.c5")
+            else:
+                # signed from unsigned: subtract b where a < 0, a where b < 0
+                lines += [
+                    f"{p}.u = add i32 {p}.h3, {p}.c5",
+                    f"{p}.sa = ashr i32 {a}, 31",
+                    f"{p}.sb = ashr i32 {b}, 31",
+                    f"{p}.ma = and i32 {p}.sa, {b}",
+                    f"{p}.mb = and i32 {p}.sb, {a}",
+                    f"{p}.d = sub i32 {p}.u, {p}.ma",
+                    f"{res} = sub i32 {p}.d, {p}.mb",
+                ]
+            return "\n".join(indent + line for line in lines)
         return "\n".join(
             [
                 f"{indent}{p}.a = {extend} i32 {a} to i64",
@@ -459,13 +498,15 @@ def expand_byte_table_loads(text):
     return "\n".join(out) + "\n"
 
 
-def legalize(text):
+def legalize(text, narrow_ints=False):
     """Apply all rewrites.
 
     Parameters
     ----------
     text : str
         Textual LLVM IR after optimisation.
+    narrow_ints : bool
+        Whether the kernel must not use 64-bit integers.
 
     Returns
     -------
@@ -479,7 +520,7 @@ def legalize(text):
         expand_fmuladd,
         expand_ctlz,
         expand_funnel_shift,
-        expand_mul_hi,
+        functools.partial(expand_mul_hi, narrow=narrow_ints),
         avoid_faceforward,
         rename_minimumnum,
         expand_byte_table_loads,

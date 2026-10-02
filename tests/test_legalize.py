@@ -166,8 +166,9 @@ define float @f(float %a, float %b, float %c) {
     assert rewritten(3.0, 0.0, 1.0) == 8.5
 
 
+@pytest.mark.parametrize("narrow", [False, True], ids=["64-bit", "32-bit"])
 @pytest.mark.parametrize("kind,extend", [("jj", "u"), ("ii", "s")])
-def test_mul_hi(kind, extend):
+def test_mul_hi(kind, extend, narrow):
     text = f"""
 declare dso_local spir_func i32 @_Z12__clc_mul_hi{kind}(i32 noundef, i32 noundef)
 define i32 @f(i32 %a, i32 %b) {{
@@ -175,7 +176,9 @@ define i32 @f(i32 %a, i32 %b) {{
   ret i32 %r
 }}
 """
-    rewritten = compile_ir(legalize.expand_mul_hi(text), "i32", ["i32", "i32"])
+    expanded = legalize.expand_mul_hi(text, narrow=narrow)
+    assert ("i64" in expanded) is not narrow
+    rewritten = compile_ir(expanded, "i32", ["i32", "i32"])
     for a in INTS32:
         for b in INTS32:
             if extend == "u":

@@ -139,8 +139,9 @@ without it, but that is about the basic operations, is driver-specific,
 and does not add library functions.
 
 **Double-float arithmetic** (representing a `float64` as two `float32`
-values). Not a library to reuse here, but the likely way to offer
-`float64` on devices without the `shaderFloat64` feature (KI-17).
+values). Not a library to reuse here, but the likely way to offer real
+`float64` precision on devices without the `shaderFloat64` feature, where
+kernels are currently narrowed to `float32` (KI-17).
 
 ## Open points
 

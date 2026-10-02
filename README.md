@@ -296,12 +296,12 @@ Does not work:
   math library. Wheels bundle it; in a source checkout without it such calls
   raise, unless you opt in to float32 precision with
   `@nv.jit(narrow_math=True)`.
-- **Slices, array views, NumPy functions on whole arrays, array allocation,
-  `try`/`except`, recursion.**
-- **Devices without float64, int64 or int8 support.** Numba types Python
-  literals as float64/int64, and the SPIR-V backend currently forces int8, so
-  most kernels need all three. Desktop GPUs have them; many mobile GPUs and
-  Apple devices do not. Kernels fail with a clear error on such devices.
+- **Anything that creates an array** (`a * 2`, `a[mask]`, `np.zeros`),
+  `try`/`except`, recursion.
+- **float64 precision on devices without float64.** Many mobile GPUs and
+  Apple devices lack float64 or int64. Kernels are narrowed to 32-bit types
+  there, with a warning; this path is tested only on desktop GPUs with the
+  features switched off.
 - **Selecting between array elements by reference** in ways the optimiser
   turns into pointer selects is rejected.
 
@@ -334,7 +334,7 @@ ones most likely to bite:
 | KI-01 | float64 `math.sin(x)`, `x ** 2.5`... need libclc, which a source checkout lacks | install a wheel, or set `NUMBA_VULKAN_LIBCLC` |
 | KI-04 | nothing that creates an array: `a * 2`, `a[mask]`, `np.zeros`, `axis=` reductions | work on elements and views |
 | KI-10 | no bounds checks unless asked for; integer division by zero is not reported | `@nv.jit(boundscheck=True)` while debugging |
-| KI-17 | most kernels need the optional float64/int64/int8 device features | none yet |
+| KI-17 | running without float64/int64 (mobile, Apple) is tested only with the features switched off on desktop GPUs | report what you find |
 
 `tests/test_known_issues.py` reproduces the coverage gaps as expected
 failures, so the list stays honest:
@@ -361,7 +361,7 @@ To continue the work, start with the
 - [ ] Asynchronous launches; scalars as push constants
 - [x] Slices, array views, iteration and reductions
 - [ ] Array expressions and local arrays
-- [ ] A float32-by-default typing mode, so kernels run on devices without float64
+- [x] Kernels narrowed to 32-bit types on devices without float64/int64
 - [x] float64 math, through libclc
 - [x] Bundle libclc in wheels
 - [ ] Publish to PyPI
