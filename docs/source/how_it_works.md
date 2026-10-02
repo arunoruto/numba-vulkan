@@ -147,6 +147,24 @@ decorated `NoContraction`, because shader compilers otherwise reassociate
 arithmetic freely, which Numba code does not expect. And the module is
 checked for constructs known to crash drivers before it is handed to one.
 
+## Caching
+
+Everything after Numba's lowering (linking libclc, the LLVM passes, the
+rewrites described above and the SPIR-V backend) is a function of the
+unoptimised LLVM IR and of this package. {py:mod}`numba_vulkan.kernelcache`
+stores the result under a hash of the IR, the options that affect code
+generation, the package's own source, the llvmlite version and the libclc
+file. A later process that arrives at the same IR reads the SPIR-V from
+`~/.cache/numba-vulkan/kernels` instead of producing it again.
+
+Because the key is derived from the code Numba generated, an edit to the
+kernel, to a function it calls or to the shape or type of a global it reads
+always leads to a new entry; there is nothing to invalidate by hand. Two
+things that differ between processes are removed before hashing: the
+counter Numba appends to function names, and the placeholder numbers of
+constant arrays. The contents of constant arrays are not part of an entry;
+they are taken from the running process.
+
 ## Devices without 64-bit types
 
 `float64` and `int64` are optional device features, and Numba uses `int64`

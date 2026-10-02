@@ -367,7 +367,7 @@ To continue the work, start with the
 - [ ] Publish to PyPI
 - [ ] `@vectorize`-style ufuncs
 - [ ] Shared memory, atomics and barriers
-- [ ] On-disk caching of compiled kernels
+- [x] On-disk caching of compiled kernels
 - [ ] Testing on AMD, Apple (MoltenVK) and mobile GPUs
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>

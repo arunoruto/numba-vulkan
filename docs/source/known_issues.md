@@ -157,15 +157,18 @@ A `DeviceArray` can be created, passed to kernels and copied; it has no
 indexing, slicing, views or arithmetic, and no `__cuda_array_interface__`
 equivalent for sharing memory with other libraries.
 
-### KI-14: compiled kernels are not cached on disk
+### KI-14: Numba's part of compilation is repeated in every process
 
-A kernel compiles in 0.05 to 0.25 s, but every process compiles its kernels
-again: SPIR-V and pipelines are cached in memory only. Kernels that call
-math functions spend about 0.1 s of that parsing libclc.
+The SPIR-V of a kernel is cached on disk (see {doc}`how_it_works`), but
+type inference and lowering run again in every process, because the cache
+is keyed by their output. That leaves about 0.05 s per kernel, and the
+first kernel of a process additionally pays some 0.2 s for Numba's own
+start-up. Driver pipelines are not cached by this package either; the
+drivers keep shader caches of their own.
 
-**Fix:** cache SPIR-V on disk keyed by the LLVM IR, as Numba's
-`cache=True` does for the CPU target, and pass a `VkPipelineCache` to
-pipeline creation.
+**Fix:** a second cache level keyed by source, like Numba's `cache=True`,
+which has to decide when a function, the functions it calls and the
+globals it reads have changed.
 
 ### KI-15: one specialisation per buffer binding
 

@@ -18,8 +18,13 @@ import numpy as np
 from llvmlite import ir
 from numba.core.codegen import Codegen, CodeLibrary
 
-from numba_vulkan import _emit, libclc, narrowing
-from numba_vulkan.buffers import expand_buffer_access, renumber_constants
+from numba_vulkan import _emit, kernelcache, libclc, narrowing
+from numba_vulkan.buffers import (
+    constant_data,
+    constant_order,
+    expand_buffer_access,
+    renumber_constants,
+)
 from numba_vulkan.errors import SpirvCodegenError, VulkanUnsupportedError
 from numba_vulkan.legalize import legalize
 from numba_vulkan.structurize import structurize
@@ -717,6 +722,8 @@ class VulkanCodeLibrary(CodeLibrary):
         self._spirv = {}
         self.written_bindings = set()
         self.constants = {}
+        self._placeholders = {}
+        self._text = None
         self.first_constant_binding = 0
         self.mode = self.narrowed = narrowing.Mode()
 
@@ -876,14 +883,13 @@ class VulkanCodeLibrary(CodeLibrary):
                 + ", ".join(sorted(set(missing)))
             )
         text = structurize(text)
-        text, constants = renumber_constants(text, self.first_constant_binding)
-        # Constant arrays hold the element type the kernel reads.
-        self.constants = {
-            binding: np.ascontiguousarray(
-                data, dtype=narrowing.stored_dtype(data.dtype, self.mode)
-            )
-            for binding, data in constants.items()
-        }
+        text, self._placeholders = renumber_constants(
+            text, self.first_constant_binding, constant_order(self._source())
+        )
+        self._bind_constants()
+        if constant_order(text):
+            # A placeholder binding in a shader crashes drivers.
+            raise SpirvCodegenError("a constant array was not given a binding")
         text, self.written_bindings = expand_buffer_access(text)
         linked = llvm.parse_assembly(text)
         linked.verify()
@@ -897,7 +903,9 @@ class VulkanCodeLibrary(CodeLibrary):
         -------
         str
         """
-        return str(self._link_and_optimize())
+        if self._text is None:
+            self._text = str(self._link_and_optimize())
+        return self._text
 
     def get_asm_str(self):
         """Not available; disassemble `get_spirv` with ``spirv-dis`` instead.
@@ -927,11 +935,77 @@ class VulkanCodeLibrary(CodeLibrary):
         SpirvCodegenError
             If code generation fails.
         """
-        if exact not in self._spirv:
-            self._spirv[exact] = emit_spirv(
-                self.get_optimized_llvm_str(), exact, self.mode.ints
+        if exact in self._spirv:
+            return self._spirv[exact]
+        source = name = None
+        if kernelcache.enabled():
+            source = self._source()
+            order = constant_order(source)
+            # Constant arrays are numbered per process; name them by position.
+            canonical = renumber_constants(source, 0, order)[0]
+            name = kernelcache.key(
+                kernelcache.normalise(canonical),
+                exact,
+                tuple(self.mode),
+                self.first_constant_binding,
+                PASSES,
             )
-        return self._spirv[exact]
+            entry = kernelcache.load(name)
+            if entry is not None:
+                check_spirv(entry["spirv"])
+                self._text = entry["llvm_ir"]
+                self.written_bindings = set(entry["written"])
+                self.narrowed = narrowing.Mode(*entry["narrowed"])
+                self._placeholders = {
+                    int(binding): order[slot]
+                    for binding, slot in entry["constants"].items()
+                }
+                self._bind_constants()
+                self._spirv[exact] = entry["spirv"]
+                return entry["spirv"]
+        spirv = emit_spirv(self.get_optimized_llvm_str(), exact, self.mode.ints)
+        self._spirv[exact] = spirv
+        if name is not None:
+            order = constant_order(source)
+            kernelcache.store(
+                name,
+                {
+                    "spirv": spirv,
+                    "llvm_ir": self._text,
+                    "written": sorted(self.written_bindings),
+                    "narrowed": list(self.narrowed),
+                    "constants": {
+                        binding: order.index(placeholder)
+                        for binding, placeholder in self._placeholders.items()
+                    },
+                },
+            )
+        return spirv
+
+    def _source(self):
+        """Unoptimised LLVM IR of all modules that make up the kernel.
+
+        Returns
+        -------
+        str
+        """
+        return "\n".join(
+            str(module)
+            for library in self._all_libraries()
+            for module in library._modules
+        )
+
+    def _bind_constants(self):
+        """Look up the data of the kernel's constant arrays.
+
+        They hold the element type the kernel reads, which differs from
+        that of the array when the kernel is narrowed.
+        """
+        self.constants = {}
+        for binding, placeholder in self._placeholders.items():
+            data = constant_data(placeholder)
+            stored = narrowing.stored_dtype(data.dtype, self.mode)
+            self.constants[binding] = np.ascontiguousarray(data, dtype=stored)
 
 
 class VulkanCodegen(Codegen):
