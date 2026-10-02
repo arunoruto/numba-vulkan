@@ -102,12 +102,38 @@ entry point. SPIR-V forbids recursion, so this will not change.
 
 ### KI-23: less accurate math without libclc or with `fastmath`
 
-With libclc, all math functions are accurate to the last digit or two in
-both precisions. Without it, and for `float32` with `fastmath=True`, the
+With libclc, math functions are accurate to the last digit or two in both
+precisions, except `gamma` (KI-30). Without it, and for `float32` with `fastmath=True`, the
 drivers' and this package's own versions are used: `gamma` and `lgamma`
 are then accurate to about 1e-5, `erf` and `erfc` have an absolute error
 of about 1.5e-7, and the trigonometric functions are only as good as the
 driver's.
+
+### KI-30: `gamma` loses precision for large arguments
+
+libclc 22 computes `tgamma(x)` as `exp(lgamma(|x|))`, with the reflection
+formula for negative `x`. The error of `lgamma` is a few ulp of a value
+that reaches about 700, and `exp` turns it into a relative error of the
+result, so the error grows with the argument:
+
+| `math.gamma` | 2 < x < 10 | 10 < x < 50 | 50 < x < 171.6 |
+| --- | ---: | ---: | ---: |
+| numba-vulkan, `float64` | 38 ulp | 420 ulp | 1800 ulp (4e-13) |
+| numba-vulkan, `float32` | 33 ulp | 220 ulp (x < 35) | |
+| numba-cuda, Numba CPU | ≤ 3 ulp | ≤ 3 ulp | ≤ 3 ulp |
+
+These are maxima over 4000 random arguments per range, the same on the
+Titan X, the UHD 630 and llvmpipe. Below about −171 (`float64`) and −34
+(`float32`), where the result is tiny, the reflection overflows and
+`gamma` returns `+inf`; `fastmath` (this package's own version) returns 0
+there instead. `lgamma` itself is accurate to 3 ulp, except near its zeros
+between −2 and −4, where its absolute error is what remains bounded, as in
+most implementations.
+
+**Fix:** upstream libclc (LLVM 23) has a new `tgamma`, which Mesa's fork
+of libclc takes over with a further fix for devices without fused
+multiply-add. It could be ported to `mathfuncs.py` until the bundled libclc
+has it.
 
 ### KI-27: very large functions are not restructured
 
@@ -224,17 +250,18 @@ observed with NVIDIA driver 580.x and llvmlite 0.50 (LLVM 22). They should
 be re-evaluated when either changes. The benchmark dependency group pins
 `numpy<2.5`, because numba-cuda 0.30.4 does not import with NumPy 2.5.
 
-### KI-26: the bundled libclc is tied to an old nixpkgs revision
+### KI-26: the bundled libclc depends on NixOS 26.05
 
-Wheels bundle `clspv--.bc`, which `build-dist` copies from the Nix store.
-Current nixpkgs has removed libclc, so the devenv shell pins an older
-revision for it (input `nixpkgs-libclc`). The file must come from an LLVM
-no newer than the one inside llvmlite, so the bundled copy (LLVM 22) relies
-on the `llvmlite>=0.50` requirement, and a newer libclc cannot be bundled
-until llvmlite moves on.
+Wheels bundle `clspv--.bc` from the `nixpkgs-libclc` input, which follows
+NixOS 26.05, or from a pinned conda-forge package without Nix (see
+{doc}`math_library`). nixpkgs-unstable has removed libclc, so NixOS 26.11
+will most likely not have it. The file must come from an LLVM no newer
+than the one inside llvmlite, so the bundled copy (LLVM 22) relies on the
+`llvmlite>=0.50` requirement.
 
-**Fix:** build libclc's clspv target from the LLVM sources in a small Nix
-derivation of this project's own, pinned to llvmlite's LLVM version.
+**Fix:** if 26.11 drops it, keep the input on 26.05 or build libclc's
+Vulkan target from the LLVM sources in a small Nix derivation of this
+project's own, pinned to llvmlite's LLVM version.
 
 ### KI-22: lint warnings
 

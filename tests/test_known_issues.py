@@ -62,3 +62,31 @@ def test_known_issue(issue):
             rtol=2e-3,
             atol=1e-5,
         )
+
+
+@nv.jit
+def _gamma(x, out):
+    i = nv.global_id(0)
+    if i < x.size:
+        out[i] = math.gamma(x[i])
+
+
+# KI-30: libclc 22's tgamma is exp(lgamma), whose error grows with the size of
+# lgamma, and its reflection overflows for large negative arguments.
+GAMMA = {
+    "float64 large": (np.linspace(100.25, 170.75, 64), 1e-14),
+    "float64 tiny negative": (np.array([-171.3, -171.5, -175.5]), 1e-14),
+    "float32 tiny negative": (np.array([-34.2, -34.5, -35.5], dtype=f32), 1e-5),
+}
+
+
+@pytest.mark.parametrize("case", GAMMA)
+@pytest.mark.xfail(strict=True, reason="KI-30 in docs/source/known_issues.md")
+def test_ki30_gamma(case):
+    x, rtol = GAMMA[case]
+    out = np.zeros_like(x)
+    _gamma.forall(x.size)(x, out)
+    want = np.array([math.gamma(float(v)) for v in x])
+    # Results below the normal range are only as precise as their spacing.
+    atol = 2 * float(np.finfo(x.dtype).smallest_subnormal)
+    np.testing.assert_allclose(out.astype(np.float64), want, rtol=rtol, atol=atol)

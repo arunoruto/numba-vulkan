@@ -110,8 +110,8 @@ def libclc_name(context, pyfn, ty):
     """Decide whether a ``math`` function is taken from libclc.
 
     libclc is preferred: its functions are accurate to the last digit or
-    two, give the same results on every device, and exist in double
-    precision. With ``fastmath``, float32 functions use the device's
+    two (``gamma`` excepted, see KI-30), give the same results on every
+    device, and exist in double precision. With ``fastmath``, float32 functions use the device's
     built-in versions instead, which are faster but less accurate and
     differ between drivers. float64 has no built-in alternative.
 
