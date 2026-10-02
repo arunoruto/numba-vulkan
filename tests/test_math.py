@@ -135,8 +135,9 @@ def test_libclc_version_from_the_version_file(tmp_path, monkeypatch):
     assert libclc.version() == "22.1.8 (conda-forge x)"
 
 
-def test_libclc_version_from_a_nix_store_path(tmp_path, monkeypatch):
-    path = tmp_path / "abc-libclc-22.1.8" / "share" / "clc" / "clspv--.bc"
+@pytest.mark.parametrize("package", ["libclc", "libclc-clspv"])
+def test_libclc_version_from_a_nix_store_path(tmp_path, monkeypatch, package):
+    path = tmp_path / f"abc-{package}-22.1.8" / "share" / "clc" / "clspv--.bc"
     path.parent.mkdir(parents=True)
     path.write_bytes(b"BC\xc0\xde")
     monkeypatch.setattr(libclc, "find_bitcode", lambda: str(path))

@@ -2,7 +2,6 @@
   pkgs,
   lib,
   config,
-  inputs,
   ...
 }:
 
@@ -16,13 +15,10 @@
   ];
 
   # libclc: LLVM's OpenCL math library as bitcode. numba-vulkan links its
-  # functions into kernels for accurate and double-precision math. The
-  # version must not be newer than the LLVM inside llvmlite (22).
-  env.NUMBA_VULKAN_LIBCLC =
-    let
-      libclcPkgs = inputs.nixpkgs-libclc.legacyPackages.${pkgs.stdenv.hostPlatform.system};
-    in
-    "${libclcPkgs.llvmPackages_22.libclc}/share/clc/clspv--.bc";
+  # functions into kernels for accurate and double-precision math. Built
+  # here (nix/libclc.nix) from nixpkgs' LLVM 22 sources, the version inside
+  # llvmlite, since nixpkgs no longer packages libclc's Vulkan target.
+  env.NUMBA_VULKAN_LIBCLC = "${pkgs.callPackage ./nix/libclc.nix { }}/share/clc/clspv--.bc";
 
   # sdist and wheel with libclc bundled; see the Makefile, which works without Nix.
   scripts.build-dist.exec = ''

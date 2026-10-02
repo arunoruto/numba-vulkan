@@ -56,10 +56,12 @@ devenv shell runs it). It fetches libclc's `clspv--.bc`
 (`scripts/fetch_libclc.py`), checks its SHA-256, puts it into
 `src/numba_vulkan/data/` (ignored by git) and runs `uv build`; a check then
 makes sure both distributions carry it. libclc comes from Nix where Nix is
-installed: the `nixpkgs-libclc` input of `devenv.lock`, the same package
-the development shell and the tests use. Its version is whatever that
-revision has, so moving the input updates the bundled libclc and reverting
-`devenv.lock` undoes it. Without Nix it comes from conda-forge
+installed: `nix/libclc.nix` builds its Vulkan target from the LLVM 22
+sources of the nixpkgs in `devenv.lock`, the same file the development
+shell and the tests use (about half a minute; clang and LLVM come from the
+binary cache). Its version is whatever `llvmPackages_22` has there, so
+updating `devenv.lock` updates the bundled libclc and reverting it undoes
+that. Without Nix it comes from conda-forge
 (`make dist LIBCLC_SOURCE=conda` forces that); that download is pinned by
 URL and SHA-256 in the script and has to be moved by hand, and the Nix
 build prints a note when the two versions differ. Either way the wheel
