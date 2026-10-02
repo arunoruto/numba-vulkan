@@ -172,3 +172,17 @@ def test_probe_results_are_stored(tmp_path, monkeypatch):
         "soft_fma": device.mode.soft_fma,
         "soft_rounding": device.mode.soft_rounding,
     }
+
+
+def test_a_failing_probe_warns_and_applies_no_workarounds(monkeypatch):
+    monkeypatch.setenv("NUMBA_VULKAN_CACHE", "0")
+    monkeypatch.delenv(probes.FMA_ENV_VAR, raising=False)
+    monkeypatch.delenv(probes.ROUNDING_ENV_VAR, raising=False)
+
+    def broken(device):
+        raise RuntimeError("driver crashed")
+
+    monkeypatch.setattr(probes, "_measure", broken)
+    with pytest.warns(UserWarning, match="could not probe"):
+        result = probes.workarounds(nv.get_device())
+    assert result == {"soft_fma": False, "soft_rounding": False}

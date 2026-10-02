@@ -132,6 +132,10 @@ uv sync
 uv run pytest
 ```
 
+On macOS, Vulkan runs on MoltenVK (`brew install molten-vk vulkan-loader`);
+see [Getting started](https://arunoruto.github.io/numba-vulkan/getting_started.html#macos)
+for the details. It is untested so far.
+
 The test suite runs every test on every Vulkan device it finds.
 
 ### Documentation
@@ -298,7 +302,7 @@ In the first collected run (Intel i9-9900K, NVIDIA TITAN X, Intel UHD 630):
 Please add a run from your machine; it takes a few minutes:
 
 ```sh
-uv run python benchmarks/collect.py --user <your GitHub name> --machine <label>
+uv run python benchmarks/collect.py --user <your GitHub name>
 ```
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>

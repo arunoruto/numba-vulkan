@@ -3,12 +3,26 @@
 import itertools
 import math
 import os
+import sys
 import warnings
 import weakref
 from dataclasses import dataclass, field
 
 import numpy as np
-import vulkan as vk
+
+try:
+    import vulkan as vk
+except OSError as exc:  # the `vulkan` package could not open the loader
+    hint = (
+        " On macOS, install MoltenVK and the loader (`brew install molten-vk "
+        "vulkan-loader`) and make the loader findable, for example with "
+        "`export DYLD_FALLBACK_LIBRARY_PATH=/opt/homebrew/lib`, or install "
+        "the LunarG Vulkan SDK."
+        if sys.platform == "darwin"
+        else " Install your distribution's Vulkan loader (libvulkan1 on "
+        "Debian and Ubuntu) and a driver."
+    )
+    raise ImportError(f"numba-vulkan needs a Vulkan loader: {exc}.{hint}") from exc
 
 from numba_vulkan import narrowing
 from numba_vulkan.buffers import print_formats
@@ -104,8 +118,21 @@ def _get_instance():
             engineVersion=1,
             apiVersion=_API_VERSION,
         )
+        # Portability drivers, MoltenVK on macOS among them, are only listed
+        # when the instance asks for them.
+        available = {
+            e.extensionName for e in vk.vkEnumerateInstanceExtensionProperties(None)
+        }
+        extensions, flags = [], 0
+        if _PORTABILITY_ENUMERATION in available:
+            extensions.append(_PORTABILITY_ENUMERATION)
+            flags |= vk.VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR
         info = vk.VkInstanceCreateInfo(
-            sType=vk.VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, pApplicationInfo=app
+            sType=vk.VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
+            flags=flags,
+            pApplicationInfo=app,
+            enabledExtensionCount=len(extensions),
+            ppEnabledExtensionNames=extensions or None,
         )
         _instance = vk.vkCreateInstance(info, None)
     return _instance
@@ -158,6 +185,10 @@ def _vulkan12_features(handle):
 
 
 _FLOAT_ATOMICS = "VK_EXT_shader_atomic_float"
+_PORTABILITY_ENUMERATION = "VK_KHR_portability_enumeration"
+# Implementations of Vulkan on top of other APIs (MoltenVK) offer this, and
+# then it must be enabled.
+_PORTABILITY_SUBSET = "VK_KHR_portability_subset"
 
 
 def _float_atomic_features(handle):
@@ -295,6 +326,11 @@ class Device:
             shaderInt16=info.int16,
         )
         extensions, chain = [], {}
+        offered = {
+            e.extensionName for e in vk.vkEnumerateDeviceExtensionProperties(phys, None)
+        }
+        if _PORTABILITY_SUBSET in offered:
+            extensions.append(_PORTABILITY_SUBSET)
         if info.float32_atomic_add:
             chain["pNext"] = vk.VkPhysicalDeviceShaderAtomicFloatFeaturesEXT(
                 sType=vk.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_ATOMIC_FLOAT_FEATURES_EXT,
