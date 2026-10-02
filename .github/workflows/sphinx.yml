@@ -26,6 +26,14 @@ jobs:
         run: |
           uv sync --only-group docs
 
+      - name: Check | No merge conflict markers
+        # Sphinx renders them as text without a warning.
+        run: |
+          if git grep -nE '^(<<<<<<<|>>>>>>>|\|\|\|\|\|\|\|) '; then
+            echo "merge conflict markers found" >&2
+            exit 1
+          fi
+
       - name: Build | Run Sphinx
         run: |
           cd docs

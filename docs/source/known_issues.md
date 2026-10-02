@@ -14,27 +14,13 @@ uv run pytest tests/test_known_issues.py -rxX
 ```
 
 Numbers are not reused: KI-02, KI-03, KI-05, KI-06, KI-07, KI-08, KI-13,
-<<<<<<< HEAD
-KI-24, KI-25, KI-30 and KI-31 (NumPy functions on scalars, missing `math`
-||||||| parent of 84d48ca (build: build libclc's Vulkan target ourselves (nix/libclc.nix))
-KI-24, KI-25 and KI-30 (NumPy functions on scalars, missing `math`
-=======
-KI-24, KI-25, KI-26 and KI-30 (NumPy functions on scalars, missing `math`
->>>>>>> 84d48ca (build: build libclc's Vulkan target ourselves (nix/libclc.nix))
+KI-24, KI-25, KI-26, KI-30 and KI-31 (NumPy functions on scalars, missing `math`
 functions, allocating arrays in kernels, global constant arrays, complex
 numbers, `print`, all data copied on every call, nested loop exits that
-<<<<<<< HEAD
-failed to compile, libclc linked in full for every kernel, `gamma` losing
-precision for large arguments, `float64` functions losing precision on
-Intel's and Mesa's drivers) have been fixed.
-||||||| parent of 84d48ca (build: build libclc's Vulkan target ourselves (nix/libclc.nix))
-failed to compile, libclc linked in full for every kernel, `gamma` losing
-precision for large arguments) have been fixed.
-=======
 failed to compile, libclc linked in full for every kernel, libclc depending
-on an old NixOS release, `gamma` losing precision for large arguments)
-have been fixed.
->>>>>>> 84d48ca (build: build libclc's Vulkan target ourselves (nix/libclc.nix))
+on an old NixOS release, `gamma` losing precision for large arguments,
+`float64` functions losing precision on Intel's and Mesa's drivers) have
+been fixed.
 
 ## Language and library coverage
 
@@ -242,73 +228,6 @@ The `srem` rewrite and the pointer-select check exist because of behaviour
 observed with NVIDIA driver 580.x and llvmlite 0.50 (LLVM 22). They should
 be re-evaluated when either changes. The benchmark dependency group pins
 `numpy<2.5`, because numba-cuda 0.30.4 does not import with NumPy 2.5.
-
-<<<<<<< HEAD
-### KI-26: the bundled libclc depends on NixOS 26.05
-
-Wheels bundle `clspv--.bc` from the `nixpkgs-libclc` input, which follows
-NixOS 26.05, or from a pinned conda-forge package without Nix (see
-{doc}`math_library`). nixpkgs-unstable has removed libclc, so NixOS 26.11
-will most likely not have it. The file must come from an LLVM no newer
-than the one inside llvmlite, so the bundled copy (LLVM 22) relies on the
-`llvmlite>=0.50` requirement.
-
-**Fix:** if 26.11 drops it, keep the input on 26.05 or build libclc's
-Vulkan target from the LLVM sources in a small Nix derivation of this
-project's own, pinned to llvmlite's LLVM version.
-||||||| parent of 84d48ca (build: build libclc's Vulkan target ourselves (nix/libclc.nix))
-### KI-26: the bundled libclc depends on NixOS 26.05
-
-Wheels bundle `clspv--.bc` from the `nixpkgs-libclc` input, which follows
-NixOS 26.05, or from a pinned conda-forge package without Nix (see
-{doc}`math_library`). nixpkgs-unstable has removed libclc, so NixOS 26.11
-will most likely not have it. The file must come from an LLVM no newer
-than the one inside llvmlite, so the bundled copy (LLVM 22) relies on the
-`llvmlite>=0.50` requirement.
-
-**Fix:** if 26.11 drops it, keep the input on 26.05 or build libclc's
-Vulkan target from the LLVM sources in a small Nix derivation of this
-project's own, pinned to llvmlite's LLVM version.
-
-### KI-31: `float64` trigonometric functions on llvmpipe
-
-Measured against mpmath on 1500 random arguments per function, every
-libclc `float64` function used here is within 2 ulp on the Titan X, the UHD
-630 and llvmpipe, with one exception: on llvmpipe, `sin`, `cos` and `tan`
-are off by up to 1.6e5, 1.2e7 and 7e4 ulp for arguments up to 1000 (1 to 2
-ulp on the other two devices). llvmpipe does not fuse `float64`
-multiply-adds, and libclc's argument reduction for them likely depends on
-fusion; that is not confirmed.
-
-libclc's `exp` code had a similar problem on the UHD 630 and llvmpipe (up
-to 208 and 673 ulp near 700, for reasons not known), which affected `exp`,
-`expm1`, `sinh`, `cosh`, `erfc` and `gamma`. This package now reduces the
-argument of `exp` itself (`mathimpl.reduced_exp`) and computes those
-functions with it, which brings them to 1 to 2 ulp on all three devices.
-
-**Fix:** an argument reduction for the trigonometric functions that does
-not rely on fused multiply-add, if `float64` on llvmpipe matters.
-
-=======
-### KI-31: `float64` trigonometric functions on llvmpipe
-
-Measured against mpmath on 1500 random arguments per function, every
-libclc `float64` function used here is within 2 ulp on the Titan X, the UHD
-630 and llvmpipe, with one exception: on llvmpipe, `sin`, `cos` and `tan`
-are off by up to 1.6e5, 1.2e7 and 7e4 ulp for arguments up to 1000 (1 to 2
-ulp on the other two devices). llvmpipe does not fuse `float64`
-multiply-adds, and libclc's argument reduction for them likely depends on
-fusion; that is not confirmed.
-
-libclc's `exp` code had a similar problem on the UHD 630 and llvmpipe (up
-to 208 and 673 ulp near 700, for reasons not known), which affected `exp`,
-`expm1`, `sinh`, `cosh`, `erfc` and `gamma`. This package now reduces the
-argument of `exp` itself (`mathimpl.reduced_exp`) and computes those
-functions with it, which brings them to 1 to 2 ulp on all three devices.
-
-**Fix:** an argument reduction for the trigonometric functions that does
-not rely on fused multiply-add, if `float64` on llvmpipe matters.
->>>>>>> 84d48ca (build: build libclc's Vulkan target ourselves (nix/libclc.nix))
 
 ### KI-22: lint warnings
 
