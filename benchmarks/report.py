@@ -204,12 +204,12 @@ def machines_chart(runs, path):
     )
     for ax, (suite, workload) in zip(axes.flat, workloads):
         times = []
-        for backend in COLORS:
+        for backend, color in COLORS.items():
             for i, run in enumerate(runs):
                 record = _fastest(run, suite, workload, backend)
                 if record is not None:
                     times.append(best(record))
-                    ax.scatter(best(record), i, color=COLORS[backend], s=28, zorder=3,
+                    ax.scatter(best(record), i, color=color, s=28, zorder=3,
                                label=backend if i == 0 else None)  # fmt: skip
         ax.set_yticks(range(len(runs)), [machine_key(r) for r in runs])
         ax.set_ylim(len(runs) - 0.5, -0.5)
@@ -321,6 +321,9 @@ def report(output, directory=RESULTS):
         The files written.
     """
     output.mkdir(parents=True, exist_ok=True)
+    # Charts of machines that are gone (or were renamed) would linger.
+    for stale in output.glob("backends-*.svg"):
+        stale.unlink()
     runs = load(directory)
     written = [output / "runs.md"]
     written[0].write_text(runs_table(runs) if runs else "No results collected yet.\n")
