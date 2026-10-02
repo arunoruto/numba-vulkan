@@ -196,6 +196,24 @@ def radius(x, y, out):
         out[i] = norm(x[i], y[i])
 ```
 
+Numba's ufunc decorators work too, without writing a kernel:
+
+```python
+from numba import vectorize, guvectorize
+
+@vectorize(["float32(float32, float32)"], target="vulkan")
+def hypot(a, b):
+    return math.sqrt(a * a + b * b)
+
+@guvectorize(["void(float32[:], float32[:], float32[:])"], "(n),(n)->()",
+             target="vulkan")
+def dot(a, b, out):
+    out[0] = np.dot(a, b)
+
+hypot(x, y)               # element-wise, with broadcasting
+dot(matrix, vector)       # one dot product per row
+```
+
 Because it is a real Numba target, `@overload` works with it:
 
 ```python
@@ -366,7 +384,8 @@ To continue the work, start with the
 - [x] float64 math, through libclc
 - [x] Bundle libclc in wheels
 - [ ] Publish to PyPI
-- [ ] `@vectorize`-style ufuncs
+- [x] `numba.vectorize` / `numba.guvectorize` with `target="vulkan"`
+- [ ] Ufunc methods (`reduce`, `accumulate`, `outer`)
 - [ ] Shared memory, atomics and barriers
 - [x] On-disk caching of compiled kernels
 - [ ] Testing on AMD, Apple (MoltenVK) and mobile GPUs

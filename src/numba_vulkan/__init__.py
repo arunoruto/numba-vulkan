@@ -36,3 +36,6 @@ __all__ = [
     "select_device",
     "to_device",
 ]
+
+# Registers target="vulkan" with numba.vectorize and numba.guvectorize.
+from numba_vulkan import vectorizers  # noqa: E402, F401

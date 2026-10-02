@@ -244,6 +244,58 @@ devices. `@nv.jit(fastmath=True)` trades that for speed: `float32` math
 uses the device's built-in functions and the driver may reorder
 arithmetic.
 
+## Ufuncs: `vectorize` and `guvectorize`
+
+Numba's own decorators accept `target="vulkan"` once `numba_vulkan` is
+imported. The scalar function is compiled for Vulkan and applied to every
+element on the device, with NumPy's broadcasting:
+
+```python
+import math
+import numba
+import numba_vulkan  # registers the target
+
+@numba.vectorize(["float32(float32, float32)", "float64(float64, float64)"],
+                 target="vulkan")
+def gaussian(x, sigma):
+    return math.exp(-0.5 * (x / sigma) ** 2)
+
+y = gaussian(x, 1.5)             # x: a NumPy or device array
+gaussian(x, sigmas[:, None], out=grid)
+```
+
+Without signatures (`@numba.vectorize(target="vulkan")`), each call
+compiles for the types of its arguments. Python scalars then adapt to the
+arrays as in NumPy 2, so `f(x32, 2.0)` stays in `float32`; inside the
+function, Numba's own typing rules apply as usual.
+
+`guvectorize` works the same way with a layout. The core function gets
+views of the core dimensions and writes its results into the outputs:
+
+```python
+@numba.guvectorize(["void(float32[:], float32[:], float32[:])"],
+                   "(n),(n)->()", target="vulkan")
+def distance(a, b, out):
+    total = np.float32(0)
+    for i in range(a.shape[0]):
+        total += (a[i] - b[i]) ** 2
+    out[0] = math.sqrt(total)
+
+d = distance(points, centre)      # points: (N, 16), centre: (16,)
+```
+
+As on the CPU, an argument with layout `()` is a scalar if its signature
+type is a scalar and a one-element array otherwise, outputs with layout
+`()` are written as `out[0]`, and a `guvectorize` without signatures needs
+its outputs passed in. Both kinds of function take `out=` and `device=`,
+and return device arrays when any input is one, so chains of calls stay
+on the device.
+
+The results are not real `numpy.ufunc` objects: `reduce`, `accumulate`,
+`outer` and NumPy's dispatch (`np.add(a, b)` on device arrays) are not
+available, and they cannot be called from inside a kernel; call the
+`@nv.jit` function there instead.
+
 ## Errors
 
 An exception raised in a kernel, or in a function it calls, is raised by

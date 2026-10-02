@@ -14,6 +14,9 @@ are tracked in {doc}`known_issues`.
   written through; `a[1:3] = x` fills a slice from a scalar or an array
 - iteration over arrays (`for v in a`, `enumerate`, `zip`)
 - NumPy arrays from the enclosing scope as read-only tables
+- `numba.vectorize` and `numba.guvectorize` with `target="vulkan"`, with
+  broadcasting, device arrays and `out=`; no `reduce` or other ufunc
+  methods
 - `sum`, `prod`, `mean`, `min`, `max`, `argmin`, `argmax`, `any`, `all` over
   a whole array or view, as methods and as NumPy functions, and `np.dot`
   of two 1-d arrays

@@ -147,6 +147,19 @@ decorated `NoContraction`, because shader compilers otherwise reassociate
 arithmetic freely, which Numba code does not expect. And the module is
 checked for constructs known to crash drivers before it is handed to one.
 
+## Ufuncs
+
+Numba's `vectorize` and `guvectorize` look up a builder class per target;
+{py:mod}`numba_vulkan.vectorizers` registers one for `"vulkan"`, as
+numba-cuda does for `"cuda"`. A call resolves the signature from the
+argument types, broadcasts on the host and launches a kernel that is
+generated as Python source from a template: one invocation per element
+(or per loop iteration of a gufunc), which unravels its position into
+per-axis indices, picks index 0 along axes of extent 1, and calls the
+scalar or core function with elements or views. Inputs that already have
+the result's shape are passed flattened, which saves the index arithmetic.
+The generated kernels go through the same pipeline and cache as any other.
+
 ## Caching
 
 Everything after Numba's lowering (linking libclc, the LLVM passes, the
