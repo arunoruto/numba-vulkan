@@ -21,8 +21,8 @@ are tracked in {doc}`known_issues`.
   `exch`, `and_`, `or_`, `xor`, `cas`) on 32-bit elements, and launches
   with an explicit workgroup size (`kernel[groups, local_size]`)
 - `numba.vectorize` and `numba.guvectorize` with `target="vulkan"`, with
-  broadcasting, device arrays and `out=`; no `reduce` or other ufunc
-  methods
+  broadcasting, device arrays, `out=` and `reduce` over all elements; no
+  other ufunc methods
 - `sum`, `prod`, `mean`, `min`, `max`, `argmin`, `argmax`, `any`, `all` over
   a whole array or view, as methods and as NumPy functions, and `np.dot`
   of two 1-d arrays

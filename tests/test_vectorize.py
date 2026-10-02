@@ -244,3 +244,39 @@ def test_device_array_reshape(device):
     np.testing.assert_array_equal(view.copy_to_host(), np.arange(12).reshape(3, 4))
     with pytest.raises(ValueError):
         view.reshape(5, 2)
+
+
+@vectorize(
+    ["float32(float32, float32)", "int32(int32, int32)"], target="vulkan", identity=0
+)
+def plus(a, b):
+    return a + b
+
+
+@vectorize(target="vulkan")
+def larger(a, b):
+    return max(a, b)
+
+
+@pytest.mark.parametrize("size", [1, 2, 255, 512, 513, 100_003])
+def test_reduce(device, size):
+    x = RNG.random(size).astype(f32)
+    np.testing.assert_allclose(plus.reduce(x, device=device), x.sum(), rtol=1e-5)
+    assert larger.reduce(x, device=device) == x.max()  # no identity needed
+    ints = np.arange(size, dtype=np.int32)
+    assert plus.reduce(ints, device=device) == ints.sum(dtype=np.int32)  # wraps
+
+
+def test_reduce_variants(device):
+    assert plus.identity == 0
+    assert plus.reduce(np.zeros(0, f32), device=device) == 0
+    with pytest.raises(ValueError, match="has no identity"):
+        larger.reduce(np.zeros(0, f32), device=device)
+    grid = np.arange(12, dtype=f32).reshape(3, 4)
+    assert plus.reduce(grid, axis=None, device=device) == 66
+    with pytest.raises(ValueError, match="axis=0 for 1-d"):
+        plus.reduce(grid, device=device)
+    on_device = nv.to_device(np.arange(1000, dtype=np.int32), device)
+    assert plus.reduce(on_device) == 499500
+    with pytest.raises(TypeError, match="function of two arguments"):
+        collatz_steps.reduce(np.arange(4))

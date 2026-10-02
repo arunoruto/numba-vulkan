@@ -420,7 +420,8 @@ To continue the work, start with the
 - [x] Bundle libclc in wheels
 - [ ] Publish to PyPI
 - [x] `numba.vectorize` / `numba.guvectorize` with `target="vulkan"`
-- [ ] Ufunc methods (`reduce`, `accumulate`, `outer`)
+- [x] `reduce` of `vectorize` functions
+- [ ] Other ufunc methods (`accumulate`, `outer`)
 - [x] Shared memory, atomics, barriers and CUDA-style launch configuration
 - [x] On-disk caching of compiled kernels
 - [ ] Testing on AMD, Apple (MoltenVK) and mobile GPUs

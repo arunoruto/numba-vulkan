@@ -219,7 +219,7 @@ class VulkanVectorize:
     func : function
         The scalar function.
     identity : object, optional
-        Accepted for compatibility; reductions are not supported.
+        Result of `VulkanUFunc.reduce` on an empty array.
     cache : bool, optional
         Accepted for compatibility; kernels are always cached on disk.
     targetoptions : dict, optional
@@ -229,6 +229,7 @@ class VulkanVectorize:
 
     def __init__(self, func, identity=None, cache=False, targetoptions=None):
         self.pyfunc = func
+        self.identity = identity
         self.options = dict(targetoptions or {})
         self.signatures = []
 
@@ -253,7 +254,7 @@ class VulkanVectorize:
         -------
         VulkanUFunc
         """
-        return VulkanUFunc(self.pyfunc, self.signatures, self.options)
+        return VulkanUFunc(self.pyfunc, self.signatures, self.options, self.identity)
 
 
 class VulkanUFunc:
@@ -270,11 +271,15 @@ class VulkanUFunc:
         types of each call.
     options : dict
         Options for `numba_vulkan.jit`, and ``device``.
+    identity : object, optional
+        Result of `reduce` on an empty array.
 
     Attributes
     ----------
     nin, nout : int
         Number of inputs and outputs.
+    identity : object or None
+        As given.
 
     Examples
     --------
@@ -285,8 +290,9 @@ class VulkanUFunc:
     array([5.     , 6.40312], dtype=float32)
     """
 
-    def __init__(self, pyfunc, signatures, options):
+    def __init__(self, pyfunc, signatures, options, identity=None):
         self.pyfunc = pyfunc
+        self.identity = identity
         self.__name__ = pyfunc.__name__
         self.__doc__ = pyfunc.__doc__
         options = dict(options)
@@ -400,6 +406,98 @@ class VulkanUFunc:
         kernel.forall(count, device=target)(*values, target_out)
         return out
 
+    def reduce(self, array, axis=0, device=None):
+        """Combine all elements of an array with the function.
+
+        Like ``numpy.ufunc.reduce`` for a binary function, computed on the
+        device as a tree: pairs of elements are combined in shared memory
+        within each workgroup, and the partial results again until one is
+        left. The order of combination differs from NumPy's, so the
+        function should be associative (and commutative).
+
+        Parameters
+        ----------
+        array : array_like or DeviceArray
+            The values.
+        axis : {0, None}
+            ``0`` for a 1-d array; ``None`` for all elements of an array of
+            any dimensionality.
+        device : int, str or Device, optional
+            Device to run on. By default that of a device array, or the
+            selected device.
+
+        Returns
+        -------
+        scalar
+            The result, a NumPy scalar.
+
+        Raises
+        ------
+        TypeError
+            If the function does not take two arguments, or no signature
+            fits the element type.
+        ValueError
+            For an empty array without an identity, or for ``axis=0`` on an
+            array of more than one dimension.
+        """
+        if self.nin != 2:
+            raise TypeError(f"reduce needs a function of two arguments, not {self.nin}")
+        argument = _Argument(array)
+        if not argument.is_array:
+            argument = _Argument(np.asarray(array))
+        if axis == 0 and len(argument.shape) != 1:
+            raise ValueError("reduce supports axis=0 for 1-d arrays and axis=None")
+        if axis not in (0, None):
+            raise ValueError("reduce supports axis=0 for 1-d arrays and axis=None")
+        target = _device_of([argument], device if device is not None else self._device)
+        if self._signatures:
+            pair = [argument, _Argument(argument.value)]
+            dtypes, (argtypes, restype) = _select(self._signatures, pair, self.__name__)
+            if dtypes[0] != dtypes[1] or numpy_support.as_dtype(restype) != dtypes[0]:
+                raise TypeError(
+                    f"'{self.__name__}' has no signature T(T, T) for reduce"
+                )
+            dtype = dtypes[0]
+        else:
+            dtype = argument.dtype
+            argtypes = (numpy_support.from_dtype(dtype),) * 2
+            restype = argtypes[0]
+        values = argument.converted(dtype)
+        size = int(np.prod(argument.shape, dtype=np.int64))
+        if size == 0:
+            if self.identity is None:
+                raise ValueError(
+                    f"reduction of an empty array by '{self.__name__}' has no identity"
+                )
+            return dtype.type(self.identity)
+        self._core.compile_device(argtypes, restype)
+        kernel = self._reduce_kernel(dtype)
+        values = values.reshape(-1)
+        while size > 1:
+            groups = -(-size // (2 * _REDUCE_BLOCK))
+            partial = runtime.device_array(groups, dtype, target)
+            kernel[groups, _REDUCE_BLOCK, target](values, partial)
+            values, size = partial, groups
+        if isinstance(values, runtime.DeviceArray):
+            return values.copy_to_host()[0]
+        return dtype.type(values[0])
+
+    def _reduce_kernel(self, dtype):
+        """The tree-reduction kernel for elements of `dtype`."""
+        key = ("reduce", np.dtype(dtype).str)
+        if key not in self._kernels:
+            scope = {
+                "__core__": self._core,
+                "__global_id__": global_id,
+                "__dtype__": numpy_support.from_dtype(np.dtype(dtype)),
+                "nv": __import__("numba_vulkan"),
+                "np": np,
+            }
+            source = _REDUCE_SOURCE.format(block=_REDUCE_BLOCK, half=_REDUCE_BLOCK // 2)
+            self._kernels[key] = _compile_source(source, "__reduce__", scope)
+            self._kernels[key].__name__ = f"{self.__name__}_reduce"
+        return self._kernels[key]
+
     def _kernel(self, kinds, out_ndim):
         """The kernel for inputs of the given dimensionalities.
 
@@ -444,6 +542,41 @@ class VulkanUFunc:
             )
             self._kernels[key].__name__ = f"{self.__name__}_vectorized"
         return self._kernels[key]
+
+
+_REDUCE_BLOCK = 256
+# Each workgroup combines up to 2 * block elements into one. Shared memory
+# holds the values and whether a slot holds one, since the function may
+# have no identity to fill empty slots with.
+_REDUCE_SOURCE = """
+def __reduce__(x, out):
+    values = nv.shared.array({block}, __dtype__)
+    filled = nv.shared.array({block}, np.int32)
+    t = nv.local_id(0)
+    i = nv.group_id(0) * {block} * 2 + t
+    n = x.shape[0]
+    if i < n:
+        v = x[i]
+        if i + {block} < n:
+            v = __core__(v, x[i + {block}])
+        values[t] = v
+        filled[t] = 1
+    else:
+        filled[t] = 0
+    nv.barrier()
+    step = {half}
+    while step > 0:
+        if t < step and filled[t + step] != 0:
+            if filled[t] != 0:
+                values[t] = __core__(values[t], values[t + step])
+            else:
+                values[t] = values[t + step]
+                filled[t] = 1
+        nv.barrier()
+        step //= 2
+    if t == 0:
+        out[nv.group_id(0)] = values[0]
+"""
 
 
 # -- guvectorize ---------------------------------------------------------------
