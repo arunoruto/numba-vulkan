@@ -32,7 +32,14 @@ from numba_vulkan.structurize import structurize
 TRIPLE = "spirv1.5-unknown-vulkan1.2-compute"
 ENTRY_POINT = "main"
 
-_SPV_CAPABILITIES = {10: "float64", 11: "int64", 22: "int16", 39: "int8"}
+_SPV_CAPABILITIES = {
+    10: "float64",
+    11: "int64",
+    12: "int64_atomics",
+    22: "int16",
+    39: "int8",
+    6033: "float32_atomic_add",
+}
 _OP_TYPE_POINTER, _OP_SELECT, _OP_PHI = 32, 169, 245
 _OP_DECORATE, _NO_CONTRACTION = 71, 42
 # OpFNegate, OpFAdd, OpFSub, OpFMul, OpFDiv, OpFRem, OpFMod
@@ -258,7 +265,7 @@ def emit_spirv(llvm_ir, exact=True, narrow_ints=False):
     SpirvCodegenError
         If the backend fails or the module does not pass `check_spirv`.
     """
-    spirv = emitter.emit(llvm_ir)
+    spirv = fix_barrier_semantics(fix_compare_exchange(emitter.emit(llvm_ir)))
     if narrow_ints:
         spirv = narrow_index_constants(spirv)
     spirv = strip_unused(spirv)
@@ -301,6 +308,7 @@ class CompiledKernel:
     local_size: tuple
     capabilities: set = field(default_factory=set)
     written_bindings: set = field(default_factory=set)
+    shared_bytes: int = 0
     constants: dict = field(default_factory=dict)
     mode: narrowing.Mode = narrowing.Mode()
     narrowed: narrowing.Mode = narrowing.Mode()
@@ -380,6 +388,174 @@ _WIDTH_CAPABILITIES = {
     22: (_OP_TYPE_INT, 16),
     39: (_OP_TYPE_INT, 8),
 }
+
+
+def _instructions(spirv):
+    """Split a SPIR-V module into its header and instructions.
+
+    Returns
+    -------
+    header : list of int
+        The five header words.
+    instructions : list of tuple of int
+    """
+    words = struct.unpack(f"<{len(spirv) // 4}I", spirv)
+    instructions, pos = [], 5
+    while pos < len(words):
+        count = max(words[pos] >> 16, 1)
+        instructions.append(words[pos : pos + count])
+        pos += count
+    return list(words[:5]), instructions
+
+
+def _assemble(header, instructions):
+    """Join a header and instructions into a SPIR-V module."""
+    out = list(header)
+    for inst in instructions:
+        out += inst
+    return struct.pack(f"<{len(out)}I", *out)
+
+
+def _id_positions(inst):
+    """Word positions of the operands of an instruction that are ids.
+
+    See `_id_operands`; this gives their positions instead of values.
+
+    Returns
+    -------
+    list of int
+    """
+    opcode = inst[0] & 0xFFFF
+    if opcode in (3, 7, 8, 10, 14, 17):
+        return []
+    if opcode in (11, 16, 21, 22, 247):
+        return [1]
+    if opcode in (43, 246):
+        return [1, 2]
+    if opcode == 81:
+        return [1, 2, 3]
+    if opcode == 82:
+        return [1, 2, 3, 4]
+    if opcode == 15:
+        end = 3
+        while inst[end] >> 24:
+            end += 1
+        return [2] + list(range(end + 1, len(inst)))
+    if opcode == 12:
+        return [1, 2, 3] + list(range(5, len(inst)))
+    if opcode == 32:
+        return [1] + list(range(3, len(inst)))
+    if opcode in (54, 59):
+        return [1, 2] + list(range(4, len(inst)))
+    if opcode == 251:
+        return [1, 2] + list(range(4, len(inst), 2))
+    return list(range(1, len(inst)))
+
+
+_OP_ATOMIC_COMPARE_EXCHANGE, _OP_COMPOSITE_INSERT = 230, 82
+_OP_CONTROL_BARRIER = 224
+# Acquire-release ordering of workgroup and buffer memory, for barriers.
+_BARRIER_SEMANTICS = 0x8 | 0x40 | 0x100
+
+
+def fix_compare_exchange(spirv):
+    """Repair the result of compare-and-swap operations.
+
+    LLVM's ``llvm.spv.cmpxchg`` intrinsic yields the old value, but the
+    backend packs it with a success flag into a composite that it then
+    treats as the integer result. The composite is removed and its uses
+    take the old value directly.
+
+    Parameters
+    ----------
+    spirv : bytes
+        A SPIR-V module.
+
+    Returns
+    -------
+    bytes
+        The repaired module; `spirv` itself if it has no compare-and-swap.
+    """
+    header, instructions = _instructions(spirv)
+    results = {
+        i[2] for i in instructions if i[0] & 0xFFFF == _OP_ATOMIC_COMPARE_EXCHANGE
+    }
+    if not results:
+        return spirv
+    first, replace, drop = {}, {}, set()
+    for k, inst in enumerate(instructions):
+        if inst[0] & 0xFFFF != _OP_COMPOSITE_INSERT or len(inst) != 6:
+            continue
+        _, _, result, obj, composite, index = inst
+        if obj in results and index == 0:
+            first[result] = obj
+            drop.add(k)
+        elif composite in first and index == 1:
+            replace[result] = first[composite]
+            drop.add(k)
+    out = []
+    for k, inst in enumerate(instructions):
+        if k in drop:
+            continue
+        if replace:
+            inst = list(inst)
+            for at in _id_positions(inst):
+                inst[at] = replace.get(inst[at], inst[at])
+            inst = tuple(inst)
+        out.append(inst)
+    return _assemble(header, out)
+
+
+def fix_barrier_semantics(spirv):
+    """Give barriers memory semantics that Vulkan accepts.
+
+    The backend emits ``OpControlBarrier`` with sequentially consistent
+    semantics, which Vulkan forbids. They become acquire-release on
+    workgroup and buffer memory, which is what ``syncthreads`` promises.
+
+    Parameters
+    ----------
+    spirv : bytes
+        A SPIR-V module.
+
+    Returns
+    -------
+    bytes
+        The repaired module; `spirv` itself if it has no barrier.
+    """
+    header, instructions = _instructions(spirv)
+    if not any(i[0] & 0xFFFF == _OP_CONTROL_BARRIER for i in instructions):
+        return spirv
+    uint = next(
+        i[1]
+        for i in instructions
+        if i[0] & 0xFFFF == _OP_TYPE_INT and i[2] == 32 and i[3] == 0
+    )
+    constant = next(
+        (
+            i[2]
+            for i in instructions
+            if i[0] & 0xFFFF == _OP_CONSTANT
+            and i[1] == uint
+            and i[3] == _BARRIER_SEMANTICS
+        ),
+        None,
+    )
+    out = []
+    for inst in instructions:
+        opcode = inst[0] & 0xFFFF
+        if opcode == _OP_CONTROL_BARRIER:
+            inst = inst[:3] + (constant,)
+        out.append(inst)
+        if constant is None and opcode == _OP_TYPE_INT and inst[1] == uint:
+            constant = header[3]
+            header[3] += 1  # the id bound
+            out.append(((4 << 16) | _OP_CONSTANT, uint, constant, _BARRIER_SEMANTICS))
+    # A barrier may come before the type was seen; fix those up now.
+    out = [
+        i[:3] + (constant,) if i[0] & 0xFFFF == _OP_CONTROL_BARRIER else i for i in out
+    ]
+    return _assemble(header, out)
 
 
 def _id_operands(inst):
@@ -693,6 +869,12 @@ def _link_libclc(module, pass_builder):
     return module
 
 
+_LOCAL_SIZE = re.compile(
+    r'^(\s*%\S+) = (?:tail )?call i32 @"?numba_vulkan\.local_size"?\(i32 (\d)\).*$',
+    re.MULTILINE,
+)
+
+
 class VulkanCodeLibrary(CodeLibrary):
     """Holds LLVM IR modules; only kernel libraries are turned into SPIR-V.
 
@@ -726,6 +908,8 @@ class VulkanCodeLibrary(CodeLibrary):
         self._text = None
         self.first_constant_binding = 0
         self.mode = self.narrowed = narrowing.Mode()
+        # Workgroup size of the kernel this library holds the entry point of.
+        self.local_size = None
 
     def add_ir_module(self, module):
         """Add a module to the library.
@@ -838,6 +1022,15 @@ class VulkanCodeLibrary(CodeLibrary):
                     linked = parsed
                 else:
                     linked.link_in(parsed)
+        if self.local_size is not None and "numba_vulkan.local_size" in str(linked):
+            linked = llvm.parse_assembly(
+                _LOCAL_SIZE.sub(
+                    lambda m: (
+                        f"{m.group(1)} = add i32 0, {self.local_size[int(m.group(2))]}"
+                    ),
+                    str(linked),
+                )
+            )
         machine = target_machine()
         pto = llvm.create_pipeline_tuning_options(speed_level=0)
         builder = llvm.create_pass_builder(machine, pto)
@@ -872,7 +1065,7 @@ class VulkanCodeLibrary(CodeLibrary):
         self.narrowed = narrowing.Mode(
             self.mode.floats and re.search(r"\bdouble\b", text) is not None,
             self.mode.ints and re.search(r"\bi64\b", text) is not None,
-        )
+        )  # only the narrowing of types is recorded
         text = legalize(narrowing.narrow_ir(text, self.mode), self.mode.ints)
         # Once more: some of the rewrites above introduce 64-bit indices.
         text = narrowing.narrow_ir(text, self.mode)
@@ -1042,7 +1235,6 @@ class VulkanCodegen(Codegen):
 
     def _add_module(self, module):
         """Required by Numba's interface; modules are tracked by their library."""
-        pass
 
     def magic_tuple(self):
         """Values identifying this code generator for Numba's caching.

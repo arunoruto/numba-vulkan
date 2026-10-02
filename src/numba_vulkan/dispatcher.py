@@ -7,12 +7,12 @@ import warnings
 import numpy as np
 from numba import typeof
 from numba.core import types, typing, utils
-from numba.np import numpy_support
 from numba.core.target_extension import (
     dispatcher_registry,
     jit_registry,
     target_registry,
 )
+from numba.np import numpy_support
 
 from numba_vulkan import narrowing, runtime
 from numba_vulkan.buffers import STATUS_INDEX, arg_binding
@@ -76,15 +76,15 @@ class VulkanDispatcher:
     def overloads(self):
         """Compile results by tuple of argument types.
 
-        Functions compiled without float64 (see `numba_vulkan.narrowing`)
-        are kept apart from the ordinary ones; the property gives those of
-        the mode being compiled in.
+        Functions compiled for different device features (see
+        `numba_vulkan.narrowing.Mode`) are kept apart; the property gives
+        those of the mode being compiled in.
 
         Returns
         -------
         dict
         """
-        return self._overloads.setdefault(narrowing.current.floats, {})
+        return self._overloads.setdefault(narrowing.current, {})
 
     _can_compile = True
 
@@ -95,6 +95,10 @@ class VulkanDispatcher:
         self.fastmath = bool(self.targetoptions.get("fastmath", False))
         self.boundscheck = bool(self.targetoptions.get("boundscheck", False))
         self.narrow = self.targetoptions.get("narrow")
+        if self.narrow not in (None, True, False, "ints", "floats"):
+            raise ValueError(
+                f"narrow must be True, False, 'ints' or 'floats', not {self.narrow!r}"
+            )
         if self.narrow is None and os.environ.get("NUMBA_VULKAN_NARROW", "0") != "0":
             self.narrow = True
         self._overloads = {}
@@ -282,7 +286,7 @@ class VulkanDispatcher:
 
     # -- kernel launch --------------------------------------------------------
 
-    def compile(self, argtypes, ndim=1, mode=narrowing.Mode()):
+    def compile(self, argtypes, ndim=1, mode=narrowing.Mode(), local_size=None):
         """Compile (or fetch) the kernel specialisation for ``argtypes``.
 
         Parameters
@@ -293,6 +297,8 @@ class VulkanDispatcher:
             Dimensionality of the dispatch grid.
         mode : numba_vulkan.narrowing.Mode
             The 64-bit types the kernel must do without.
+        local_size : tuple of int, optional
+            Workgroup size; by default 64 invocations, shaped by `ndim`.
 
         Returns
         -------
@@ -309,12 +315,15 @@ class VulkanDispatcher:
                     readonly=not ty.mutable,
                 )
             bound.append(ty)
-        key = (tuple(bound), ndim, mode)
+        local_size = _shape3(local_size) if local_size else None
+        key = (tuple(bound), ndim, mode, local_size)
         if key not in self._kernels:
             with narrowing.using(mode):
                 cres = self.compile_device(key[0])
-                kernel = compile_kernel(cres, ndim, exact=not self.fastmath)
-            if kernel.narrowed.floats and self.narrow is None:
+                kernel = compile_kernel(
+                    cres, ndim, exact=not self.fastmath, local_size=local_size
+                )
+            if kernel.narrowed.floats and self.narrow not in (True, "floats"):
                 warnings.warn(
                     f"kernel '{self.py_func.__name__}' uses float64, which the "
                     "device does not support; it is computed in float32 instead. "
@@ -325,7 +334,7 @@ class VulkanDispatcher:
             self._kernels[key] = kernel
         return self._kernels[key]
 
-    def forall(self, extent, device=None):
+    def forall(self, extent, device=None, local_size=None):
         """Bind a dispatch grid, like ``numba.cuda``'s ``kernel.forall``.
 
         Parameters
@@ -336,6 +345,9 @@ class VulkanDispatcher:
             :func:`numba_vulkan.stubs.global_id`.
         device : int, str or None
             Device to run on; defaults to the selected device.
+        local_size : int or tuple of int, optional
+            Workgroup size. By default 64 invocations: ``(64,)``,
+            ``(8, 8)`` or ``(4, 4, 4)`` depending on the grid.
 
         Returns
         -------
@@ -348,7 +360,40 @@ class VulkanDispatcher:
 
         def launch(*args):
             """Run the kernel over the bound grid with the given arguments."""
-            return self._launch(extent, device, args)
+            return self._launch(args, device, extent=extent, local_size=local_size)
+
+        return launch
+
+    def __getitem__(self, config):
+        """Bind a launch configuration, like ``kernel[blocks, threads]`` in CUDA.
+
+        Parameters
+        ----------
+        config : tuple
+            ``(groups, local_size)`` or ``(groups, local_size, device)``:
+            the number of workgroups and the workgroup size, each an int or
+            a tuple of up to three ints. Unlike `forall`, the grid is
+            exactly ``groups * local_size`` invocations.
+
+        Returns
+        -------
+        callable
+            Call it with the kernel arguments to run.
+        """
+        if not isinstance(config, tuple) or len(config) not in (2, 3):
+            raise TypeError(
+                "use kernel[groups, local_size] or kernel[groups, local_size, device]"
+            )
+        groups, local_size = config[:2]
+        device = config[2] if len(config) == 3 else None
+        groups = (groups,) if np.isscalar(groups) else tuple(groups)
+        local = (local_size,) if np.isscalar(local_size) else tuple(local_size)
+        if not (1 <= len(groups) <= 3 and 1 <= len(local) <= 3):
+            raise ValueError("groups and local_size must have 1 to 3 dimensions")
+
+        def launch(*args):
+            """Run the kernel with the bound configuration."""
+            return self._launch(args, device, groups=groups, local_size=local)
 
         return launch
 
@@ -362,20 +407,26 @@ class VulkanDispatcher:
         """
         name = self.py_func.__name__
         raise TypeError(
-            f"kernel '{name}' needs a dispatch grid: use {name}.forall(n)(...)"
+            f"kernel '{name}' needs a dispatch grid: use {name}.forall(n)(...) or "
+            f"{name}[groups, local_size](...)"
         )
 
-    def _launch(self, extent, device, args):
+    def _launch(self, args, device, extent=None, groups=None, local_size=None):
         """Compile for the given arguments and run on a device.
 
         Parameters
         ----------
-        extent : tuple of int
-            Number of invocations along each axis of the grid.
-        device : int, str or None
-            Device to run on.
         args : tuple
             Kernel arguments: NumPy arrays, device arrays and scalars.
+        device : int, str or None
+            Device to run on.
+        extent : tuple of int, optional
+            Number of invocations along each axis, rounded up to whole
+            workgroups.
+        groups : tuple of int, optional
+            Number of workgroups along each axis, instead of `extent`.
+        local_size : tuple of int, optional
+            Workgroup size.
 
         Raises
         ------
@@ -394,10 +445,15 @@ class VulkanDispatcher:
         and arrays that are not C-contiguous as contiguous copies.
         """
         target = runtime.get_device(device)
-        if self.narrow is None:
-            mode = target.mode
-        else:
-            mode = narrowing.Mode(floats=self.narrow, ints=self.narrow)
+        mode = target.mode
+        if self.narrow is not None:
+            floats = self.narrow in (True, "floats") or (
+                self.narrow == "ints" and mode.floats
+            )
+            ints = self.narrow in (True, "ints") or (
+                self.narrow == "floats" and mode.ints
+            )
+            mode = mode._replace(floats=floats, ints=ints)
         argtypes, hosts, shapes, staged = [], [], [], []
         for arg in args:
             if isinstance(arg, runtime.DeviceArray):
@@ -427,13 +483,25 @@ class VulkanDispatcher:
                 argtypes.append(ty)
                 stored = narrowing.stored_dtype(np.dtype(str(ty)), mode)
                 hosts.append(np.array([arg], dtype=stored))
-        key = (tuple(argtypes), len(extent), mode)
+        ndim = len(extent if extent is not None else groups)
+        if local_size is not None:
+            local_size = (local_size,) if np.isscalar(local_size) else tuple(local_size)
+            ndim = max(ndim, len(local_size))
+        key = (tuple(argtypes), ndim, mode, local_size)
         kernel = self._launched.get(key)
         if kernel is None:
-            kernel = self._launched[key] = self.compile(argtypes, len(extent), mode)
-        groups = [1, 1, 1]
-        for axis, n in enumerate(extent):
-            groups[axis] = -(-int(n) // kernel.local_size[axis])
+            kernel = self.compile(argtypes, ndim, mode, local_size)
+            self._launched[key] = kernel
+        if extent is not None:
+            groups = [
+                -(-int(n) // kernel.local_size[axis]) for axis, n in enumerate(extent)
+            ]
+        groups = _shape3(groups)
+        limit = target.info.max_groups
+        if any(n > m for n, m in zip(groups, limit)):
+            raise ValueError(
+                f"{groups} workgroups exceed the limit of {limit} of {target.info.name}"
+            )
         if 0 in groups:
             return
         # Element 0 receives the status of the kernel, the shapes follow.
@@ -471,7 +539,15 @@ class VulkanDispatcher:
         raise error
 
 
-@functools.lru_cache(maxsize=None)
+def _shape3(shape):
+    """A shape of up to three extents, padded with ones to three."""
+    shape = (shape,) if np.isscalar(shape) else tuple(int(n) for n in shape)
+    if not 1 <= len(shape) <= 3:
+        raise ValueError(f"expected 1 to 3 extents, got {shape}")
+    return shape + (1,) * (3 - len(shape))
+
+
+@functools.cache
 def _device_array_type(dtype, ndim):
     """Numba type of a device array."""
     return types.Array(numpy_support.from_dtype(dtype), ndim, "C")
@@ -506,13 +582,15 @@ def jit(
         read or corrupt unrelated memory of the buffer or are ignored,
         depending on the driver. The environment variable
         ``NUMBA_BOUNDSCHECK=1`` turns the check on everywhere.
-    narrow : bool or None
+    narrow : bool, {'ints', 'floats'} or None
         Whether a kernel computes with 32-bit floats and integers where its
         code says ``float64`` and ``int64``, which Numba uses for Python
         literals and all index arithmetic. ``None``, the default, narrows
         on devices without 64-bit types and warns when that affects
         floats; ``True`` always narrows, without a warning; ``False`` never
-        does, so the kernel fails on such devices. Arrays of 64-bit
+        does, so the kernel fails on such devices. ``"ints"`` narrows only
+        the integers, which makes loops and index arithmetic considerably
+        faster on GPUs, and ``"floats"`` only the floats. Arrays of 64-bit
         elements are converted on the host. Only the setting of the kernel
         matters, not that of the functions it calls.
     **options

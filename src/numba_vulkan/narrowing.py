@@ -32,7 +32,7 @@ from numba_vulkan.errors import VulkanUnsupportedError
 
 
 class Mode(NamedTuple):
-    """Which 64-bit types a kernel is compiled without.
+    """How a kernel is compiled for the features of a device.
 
     Attributes
     ----------
@@ -40,10 +40,15 @@ class Mode(NamedTuple):
         Whether ``float64`` is narrowed to ``float32``.
     ints : bool
         Whether ``int64`` is narrowed to ``int32``.
+    float_atomics : bool
+        Whether ``float32`` atomic additions may use the device's native
+        instruction (``VK_EXT_shader_atomic_float``) instead of a
+        compare-and-swap loop.
     """
 
     floats: bool = False
     ints: bool = False
+    float_atomics: bool = False
 
 
 # The mode of the kernel being compiled. Compilation holds Numba's global

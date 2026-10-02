@@ -520,7 +520,8 @@ def _copy_join(blocks, graph, join, tag):
     -------
     bool
         Whether the join was copied; it is left alone when that would be
-        expensive or would give a loop a second latch.
+        expensive, would give a loop a second latch, or would copy a
+        barrier.
     """
     region = {n for n in graph.order if graph.dominates(join, n)}
     extra = len(region) * (len(graph.preds[join]) - 1)
@@ -529,6 +530,9 @@ def _copy_join(blocks, graph, join, tag):
     if any(
         s in graph.headers and s not in region for n in region for s in graph.succs[n]
     ):
+        return False
+    # A barrier must stay one instruction that the whole workgroup reaches.
+    if any("numba_vulkan.barrier" in line for n in region for line in blocks[n].body):
         return False
     defined = [d for n in region for d in blocks[n].definitions()]
     frontier = {s for n in region for s in graph.succs[n] if s not in region}

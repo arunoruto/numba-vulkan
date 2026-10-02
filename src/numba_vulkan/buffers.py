@@ -40,15 +40,38 @@ _STORE = re.compile(
     rf"^(\s*)(?:tail )?call void @{_PREFIX}\.store\.(\w+)\(i32 (\d+), i32 ([^,]+), (.+)\)[^)\n]*$",
     re.MULTILINE,
 )
-_DECLARE = re.compile(rf"^declare [^\n]*@{_PREFIX}\.[^\n]*\n", re.MULTILINE)
+_ATOMIC = re.compile(
+    rf'^(\s*)(%\S+) = (?:tail )?call \S+ @"?{_PREFIX}\.atomic\.(\w+)\.(\w+)"?'
+    rf"\(i32 (\d+), i32 ([^,]+), (\S+ [^)]+)\).*$",
+    re.MULTILINE,
+)
+_CAS = re.compile(
+    rf'^(\s*)(%\S+) = (?:tail )?call \S+ @"?{_PREFIX}\.cas\.(\w+)"?'
+    rf"\(i32 (\d+), i32 ([^,]+), \S+ ([^,]+), \S+ ([^)]+)\).*$",
+    re.MULTILINE,
+)
+_BARRIER = re.compile(
+    rf'^(\s*)(?:tail )?call void @"?{_PREFIX}\.barrier"?\(\).*$', re.MULTILINE
+)
+_DECLARE = re.compile(rf'^declare [^\n]*@"?{_PREFIX}\.[^\n]*\n', re.MULTILINE)
 
 
 # Arrays used as global constants are typed with bindings from here upwards.
 # Each kernel renumbers the ones it uses to follow its arguments.
 CONSTANT_BASE = 1 << 20
+# Workgroup-shared arrays are typed with "bindings" from here upwards. They
+# are no buffers: their accesses become accesses to a Workgroup variable.
+SHARED_BASE = 1 << 24
+# Number of elements of each shared array, by its binding.
+shared_sizes = {}
+# Memory scopes of SPIR-V.
+_SCOPE_DEVICE, _SCOPE_WORKGROUP = 1, 2
+_AS_WORKGROUP = 3
 _constants = {}
 # llvmlite quotes the function name, LLVM's own printer does not.
-_CONSTANT_ACCESS = re.compile(rf'(@"?{_PREFIX}\.(?:load|store)\.\w+"?\(i32 )(\d+)(,)')
+_CONSTANT_ACCESS = re.compile(
+    rf'(@"?{_PREFIX}\.(?:load|store|atomic\.\w+|cas)\.\w+"?\(i32 )(\d+)(,)'
+)
 
 
 def constant_binding(array):
@@ -94,7 +117,7 @@ def constant_order(text):
         The placeholder bindings (at or above `CONSTANT_BASE`), each once.
     """
     found = (int(b) for _, b, _ in _CONSTANT_ACCESS.findall(text))
-    return list(dict.fromkeys(b for b in found if b >= CONSTANT_BASE))
+    return list(dict.fromkeys(b for b in found if CONSTANT_BASE <= b < SHARED_BASE))
 
 
 def constant_data(binding):
@@ -269,6 +292,107 @@ def store_element(builder, binding, elem, index, value):
     builder.call(fn, [i32(binding), _index(builder, index), value])
 
 
+# atomicrmw operations by the name used in placeholders.
+ATOMIC_OPS = (
+    "add",
+    "sub",
+    "and",
+    "or",
+    "xor",
+    "xchg",
+    "max",
+    "min",
+    "umax",
+    "umin",
+    "fadd",
+)
+
+
+def atomic_element(builder, binding, elem, index, op, value):
+    """Apply an atomic read-modify-write to one element of a buffer.
+
+    Emits a call to a placeholder function, which `expand_buffer_access`
+    later turns into an ``atomicrmw`` instruction with relaxed ordering.
+
+    Parameters
+    ----------
+    builder : llvmlite.ir.IRBuilder
+        Builder positioned where the code is emitted.
+    binding : int
+        Descriptor binding of the buffer, or the binding of a shared array.
+    elem : llvmlite.ir.Type
+        Element type: a 32-bit integer, or ``float`` for ``fadd``.
+    index : llvmlite.ir.Value
+        Element index.
+    op : str
+        One of `ATOMIC_OPS`.
+    value : llvmlite.ir.Value
+        The operand, of type ``elem``.
+
+    Returns
+    -------
+    llvmlite.ir.Value
+        The value the element had before.
+    """
+    name = f"{_PREFIX}.atomic.{op}.{_mangle(elem)}"
+    fn = builder.module.globals.get(name)
+    if fn is None:
+        fn = ir.Function(builder.module, ir.FunctionType(elem, [i32, i32, elem]), name)
+    return builder.call(fn, [i32(binding), _index(builder, index), value])
+
+
+def compare_and_swap(builder, binding, index, expected, value):
+    """Atomically replace one 32-bit element if it has the expected value.
+
+    Emits a call to a placeholder function, which `expand_buffer_access`
+    later expands.
+
+    Parameters
+    ----------
+    builder : llvmlite.ir.IRBuilder
+        Builder positioned where the code is emitted.
+    binding : int
+        Descriptor binding of the buffer, or the binding of a shared array.
+    index : llvmlite.ir.Value
+        Element index.
+    expected, value : llvmlite.ir.Value
+        ``i32`` values: what the element must hold, and its replacement.
+
+    Returns
+    -------
+    llvmlite.ir.Value
+        The value the element had before; the swap happened if it equals
+        `expected`.
+    """
+    name = f"{_PREFIX}.cas.i32"
+    fn = builder.module.globals.get(name)
+    if fn is None:
+        fn = ir.Function(
+            builder.module, ir.FunctionType(i32, [i32, i32, i32, i32]), name
+        )
+    return builder.call(fn, [i32(binding), _index(builder, index), expected, value])
+
+
+def barrier(builder):
+    """Wait until all invocations of the workgroup arrive here.
+
+    Emits a call to a placeholder function. It has unknown memory effects,
+    so LLVM moves no memory access across it, and it is ``convergent``, so
+    LLVM does not duplicate it into different branches.
+
+    Parameters
+    ----------
+    builder : llvmlite.ir.IRBuilder
+        Builder positioned where the code is emitted.
+    """
+    name = f"{_PREFIX}.barrier"
+    fn = builder.module.globals.get(name)
+    if fn is None:
+        fn = ir.Function(builder.module, ir.FunctionType(ir.VoidType(), []), name)
+        fn.attributes.add("convergent")
+    builder.call(fn, [])
+
+
 def expand_buffer_access(text):
     """Replace the placeholder calls in LLVM IR by real buffer accesses.
 
@@ -301,49 +425,123 @@ def expand_buffer_access(text):
     """
     used = set()
     written = set()
+    shared = {}
+    cas_spaces = set()
     counter = iter(range(1 << 30))
+    text = _float_add_as_loops(text)
+    access_as = _access_types(text)
 
     def pointer(indent, mangled, binding, index):
-        """Emit the handle and element pointer for one access.
+        """Emit the instructions that compute the address of one element.
 
         Returns
         -------
         n : int
             Number identifying the ``%nv.p<n>`` pointer that was defined.
         code : str
-            The two instructions, each ending in a newline.
+            The instructions, each ending in a newline.
+        space : int
+            Address space of the pointer.
         """
         n = next(counter)
+        mangled = access_as.get((binding, mangled), mangled)
+        if int(binding) >= SHARED_BASE:
+            ty = _LLVM_TYPES[mangled]
+            shared[int(binding)] = ty
+            array = f"[{shared_sizes[int(binding)]} x {ty}]"
+            return (
+                n,
+                (
+                    f"{indent}%nv.p{n} = getelementptr inbounds {array}, "
+                    f"ptr addrspace({_AS_WORKGROUP}) @nv.shared.{binding}, i32 0, i32 {index}\n"
+                ),
+                _AS_WORKGROUP,
+            )
         used.add((mangled, binding))
         ext = _ext_type(mangled)
         suffix = _suffix(mangled)
-        return n, (
-            f"{indent}%nv.h{n} = call {ext} @llvm.spv.resource.handlefrombinding.{suffix}"
-            f"(i32 0, i32 {binding}, i32 1, i32 0, ptr @.nv.binding{binding})\n"
-            f"{indent}%nv.p{n} = call ptr addrspace({_AS_STORAGE_BUFFER}) "
-            f"@llvm.spv.resource.getpointer.p{_AS_STORAGE_BUFFER}.{suffix}"
-            f"({ext} %nv.h{n}, i32 {index})\n"
+        return (
+            n,
+            (
+                f"{indent}%nv.h{n} = call {ext} @llvm.spv.resource.handlefrombinding.{suffix}"
+                f"(i32 0, i32 {binding}, i32 1, i32 0, ptr @.nv.binding{binding})\n"
+                f"{indent}%nv.p{n} = call ptr addrspace({_AS_STORAGE_BUFFER}) "
+                f"@llvm.spv.resource.getpointer.p{_AS_STORAGE_BUFFER}.{suffix}"
+                f"({ext} %nv.h{n}, i32 {index})\n"
+            ),
+            _AS_STORAGE_BUFFER,
         )
+
+    def scope(space):
+        """The syncscope of atomics on memory in the given address space."""
+        return "workgroup" if space == _AS_WORKGROUP else "device"
 
     def load(match):
         """Replacement text for one placeholder load."""
         indent, res, mangled, binding, index = match.groups()
-        n, code = pointer(indent, mangled, binding, index)
-        ty = _LLVM_TYPES[mangled]
-        return f"{code}{indent}{res} = load {ty}, ptr addrspace({_AS_STORAGE_BUFFER}) %nv.p{n}"
+        n, code, space = pointer(indent, mangled, binding, index)
+        ty, stored = (
+            _LLVM_TYPES[mangled],
+            _LLVM_TYPES[access_as.get((binding, mangled), mangled)],
+        )
+        if stored == ty:
+            return f"{code}{indent}{res} = load {ty}, ptr addrspace({space}) %nv.p{n}"
+        return (
+            f"{code}{indent}%nv.v{n} = load {stored}, ptr addrspace({space}) %nv.p{n}\n"
+            f"{indent}{res} = bitcast {stored} %nv.v{n} to {ty}"
+        )
 
     def store(match):
         """Replacement text for one placeholder store."""
         indent, mangled, binding, index, value = match.groups()
-        written.add(int(binding))
-        n, code = pointer(indent, mangled, binding, index)
+        if int(binding) < SHARED_BASE:
+            written.add(int(binding))
+        n, code, space = pointer(indent, mangled, binding, index)
+        stored = _LLVM_TYPES[access_as.get((binding, mangled), mangled)]
+        if stored == _LLVM_TYPES[mangled]:
+            return f"{code}{indent}store {value}, ptr addrspace({space}) %nv.p{n}"
         return (
-            f"{code}{indent}store {value}, ptr addrspace({_AS_STORAGE_BUFFER}) %nv.p{n}"
+            f"{code}{indent}%nv.v{n} = bitcast {value} to {stored}\n"
+            f"{indent}store {stored} %nv.v{n}, ptr addrspace({space}) %nv.p{n}"
+        )
+
+    def atomic(match):
+        """Replacement text for one placeholder read-modify-write."""
+        indent, res, op, mangled, binding, index, value = match.groups()
+        if int(binding) < SHARED_BASE:
+            written.add(int(binding))
+        n, code, space = pointer(indent, mangled, binding, index)
+        return (
+            f"{code}{indent}{res} = atomicrmw {op} ptr addrspace({space}) %nv.p{n}, "
+            f'{value} syncscope("{scope(space)}") monotonic'
+        )
+
+    def cas(match):
+        """Replacement text for one placeholder compare-and-swap."""
+        indent, res, mangled, binding, index, expected, value = match.groups()
+        if int(binding) < SHARED_BASE:
+            written.add(int(binding))
+        n, code, space = pointer(indent, mangled, binding, index)
+        cas_spaces.add(space)
+        # LLVM's cmpxchg instruction crashes the backend; its intrinsic works
+        # but gives the result a wrong type (see codegen.fix_compare_exchange).
+        number = _SCOPE_WORKGROUP if space == _AS_WORKGROUP else _SCOPE_DEVICE
+        return (
+            f"{code}{indent}{res} = call i32 (ptr addrspace({space}), ...) "
+            f"@llvm.spv.cmpxchg.p{space}(ptr addrspace({space}) %nv.p{n}, "
+            f"i32 {expected}, i32 {value}, i32 {number}, i32 0, i32 0)"
         )
 
     text = _DECLARE.sub("", text)
     text = _STORE.sub(store, _LOAD.sub(load, text))
-    if f"@{_PREFIX}." in text:
+    text = _CAS.sub(cas, _ATOMIC.sub(atomic, text))
+    text = _BARRIER.sub(
+        lambda m: (
+            f"{m.group(1)}call void @llvm.spv.group.memory.barrier.with.group.sync()"
+        ),
+        text,
+    )
+    if re.search(rf'@"?{_PREFIX}\.', text):
         raise SpirvCodegenError("a buffer access with a non-constant binding survived")
 
     extra = []
@@ -352,6 +550,11 @@ def expand_buffer_access(text):
         extra.append(
             # The backend insists on a named global string for every resource.
             f'@.{label} = private constant [{len(label) + 1} x i8] c"{label}\\00"'
+        )
+    for binding, ty in sorted(shared.items()):
+        extra.append(
+            f"@nv.shared.{binding} = internal addrspace({_AS_WORKGROUP}) "
+            f"global [{shared_sizes[binding]} x {ty}] poison"
         )
     for mangled in sorted({m for m, _ in used}):
         ext, suffix = _ext_type(mangled), _suffix(mangled)
@@ -363,7 +566,118 @@ def expand_buffer_access(text):
             f"declare ptr addrspace({_AS_STORAGE_BUFFER}) "
             f"@llvm.spv.resource.getpointer.p{_AS_STORAGE_BUFFER}.{suffix}({ext}, i32)"
         )
+    for space in sorted(cas_spaces):
+        extra.append(
+            f"declare i32 @llvm.spv.cmpxchg.p{space}(ptr addrspace({space}), ...)"
+        )
+    if "@llvm.spv.group.memory.barrier.with.group.sync" in text:
+        extra.append(
+            "declare void @llvm.spv.group.memory.barrier.with.group.sync() convergent"
+        )
     return text + "\n" + "\n".join(extra) + "\n", written
+
+
+_FLOAT_ADD = re.compile(
+    rf'^(\s*)(%\S+) = (?:tail )?call float @"?{_PREFIX}\.atomic\.fadd\.f32"?'
+    rf"\(i32 (\d+), i32 ([^,]+), float ([^)]+)\).*$"
+)
+_BLOCK_LABEL = re.compile(r'^("[^"]+"|[-\w$.]+):')
+
+
+def _float_add_as_loops(text):
+    """Turn native float additions into compare-and-swap loops where needed.
+
+    A buffer that is accessed with compare-and-swap, as float ``max`` and
+    ``min`` are, must be accessed as integers throughout, and the native
+    float addition needs a float pointer. On such buffers, each addition
+    becomes a loop of integer placeholder accesses, which are expanded
+    like the others.
+
+    Parameters
+    ----------
+    text : str
+        Textual LLVM IR with placeholder accesses and without phi nodes.
+
+    Returns
+    -------
+    str
+    """
+    integer = {m.group(4) for m in _CAS.finditer(text)}
+    if not integer or "atomic.fadd" not in text:
+        return text
+    out, block, counter = [], None, 0
+    for line in text.splitlines():
+        label = _BLOCK_LABEL.match(line)
+        if label:
+            block = label.group(1)
+        match = _FLOAT_ADD.match(line)
+        if not match or match.group(3) not in integer:
+            out.append(line)
+            continue
+        if block is None:
+            raise SpirvCodegenError("a float atomic addition in an unnamed block")
+        indent, res, binding, index, value = match.groups()
+        counter += 1
+        n = f"nv.fa{counter}"
+        start = (
+            block if block.startswith('"') or _PLAIN.fullmatch(block) else f'"{block}"'
+        )
+        out += [
+            f"{indent}%{n}.o = call i32 @{_PREFIX}.load.i32(i32 {binding}, i32 {index})",
+            f"{indent}br label %{n}.loop",
+            f"{n}.loop:",
+            f"{indent}%{n}.c = phi i32 [ %{n}.o, %{start} ], [ %{n}.g, %{n}.loop ]",
+            f"{indent}%{n}.f = bitcast i32 %{n}.c to float",
+            f"{indent}%{n}.s = fadd float %{n}.f, {value}",
+            f"{indent}%{n}.n = bitcast float %{n}.s to i32",
+            f"{indent}%{n}.g = call i32 @{_PREFIX}.cas.i32(i32 {binding}, i32 {index}, "
+            f"i32 %{n}.c, i32 %{n}.n)",
+            f"{indent}%{n}.k = icmp eq i32 %{n}.g, %{n}.c",
+            f"{indent}br i1 %{n}.k, label %{n}.done, label %{n}.loop",
+            f"{n}.done:",
+            f"{indent}{res} = bitcast i32 %{n}.c to float",
+        ]
+        block = f"{n}.done"
+    return "\n".join(out) + "\n"
+
+
+_PLAIN = re.compile(r"[-a-zA-Z$._][-a-zA-Z$._0-9]*")
+
+
+def _access_types(text):
+    """Decide which element type each buffer is accessed with.
+
+    A float buffer that is also accessed as integers of the same width, as
+    float atomics do through compare-and-swap, must be accessed with one
+    type throughout; the integer type is used, and float values are bit
+    casts of the integers.
+
+    Parameters
+    ----------
+    text : str
+        Textual LLVM IR with placeholder accesses.
+
+    Returns
+    -------
+    dict
+        The element type to use instead, by (binding, element type), for
+        the accesses that need one.
+    """
+    seen = {}
+    for match in _LOAD.finditer(text):
+        seen.setdefault(match.group(4), set()).add(match.group(3))
+    for match in _STORE.finditer(text):
+        seen.setdefault(match.group(3), set()).add(match.group(2))
+    for match in _ATOMIC.finditer(text):
+        seen.setdefault(match.group(5), set()).add(match.group(4))
+    for match in _CAS.finditer(text):
+        seen.setdefault(match.group(4), set()).add(match.group(3))
+    out = {}
+    for binding, kinds in seen.items():
+        for floating, integer in (("f32", "i32"), ("f64", "i64")):
+            if floating in kinds and integer in kinds:
+                out[(binding, floating)] = integer
+    return out
 
 
 def _ext_type(mangled):

@@ -98,8 +98,8 @@ def test_status_is_only_read_back_from_kernels_that_can_raise(run):
     a = np.zeros(4, dtype=f32)
     run(cannot_raise, 4, a, a.copy())
     run(raises_itself, 4, a, a.copy())
-    (plain,) = cannot_raise._kernels.values()
-    (raising,) = raises_itself._kernels.values()
+    plain = list(cannot_raise._kernels.values())[-1]
+    raising = list(raises_itself._kernels.values())[-1]
     assert 0 not in plain.written_bindings
     assert 0 in raising.written_bindings
 

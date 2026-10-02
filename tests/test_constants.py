@@ -51,7 +51,7 @@ def test_global_arrays_in_kernels_and_called_functions(run):
 def test_constants_follow_the_arguments_in_the_binding_order(run):
     out = np.zeros_like(X)
     run(uses_tables, 8, X, out)
-    (compiled,) = uses_tables._kernels.values()
+    compiled = list(uses_tables._kernels.values())[-1]
     assert sorted(compiled.constants) == [3, 4, 5, 6]
     assert compiled.num_bindings == 7
     assert compiled.written_bindings == {2}
