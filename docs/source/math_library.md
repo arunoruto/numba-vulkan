@@ -45,10 +45,8 @@ operator.
 `sqrt`, `fabs`, `floor`, `ceil` and `trunc` use the built-in versions, which
 are exact in both precisions.
 
-`gamma` and `lgamma` use this package's own Python implementation (a
-Lanczos approximation, accurate to about 1e-10 in `float64`), because
-libclc's versions have control flow that cannot be restructured yet
-(KI-24 in {doc}`known_issues`).
+`gamma` and `lgamma` come from libclc as well (`tgamma` and `lgamma`
+there).
 
 ### Choosing speed over accuracy
 

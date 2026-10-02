@@ -147,6 +147,8 @@ DOUBLE = {
     "log1p": (math.log1p, np.log1p, UNIT),
     "erf": (math.erf, np.vectorize(math.erf), SYM),
     "erfc": (math.erfc, np.vectorize(math.erfc), SYM),
+    "gamma": (math.gamma, np.vectorize(math.gamma), POS * 3),
+    "lgamma": (math.lgamma, np.vectorize(math.lgamma), POS * 4),
 }
 
 
@@ -159,26 +161,15 @@ def test_float64_math_function(run, name):
 
 
 @pytest.mark.skipif(not libclc.available(), reason="libclc is not installed")
-def test_float64_gamma_functions(run):
-    # Not from libclc: this package's Lanczos approximation, in double.
-    x = (POS * 3).astype(np.float64)
-    _check(
-        run,
-        ("double", "gamma"),
-        math.gamma,
-        (x,),
-        np.vectorize(math.gamma)(x),
-        rtol=1e-8,
-    )
-    _check(
-        run,
-        ("double", "lgamma"),
-        math.lgamma,
-        (x,),
-        np.vectorize(math.lgamma)(x),
-        rtol=1e-8,
-        atol=1e-9,
-    )
+def test_gamma_functions_of_negative_arguments(run):
+    x = np.array([-0.5, -1.5, -2.25, -3.75, -7.1, 0.5, 1.0, 2.0])
+    gamma, lgamma = np.vectorize(math.gamma)(x), np.vectorize(math.lgamma)(x)
+    _check(run, ("double", "gamma"), math.gamma, (x,), gamma, rtol=1e-13)
+    _check(run, ("double", "lgamma"), math.lgamma, (x,), lgamma, rtol=1e-13, atol=1e-15)
+    x = x.astype(f32)
+    gamma, lgamma = _py(math.gamma)(x), _py(math.lgamma)(x)
+    _check(run, ("math", "gamma"), math.gamma, (x,), gamma, rtol=2e-6)
+    _check(run, ("math", "lgamma"), math.lgamma, (x,), lgamma, rtol=2e-6, atol=1e-6)
 
 
 @nv.jit

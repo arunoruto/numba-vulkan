@@ -106,7 +106,7 @@ def test_structured_code_is_left_untouched():
     assert structurize(STRUCTURED) == STRUCTURED
 
 
-def test_loop_with_two_exit_targets_gets_one_exit_block():
+def test_loop_with_two_exit_targets_leaves_through_its_latch():
     text = (
         HEADER
         + """\
@@ -132,10 +132,116 @@ out:
     out = structurize(text)
     assert_structured(out)
     graph = _Graph(blocks_of(out))
-    exits = {
-        s
-        for n in graph.loops["head"]
-        for s in graph.succs[n]
-        if s not in graph.loops["head"]
-    }
-    assert exits == {"head.exit"}
+    loop = graph.loops["head.head"]
+    exits = {(n, s) for n in loop for s in graph.succs[n] if s not in loop}
+    assert exits == {("head.latch", "head.exit")}
+
+
+def assert_same_results(text, out):
+    """Run the function before and after restructuring for all inputs."""
+    from test_legalize import compile_ir
+
+    types = ("i32", ["i1", "i1", "i1"])
+    before, after = compile_ir(text, *types), compile_ir(out, *types)
+    for bits in range(8):
+        args = [bool(bits & 1), bool(bits & 2), bool(bits & 4)]
+        assert before(*args) == after(*args), args
+
+
+# The join is bypassed by the early exit in `inner`.
+BYPASSED_JOIN = (
+    HEADER
+    + """\
+entry:
+  %slot = alloca i32
+  store i32 0, ptr %slot
+  br i1 %a, label %inner, label %join
+inner:
+  br i1 %b, label %early, label %work
+early:
+  store i32 1, ptr %slot
+  br label %out
+work:
+  store i32 2, ptr %slot
+  br label %join
+join:
+  %v = load i32, ptr %slot
+  %w = add i32 %v, 10
+  store i32 %w, ptr %slot
+  br i1 %c, label %more, label %out
+more:
+  %x = mul i32 %w, 3
+  store i32 %x, ptr %slot
+  br label %out
+out:
+  %r = load i32, ptr %slot
+  ret i32 %r
+}
+"""
+)
+
+
+def test_bypassed_join_is_copied_when_small():
+    out = structurize(BYPASSED_JOIN)
+    assert_structured(out)
+    assert "join.dup1:" in out and "guard" not in out
+    assert_same_results(BYPASSED_JOIN, out)
+
+
+def test_bypassed_join_is_guarded_when_large(monkeypatch):
+    monkeypatch.setattr("numba_vulkan.structurize._COPY_LIMIT", 0)
+    out = structurize(BYPASSED_JOIN)
+    assert_structured(out)
+    assert "join.guard:" in out and ".dup" not in out
+    assert_same_results(BYPASSED_JOIN, out)
+
+
+def test_loop_left_from_nested_positions_keeps_its_meaning():
+    # Counts to four; leaves early with a return (`early`) or a break (`brk`).
+    text = (
+        HEADER
+        + """\
+entry:
+  %i = alloca i32
+  %slot = alloca i32
+  store i32 0, ptr %i
+  store i32 0, ptr %slot
+  br label %head
+head:
+  %iv = load i32, ptr %i
+  %go = icmp slt i32 %iv, 4
+  br i1 %go, label %body, label %after
+body:
+  %n = add i32 %iv, 1
+  store i32 %n, ptr %i
+  br i1 %a, label %check, label %latch
+check:
+  %two = icmp eq i32 %n, 2
+  br i1 %two, label %early, label %cont
+cont:
+  %three = icmp eq i32 %n, 3
+  %stop = and i1 %three, %b
+  br i1 %stop, label %brk, label %latch
+latch:
+  %s = load i32, ptr %slot
+  %t = add i32 %s, %n
+  store i32 %t, ptr %slot
+  br label %head
+early:
+  br i1 %c, label %ret, label %brk
+ret:
+  ret i32 -1
+brk:
+  %u = load i32, ptr %slot
+  %y = mul i32 %u, 100
+  store i32 %y, ptr %slot
+  br label %after
+after:
+  %r = load i32, ptr %slot
+  ret i32 %r
+}
+"""
+    )
+    out = structurize(text)
+    assert_structured(out)
+    assert_same_results(text, out)

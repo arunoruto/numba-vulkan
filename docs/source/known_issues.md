@@ -13,9 +13,10 @@ the entry is removed from this page.
 uv run pytest tests/test_known_issues.py -rxX
 ```
 
-Numbers are not reused: KI-02, KI-03 and KI-07 (NumPy functions on scalars,
-missing `math` functions, complex numbers) have been fixed, and KI-01 no
-longer applies when libclc is installed.
+Numbers are not reused: KI-02, KI-03, KI-07 and KI-24 (NumPy functions on
+scalars, missing `math` functions, complex numbers, nested loop exits that
+failed to compile) have been fixed, and KI-01 no longer applies when libclc
+is installed.
 
 ## Language and library coverage
 
@@ -133,53 +134,27 @@ exceptions is already kept in the compile result.
 Rejected with a clear error, because all functions are inlined into the
 entry point. SPIR-V forbids recursion, so this will not change.
 
-### KI-24: some deeply nested control flow fails to compile
+### KI-23: less accurate math without libclc or with `fastmath`
 
-```python
-for j in range(n):
-    for k in range(m):
-        if a and b:
-            ...
-        elif c or d:
-            return x      # return from inside nested loops
-    if e:
-        break
-```
+With libclc, all math functions are accurate to the last digit or two in
+both precisions. Without it, and for `float32` with `fastmath=True`, the
+drivers' and this package's own versions are used: `gamma` and `lgamma`
+are then accurate to about 1e-5, `erf` and `erfc` have an absolute error
+of about 1.5e-7, and the trigonometric functions are only as good as the
+driver's.
 
-**Symptom:** `SpirvCodegenError: generated SPIR-V is invalid` (with
-`NUMBA_VULKAN_VALIDATE=1`), or `LLVM ERROR: No valid candidate in the
-queue. Is the graph reducible?`.
+### KI-27: very large functions are not restructured
 
-**Cause:** SPIR-V needs structured control flow. LLVM's structurizer is
-unreliable, so `structurize.py` restructures the graph first (see
-{doc}`how_it_works`), but it does not cover everything: selections that
-leave a loop from a nested position (`break`, `continue` and `return` under
-several levels of `if` inside loops) are still left to LLVM.
+SPIR-V needs structured control flow, and `structurize.py` rearranges the
+graph to provide it (see {doc}`how_it_works`). Kernels with more than 4000
+basic blocks after inlining are passed on unchanged, because restructuring
+them would take minutes; LLVM's own structurizer then usually fails with
+`SpirvCodegenError`. Random programs with five levels of nested loops and
+conditions stay well below a thousand blocks.
 
-**How common:** with `tests/fuzz_control_flow.py`, 104 of 120 random
-programs compile and give correct results; without the restructuring step
-it was 53 of 120. None of the 120 gave a wrong result. Typical kernels are
-far simpler than the fuzzer's programs.
-
-**Workaround:** simplify the exits of the loop, for example by setting a
-flag and testing it in the loop condition instead of returning from inside.
-
-**Fix:** convert exits from nested positions into guard variables, so that
-every selection inside a loop has its merge block inside the loop. Without
-`spirv-val`, an invalid module reaches the driver unchecked, so a built-in
-structural check of the generated module would also be worth having.
-
-### KI-23: `gamma` and `lgamma` are less accurate than the rest
-
-Most math functions come from libclc and are accurate to the last digit.
-`gamma` and `lgamma` do not: libclc's versions contain control flow that
-cannot be restructured yet (KI-24), so this package's own Lanczos
-approximation is used. It is accurate to about 1e-10 in `float64` and 1e-5
-in `float32`.
-
-The same applies to all functions without libclc, and to `float32` with
-`fastmath=True`: then `erf` and `erfc` have an absolute error of about
-1.5e-7, and the trigonometric functions are only as good as the driver's.
+Without `spirv-val` (`NUMBA_VULKAN_VALIDATE=1`), a structurally invalid
+module would reach the driver unchecked. A built-in structural check of the
+generated module would be worth having.
 
 ## Performance
 

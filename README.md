@@ -312,7 +312,6 @@ ones most likely to bite:
 | | Issue | Workaround |
 | --- | --- | --- |
 | KI-01 | float64 `math.sin(x)`, `x ** 2.5`... need libclc, which is not bundled | install libclc, or stay in float32 |
-| KI-24 | some deeply nested loops with `return`/`break` fail to compile | simplify the loop exits |
 | KI-04 | no slices, array methods or iteration over arrays | index explicitly |
 | KI-06 | global NumPy arrays cannot be used in kernels | pass them as arguments |
 | KI-10 | errors raised in kernels are dropped; no bounds checks | check inputs on the host |

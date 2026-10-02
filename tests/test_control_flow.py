@@ -154,8 +154,10 @@ def test_complex_arithmetic_on_scalars(run):
 
 
 # Seeds of tests/fuzz_control_flow.py. Most of these programs were rejected
-# before control flow was restructured (see docs/source/how_it_works.md).
-FUZZ_SEEDS = [1, 3, 4, 7, 8, 12, 13, 16, 24, 27]
+# before control flow was restructured (see docs/source/how_it_works.md);
+# the last five need loops to leave through their latch and joins guarded
+# by a flag instead of copied.
+FUZZ_SEEDS = [1, 3, 4, 7, 8, 12, 13, 16, 24, 27, 17, 42, 71, 92, 103]
 
 
 @pytest.mark.parametrize("seed", FUZZ_SEEDS)

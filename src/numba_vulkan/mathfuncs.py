@@ -2,9 +2,8 @@
 
 These are fallbacks. Where libclc provides a function (see
 `numba_vulkan.mathimpl.libclc_name`), its version is used instead; the
-implementations here serve when libclc is not installed, with ``fastmath``,
-and for ``gamma`` and ``lgamma``, whose libclc code this target cannot
-use yet.
+implementations here serve when libclc is not installed and with
+``fastmath``.
 
 
 GLSL.std.450 has no ``hypot``, ``log1p``, ``erf``, ``gamma``... and there is
