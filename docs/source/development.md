@@ -104,6 +104,7 @@ Useful environment variables:
 | Variable | Effect |
 | --- | --- |
 | `NUMBA_VULKAN_VALIDATE=1` | run every shader through `spirv-val`; the test suite sets this |
+| `NUMBA_VULKAN_DEBUG=1` | enable Vulkan's validation layer (see below); `2` also checks synchronization |
 | `NUMBA_VULKAN_DEVICE=llvmpipe` | default device, by name substring or index |
 | `NUMBA_VULKAN_LIBCLC=/path/clspv--.bc` | where to find libclc; the devenv shell sets it |
 | `NUMBA_VULKAN_LLC=/path/llc` | translate with this `llc` instead of llvmlite's SPIR-V backend; the devenv shell sets it on macOS (KI-32) |
@@ -128,7 +129,31 @@ Where a failure comes from tells you where to look:
 | `SpirvCodegenError: LLVM's SPIR-V backend failed` | LLVM | `compiled.llvm_ir`; reduce the kernel |
 | `SpirvCodegenError: generated SPIR-V is invalid` | LLVM or the passes | `spirv-dis` output around the reported line; for control flow, `structurize.py` |
 | `VulkanSupportError` | device features | `runtime.DeviceInfo`, `compiled.capabilities` |
-| `VkError...` or a crash in the driver | driver | run on llvmpipe; validate the shader |
+| `VkError...` or a crash in the driver | driver | run on llvmpipe; validate the shader; run with `NUMBA_VULKAN_DEBUG=2` |
+| `VulkanValidationWarning` | the runtime's use of Vulkan | the message names the call and the rule (a `VUID`) |
+
+### Vulkan's validation layer
+
+`spirv-val` checks shaders; Khronos' validation layer checks how the
+runtime uses the Vulkan API: features a shader needs but the device was
+not opened with, buffer usage, and with `NUMBA_VULKAN_DEBUG=2` missing
+barriers between commands (synchronization validation, slower). The devenv
+shell provides the layer; elsewhere install it (`vulkan-validationlayers`
+on Debian and Ubuntu, `vulkan-validation-layers` on Fedora and Arch,
+part of the LunarG SDK on macOS).
+
+With `NUMBA_VULKAN_DEBUG` set, every warning and error of the layer becomes
+a `numba_vulkan.VulkanValidationWarning`, and
+`numba_vulkan.runtime.validation_messages()` returns them. The test suite
+then fails every test during which the layer reported something:
+
+```sh
+NUMBA_VULKAN_DEBUG=2 uv run pytest -W "ignore::numba_vulkan.VulkanValidationWarning"
+```
+
+Its first run found one problem: kernels on `int8` and `uint8` arrays were
+missing the `StorageBuffer8BitAccess` capability and device feature.
+Without the layer installed, a warning says so and nothing is checked.
 
 ## Adding a `math` function
 

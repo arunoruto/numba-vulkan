@@ -155,11 +155,13 @@ def test_rounding_rewrite_declares_what_it_uses():
 
 
 def test_probe_results_are_stored(tmp_path, monkeypatch):
+    # Opened first: opening a device for the first time probes it, which
+    # would already store a result in the directory below.
+    device = nv.get_device()
     monkeypatch.setenv("NUMBA_VULKAN_CACHE", "1")
     monkeypatch.setenv("NUMBA_VULKAN_CACHE_DIR", str(tmp_path))
     monkeypatch.delenv(probes.FMA_ENV_VAR, raising=False)
     monkeypatch.delenv(probes.ROUNDING_ENV_VAR, raising=False)
-    device = nv.get_device()
     if not device.info.float64:
         pytest.skip("devices without float64 are not probed")
     calls = []
@@ -188,3 +190,14 @@ def test_a_failing_probe_warns_and_applies_no_workarounds(monkeypatch):
     with pytest.warns(UserWarning, match="could not probe"):
         result = probes.workarounds(nv.get_device())
     assert result == {"soft_fma": False, "soft_rounding": False}
+
+
+def test_probe_measures_the_driver_not_the_workarounds(device, monkeypatch):
+    # A device already set up with workarounds must still be probed bare.
+    dev = nv.get_device(device)
+    expected = probes._measure(dev)
+    monkeypatch.setattr(
+        dev, "mode", dev.mode._replace(soft_fma=True, soft_rounding=True)
+    )
+    assert probes._measure(dev) == expected
+    assert dev.mode.soft_fma and dev.mode.soft_rounding  # restored

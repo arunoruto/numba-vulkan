@@ -39,6 +39,15 @@ class VulkanPerformanceWarning(UserWarning):
     """
 
 
+class VulkanValidationWarning(UserWarning):
+    """Vulkan's validation layer found a problem in how a device is used.
+
+    Issued only with ``NUMBA_VULKAN_DEBUG=1``, for every warning and error
+    the layer reports; `numba_vulkan.runtime.validation_messages` returns
+    them as well.
+    """
+
+
 class VulkanSupportError(RuntimeError):
     """A device lacks a capability that a kernel needs.
 

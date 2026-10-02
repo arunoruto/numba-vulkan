@@ -28,6 +28,29 @@ def device(request):
 
 
 @pytest.fixture(autouse=True)
+def _no_validation_messages():
+    """With ``NUMBA_VULKAN_DEBUG=1``, fail tests the validation layer objects to.
+
+    Messages are attributed to the test during which they arrive; work that
+    a test leaves running can report in the next one.
+    """
+    from numba_vulkan import runtime
+
+    if not runtime.debug_enabled():
+        yield
+        return
+    runtime.validation_messages(clear=True)
+    yield
+    found = runtime.validation_messages(clear=True)
+    if found:
+        pytest.fail(
+            "Vulkan validation layer:\n"
+            + "\n".join(f"{level}: {text}" for level, text in found),
+            pytrace=False,
+        )
+
+
+@pytest.fixture(autouse=True)
 def _needs_float64(request):
     """Skip a test marked ``float64`` on a device without float64.
 

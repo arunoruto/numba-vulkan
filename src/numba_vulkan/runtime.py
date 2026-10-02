@@ -26,7 +26,7 @@ except OSError as exc:  # the `vulkan` package could not open the loader
 
 from numba_vulkan import narrowing
 from numba_vulkan.buffers import print_formats
-from numba_vulkan.errors import VulkanSupportError
+from numba_vulkan.errors import VulkanSupportError, VulkanValidationWarning
 
 _DEVICE_TYPES = {
     vk.VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU: "discrete",
@@ -60,6 +60,9 @@ class DeviceInfo:
         Whether shaders may compute with ``float16`` values.
     storage16 : bool
         Whether buffers may hold 16-bit values (``float16`` arrays).
+    storage8 : bool
+        Whether buffers may hold 8-bit values (``int8`` and ``uint8``
+        arrays).
     float32_atomic_add : bool
         Whether shaders may add to ``float32`` values atomically, in
         buffers and in shared memory (``VK_EXT_shader_atomic_float``).
@@ -84,6 +87,7 @@ class DeviceInfo:
     int64_atomics: bool = False
     float16: bool = False
     storage16: bool = False
+    storage8: bool = False
     float32_atomic_add: bool = False
     max_local_size: tuple = (128, 128, 64)
     max_local_invocations: int = 128
@@ -100,8 +104,133 @@ _devices = {}
 _current = None
 
 
+DEBUG_ENV_VAR = "NUMBA_VULKAN_DEBUG"
+_VALIDATION_LAYER = "VK_LAYER_KHRONOS_validation"
+_DEBUG_UTILS = "VK_EXT_debug_utils"
+# Warnings and errors from the validation layer, as (severity, message).
+_messages = []
+# The messenger has to live as long as the instance.
+_messenger = None
+
+
+def debug_level():
+    """How much ``NUMBA_VULKAN_DEBUG`` asks Vulkan's validation layer to check.
+
+    Returns
+    -------
+    int
+        0: nothing (the default); 1: the core checks of API usage; 2: also
+        synchronization, that is missing barriers between commands, which
+        is slower.
+    """
+    value = os.environ.get(DEBUG_ENV_VAR, "0").strip() or "0"
+    return int(value) if value.isdigit() else 1
+
+
+def debug_enabled():
+    """Whether ``NUMBA_VULKAN_DEBUG`` asks for Vulkan's validation layer.
+
+    Returns
+    -------
+    bool
+    """
+    return debug_level() > 0
+
+
+def validation_messages(clear=False):
+    """What the validation layer reported so far (``NUMBA_VULKAN_DEBUG=1``).
+
+    Parameters
+    ----------
+    clear : bool, optional
+        Forget the messages after returning them.
+
+    Returns
+    -------
+    list of tuple
+        ``(severity, message)`` pairs, severity ``"warning"`` or ``"error"``,
+        oldest first.
+    """
+    found = list(_messages)
+    if clear:
+        _messages.clear()
+    return found
+
+
+def _on_validation_message(severity, types, data, user_data):
+    """Debug messenger callback: record a message and warn about it.
+
+    Called from C, so it must not raise: an exception, also from a warning
+    turned into one, is dropped after the message has been recorded.
+    """
+    try:
+        level = (
+            "error"
+            if severity & vk.VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT
+            else "warning"
+        )
+        text = vk.ffi.string(data.pMessage).decode(errors="replace")
+        _messages.append((level, text))
+        warnings.warn(f"Vulkan validation {level}: {text}", VulkanValidationWarning)
+    except Exception:  # noqa: BLE001, S110
+        pass
+    return vk.VK_FALSE
+
+
+def _debug_setup():
+    """Layers and extensions for ``NUMBA_VULKAN_DEBUG``, as far as installed.
+
+    Returns
+    -------
+    layers, extensions : list of str
+    """
+    layers = {p.layerName for p in vk.vkEnumerateInstanceLayerProperties()}
+    extensions = {
+        e.extensionName for e in vk.vkEnumerateInstanceExtensionProperties(None)
+    }
+    if _VALIDATION_LAYER not in layers:
+        warnings.warn(
+            f"{DEBUG_ENV_VAR} is set, but Vulkan's validation layer "
+            f"({_VALIDATION_LAYER}) is not installed; nothing will be checked",
+            VulkanValidationWarning,
+            stacklevel=3,
+        )
+        return [], []
+    return [_VALIDATION_LAYER], [_DEBUG_UTILS] if _DEBUG_UTILS in extensions else []
+
+
+def _create_messenger(instance):
+    """Register `_on_validation_message` for warnings and errors."""
+    global _messenger
+    severities = (
+        vk.VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT
+        | vk.VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT
+    )
+    kinds = (
+        vk.VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT
+        | vk.VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT
+        | vk.VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT
+    )
+    create = vk.vkGetInstanceProcAddr(instance, "vkCreateDebugUtilsMessengerEXT")
+    _messenger = create(
+        instance,
+        vk.VkDebugUtilsMessengerCreateInfoEXT(
+            sType=vk.VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
+            messageSeverity=severities,
+            messageType=kinds,
+            pfnUserCallback=_on_validation_message,
+        ),
+        None,
+    )
+
+
 def _get_instance():
     """The process-wide Vulkan instance, created on first use.
+
+    With ``NUMBA_VULKAN_DEBUG=1`` it enables Vulkan's validation layer and
+    reports its findings through `validation_messages` and
+    `numba_vulkan.errors.VulkanValidationWarning`; ``NUMBA_VULKAN_DEBUG=2``
+    adds synchronization validation (see `debug_level`).
 
     Returns
     -------
@@ -127,14 +256,30 @@ def _get_instance():
         if _PORTABILITY_ENUMERATION in available:
             extensions.append(_PORTABILITY_ENUMERATION)
             flags |= vk.VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR
+        layers, debug_extensions = _debug_setup() if debug_enabled() else ([], [])
+        extensions += debug_extensions
+        features = None
+        if layers and debug_level() >= 2:
+            features = vk.VkValidationFeaturesEXT(
+                sType=vk.VK_STRUCTURE_TYPE_VALIDATION_FEATURES_EXT,
+                enabledValidationFeatureCount=1,
+                pEnabledValidationFeatures=[
+                    vk.VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT
+                ],
+            )
         info = vk.VkInstanceCreateInfo(
             sType=vk.VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
+            pNext=features,
             flags=flags,
             pApplicationInfo=app,
+            enabledLayerCount=len(layers),
+            ppEnabledLayerNames=layers or None,
             enabledExtensionCount=len(extensions),
             ppEnabledExtensionNames=extensions or None,
         )
         _instance = vk.vkCreateInstance(info, None)
+        if debug_extensions:
+            _create_messenger(_instance)
     return _instance
 
 
@@ -262,6 +407,7 @@ def list_devices(refresh=False):
                 ),
                 float16=bool(feats12.shaderFloat16),
                 storage16=bool(feats11.storageBuffer16BitAccess),
+                storage8=bool(feats12.storageBuffer8BitAccess),
                 float32_atomic_add=bool(
                     float_atomics is not None
                     and float_atomics.shaderBufferFloat32AtomicAdd
@@ -341,6 +487,7 @@ class Device:
         features12 = vk.VkPhysicalDeviceVulkan12Features(
             sType=vk.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
             shaderInt8=info.int8,
+            storageBuffer8BitAccess=info.storage8,
             shaderBufferInt64Atomics=info.int64_atomics,
             shaderSharedInt64Atomics=info.int64_atomics,
             shaderFloat16=info.float16,
