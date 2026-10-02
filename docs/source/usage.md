@@ -392,10 +392,24 @@ its outputs passed in. Both kinds of function take `out=` and `device=`,
 and return device arrays when any input is one, so chains of calls stay
 on the device.
 
-The results are not real `numpy.ufunc` objects: `reduce`, `accumulate`,
-`outer` and NumPy's dispatch (`np.add(a, b)` on device arrays) are not
-available, and they cannot be called from inside a kernel; call the
-`@nv.jit` function there instead.
+A `vectorize` function of two arguments can also reduce an array, as
+`numba.cuda` offers:
+
+```python
+@numba.vectorize(["float32(float32, float32)"], target="vulkan", identity=0)
+def add(a, b):
+    return a + b
+
+total = add.reduce(x)              # 1-d x; axis=None for any shape
+```
+
+The reduction runs on the device as a tree, so the function should be
+associative; it needs no identity, except for empty arrays.
+
+The results are not real `numpy.ufunc` objects: `accumulate`, `outer`,
+`reduce` along other axes and NumPy's dispatch (`np.add(a, b)` on device
+arrays) are not available, and they cannot be called from inside a kernel;
+call the `@nv.jit` function there instead.
 
 ## Errors
 
