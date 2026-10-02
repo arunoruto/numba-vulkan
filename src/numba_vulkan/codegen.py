@@ -12,8 +12,10 @@ import llvmlite.binding as llvm
 from llvmlite import ir
 from numba.core.codegen import Codegen, CodeLibrary
 
+from numba_vulkan import libclc
 from numba_vulkan.buffers import expand_buffer_access
 from numba_vulkan.errors import SpirvCodegenError, VulkanUnsupportedError
+from numba_vulkan.legalize import legalize
 from numba_vulkan.structurize import structurize
 
 TRIPLE = "spirv1.5-unknown-vulkan1.2-compute"
@@ -27,16 +29,11 @@ _FLOAT_ARITHMETIC = {127, 129, 131, 133, 136, 140, 141}
 # Opcodes that end the annotation section: OpUndef, the type and constant
 # declarations, OpFunction and OpVariable.
 _FIRST_DECLARATIONS = {1, 54, 59} | set(range(19, 40)) | set(range(41, 53))
-_FCMP_ORDERING = re.compile(
-    r"^(\s*)(%\S+) = fcmp (?:[a-z]+ )*?(uno|ord) (float|double) ([^,]+), (.+)$",
-    re.MULTILINE,
+_LIBCLC_SYMBOL = re.compile(r"_Z\d+[a-z_0-9]+[fdil]+$")
+_UNDEFINED_LIBCLC = re.compile(
+    r"^declare [^\n]*spir_func [^\n]*@(_Z\w+)\(", re.MULTILINE
 )
-_COPYSIGN = re.compile(
-    r"^(\s*)(%\S+) = (?:tail )?call (float|double) @llvm\.copysign\.f(?:32|64)"
-    r"\((?:float|double) (?:noundef )?([^,]+), (?:float|double) (?:noundef )?([^)]+)\).*$",
-    re.MULTILINE,
-)
-_SREM = re.compile(r"^(\s*)(%\S+) = srem (\S+) ([^,]+), (.+)$", re.MULTILINE)
+_AS_OPENCL_CONSTANT, _AS_PRIVATE = "addrspace(2)", "addrspace(10)"
 
 # LLVM passes run on the linked kernel, in order. Everything is inlined into
 # the entry point first. instcombine is required: it folds away the
@@ -80,13 +77,15 @@ def target_machine():
     return _target_machine
 
 
-def emit_spirv(llvm_ir):
+def emit_spirv(llvm_ir, exact=True):
     """Translate LLVM IR to a SPIR-V binary in a child process.
 
     Parameters
     ----------
     llvm_ir : str
         Textual LLVM IR of a module containing the shader entry point.
+    exact : bool
+        Whether float arithmetic is marked exact; see `mark_exact`.
 
     Returns
     -------
@@ -116,7 +115,7 @@ def emit_spirv(llvm_ir):
         )
         reason = reason or (lines[-1] if lines else f"exit code {proc.returncode}")
         raise SpirvCodegenError(f"LLVM's SPIR-V backend failed: {reason}")
-    spirv = mark_exact(proc.stdout)
+    spirv = mark_exact(proc.stdout) if exact else proc.stdout
     check_spirv(spirv)
     return spirv
 
@@ -270,127 +269,62 @@ def check_spirv(spirv):
             )
 
 
-def _expand_srem(text):
-    """Rewrite ``srem`` instructions as ``a - (a / b) * b``.
+def _link_libclc(module, pass_builder):
+    """Link the libclc functions a module calls into it.
 
-    OpSRem returns wrong results for negative 64-bit operands on NVIDIA's
-    driver, so signed remainders are derived from the quotient instead.
+    The whole library is linked and everything unused is removed again,
+    which leaves the called functions and what they depend on. libclc marks
+    its functions ``noinline``; that attribute is dropped, because shaders
+    need everything inlined into the entry point.
 
     Parameters
     ----------
-    text : str
-        Textual LLVM IR.
+    module : llvmlite.binding.ModuleRef
+        The linked kernel.
+    pass_builder : llvmlite.binding.PassBuilder
+        Pass builder for the target.
 
     Returns
     -------
-    str
-        The rewritten LLVM IR.
-    """
-    counter = iter(range(1 << 30))
+    llvmlite.binding.ModuleRef
+        The module with the functions linked in, or `module` itself if it
+        calls nothing from libclc.
 
-    def repl(match):
-        """Replacement text for one ``srem`` instruction."""
-        indent, res, ty, lhs, rhs = match.groups()
-        n = next(counter)
-        return (
-            f"{indent}%srem.q{n} = sdiv {ty} {lhs}, {rhs}\n"
-            f"{indent}%srem.m{n} = mul {ty} %srem.q{n}, {rhs}\n"
-            f"{indent}{res} = sub {ty} {lhs}, %srem.m{n}"
+    Raises
+    ------
+    VulkanUnsupportedError
+        If libclc is needed but not installed.
+    """
+    wanted = [
+        fn.name
+        for fn in module.functions
+        if fn.is_declaration and _LIBCLC_SYMBOL.match(fn.name)
+    ]
+    if not wanted:
+        return module
+    if not libclc.available():
+        raise VulkanUnsupportedError(
+            f"this kernel needs libclc for {', '.join(wanted)}, but libclc was not "
+            f"found; install it or point {libclc.ENV_VAR} at clspv--.bc"
         )
-
-    return _SREM.sub(repl, text)
-
-
-def _expand_fcmp_ordering(text):
-    """Rewrite ``fcmp uno`` and ``fcmp ord`` as tests on the bit pattern.
-
-    The SPIR-V backend emits OpUnordered and OpOrdered for them, which only
-    OpenCL-flavoured SPIR-V may use. Numba's own number and ufunc
-    implementations produce these comparisons when they check for NaN.
-
-    Parameters
-    ----------
-    text : str
-        Textual LLVM IR.
-
-    Returns
-    -------
-    str
-        The rewritten LLVM IR.
-    """
-    counter = iter(range(1 << 30))
-    layout = {
-        "float": ("i32", 0xFF << 23, (1 << 31) - 1),
-        "double": ("i64", 0x7FF << 52, (1 << 63) - 1),
-    }
-
-    def repl(match):
-        """Replacement text for one ``fcmp uno`` or ``fcmp ord``."""
-        indent, res, pred, ty, lhs, rhs = match.groups()
-        bits, exponent, mask = layout[ty]
-        code, flags = [], []
-        for operand in (lhs, rhs):
-            if not operand.startswith("%"):
-                continue  # a finite constant is never NaN
-            n = next(counter)
-            code += [
-                f"{indent}%nan.b{n} = bitcast {ty} {operand} to {bits}",
-                f"{indent}%nan.m{n} = and {bits} %nan.b{n}, {mask}",
-                f"{indent}%nan.f{n} = icmp ugt {bits} %nan.m{n}, {exponent}",
-            ]
-            flags.append(f"%nan.f{n}")
-        if not flags:
-            unordered = "false"
-        elif len(flags) == 1 or flags[0] == flags[1]:
-            unordered = flags[0]
-        else:
-            n = next(counter)
-            code.append(f"{indent}%nan.o{n} = or i1 {flags[0]}, {flags[1]}")
-            unordered = f"%nan.o{n}"
-        if pred == "uno":
-            code.append(f"{indent}{res} = or i1 {unordered}, false")
-        else:
-            code.append(f"{indent}{res} = xor i1 {unordered}, true")
-        return "\n".join(code)
-
-    return _FCMP_ORDERING.sub(repl, text)
-
-
-def _expand_copysign(text):
-    """Rewrite calls to ``llvm.copysign`` as operations on the bit pattern.
-
-    The SPIR-V backend cannot select the intrinsic, and instcombine
-    introduces it even where the source spelled out the bit operations.
-
-    Parameters
-    ----------
-    text : str
-        Textual LLVM IR.
-
-    Returns
-    -------
-    str
-        The rewritten LLVM IR.
-    """
-    counter = iter(range(1 << 30))
-
-    def repl(match):
-        """Replacement text for one ``llvm.copysign`` call."""
-        indent, res, ty, magnitude, sign = match.groups()
-        bits, width = ("i64", 64) if ty == "double" else ("i32", 32)
-        n = next(counter)
-        return "\n".join(
-            [
-                f"{indent}%cs.m{n} = bitcast {ty} {magnitude} to {bits}",
-                f"{indent}%cs.s{n} = bitcast {ty} {sign} to {bits}",
-                f"{indent}%cs.a{n} = and {bits} %cs.m{n}, {(1 << (width - 1)) - 1}",
-                f"{indent}%cs.b{n} = and {bits} %cs.s{n}, {-(1 << (width - 1))}",
-                f"{indent}%cs.o{n} = or {bits} %cs.a{n}, %cs.b{n}",
-                f"{indent}{res} = bitcast {bits} %cs.o{n} to {ty}",
-            ]
-        )
-
-    return _COPYSIGN.sub(repl, text)
+    library = llvm.parse_bitcode(libclc.read_bitcode())
+    library.triple = module.triple
+    library.data_layout = module.data_layout
+    module.link_in(library)
+    for fn in module.functions:
+        if not fn.is_declaration and fn.name != ENTRY_POINT:
+            fn.linkage = "internal"
+    for gv in module.global_variables:
+        gv.linkage = "internal"
+    passes = llvm.create_new_module_pass_manager()
+    passes.add_global_dead_code_eliminate_pass()
+    passes.run(module, pass_builder)
+    text = re.sub(r"\b(noinline|optnone) ", "", str(module))
+    # libclc keeps its lookup tables in OpenCL's constant address space,
+    # which becomes the UniformConstant storage class. Vulkan only allows
+    # initialised globals in the Private storage class.
+    text = text.replace(_AS_OPENCL_CONSTANT, _AS_PRIVATE)
+    return llvm.parse_assembly(text)
 
 
 class VulkanCodeLibrary(CodeLibrary):
@@ -419,7 +353,7 @@ class VulkanCodeLibrary(CodeLibrary):
         self._modules = []
         self._linking_libraries = []
         self._linked = None
-        self._spirv = None
+        self._spirv = {}
         self.written_bindings = set()
 
     def add_ir_module(self, module):
@@ -533,6 +467,10 @@ class VulkanCodeLibrary(CodeLibrary):
                     linked = parsed
                 else:
                     linked.link_in(parsed)
+        machine = target_machine()
+        pto = llvm.create_pipeline_tuning_options(speed_level=0)
+        builder = llvm.create_pass_builder(machine, pto)
+        linked = _link_libclc(linked, builder)
         linked.triple = TRIPLE
         # Shaders cannot keep Numba's calling convention (return pointers,
         # status codes), so everything is inlined into the entry point.
@@ -544,9 +482,6 @@ class VulkanCodeLibrary(CodeLibrary):
         for gv in linked.global_variables:
             gv.linkage = "internal"
         linked.verify()
-        machine = target_machine()
-        pto = llvm.create_pipeline_tuning_options(speed_level=0)
-        builder = llvm.create_pass_builder(machine, pto)
         passes = llvm.create_new_module_pass_manager()
         for name in PASSES:
             getattr(passes, f"add_{name}_pass")()
@@ -562,7 +497,13 @@ class VulkanCodeLibrary(CodeLibrary):
                 "recursive functions are not supported on Vulkan "
                 f"(could not inline {', '.join(leftover)})"
             )
-        text = _expand_copysign(_expand_fcmp_ordering(_expand_srem(str(linked))))
+        text = legalize(str(linked))
+        missing = _UNDEFINED_LIBCLC.findall(text)
+        if missing:
+            raise VulkanUnsupportedError(
+                "libclc needs helper functions that this target does not provide: "
+                + ", ".join(sorted(set(missing)))
+            )
         text = structurize(text)
         text, self.written_bindings = expand_buffer_access(text)
         linked = llvm.parse_assembly(text)
@@ -589,8 +530,13 @@ class VulkanCodeLibrary(CodeLibrary):
         """
         raise NotImplementedError("use get_spirv() and spirv-dis")
 
-    def get_spirv(self):
+    def get_spirv(self, exact=True):
         """SPIR-V binary of the kernel this library holds the entry point of.
+
+        Parameters
+        ----------
+        exact : bool
+            Whether float arithmetic is marked exact; see `mark_exact`.
 
         Returns
         -------
@@ -602,9 +548,9 @@ class VulkanCodeLibrary(CodeLibrary):
         SpirvCodegenError
             If code generation fails.
         """
-        if self._spirv is None:
-            self._spirv = emit_spirv(self.get_optimized_llvm_str())
-        return self._spirv
+        if exact not in self._spirv:
+            self._spirv[exact] = emit_spirv(self.get_optimized_llvm_str(), exact)
+        return self._spirv[exact]
 
 
 class VulkanCodegen(Codegen):

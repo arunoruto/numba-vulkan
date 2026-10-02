@@ -1,5 +1,12 @@
 """``math`` functions that Vulkan lacks, written in Python.
 
+These are fallbacks. Where libclc provides a function (see
+`numba_vulkan.mathimpl.libclc_name`), its version is used instead; the
+implementations here serve when libclc is not installed, with ``fastmath``,
+and for ``gamma`` and ``lgamma``, whose libclc code this target cannot
+use yet.
+
+
 GLSL.std.450 has no ``hypot``, ``log1p``, ``erf``, ``gamma``... and there is
 no vendor math library to fall back on, as libdevice is for CUDA. The
 functions here are ordinary Python implementations that Numba compiles for
@@ -20,7 +27,8 @@ import math
 from numba.core import types
 from numba.core.typing import signature
 
-from numba_vulkan.mathimpl import lower
+from numba_vulkan import libclc
+from numba_vulkan.mathimpl import libclc_name, lower
 
 
 def _hypot(ty):
@@ -237,11 +245,23 @@ _ERF_P = 0.3275911
 _ERF_A = (0.254829592, -0.284496736, 1.421413741, -1.453152027, 1.061405429)
 
 
-def _jit(pyfunc):
-    """Make a helper callable from the implementations below."""
+def _jit(pyfunc, fastmath=False):
+    """Make a helper callable from the implementations below.
+
+    Parameters
+    ----------
+    pyfunc : function
+        The helper.
+    fastmath : bool
+        Whether its math calls use the device's built-in functions.
+
+    Returns
+    -------
+    numba_vulkan.dispatcher.VulkanDispatcher
+    """
     from numba_vulkan.dispatcher import jit
 
-    return jit(pyfunc)
+    return jit(pyfunc, fastmath=fastmath)
 
 
 def _erfc_positive(ty):
@@ -472,6 +492,10 @@ def _register(pyfn, factory, nargs):
             else types.float64
         )
         vals = [context.cast(builder, a, t, ty) for a, t in zip(args, sig.args)]
+        from_libclc = libclc_name(context, pyfn, ty)
+        if from_libclc is not None:
+            res = libclc.call(builder, from_libclc, vals)
+            return context.cast(builder, res, ty, sig.return_type)
         inner = signature(ty, *[ty] * nargs)
         res = context.compile_internal(builder, factory(ty), inner, vals)
         return context.cast(builder, res, ty, sig.return_type)

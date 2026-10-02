@@ -102,14 +102,20 @@ class VulkanTargetContext(BaseContext):
     Attributes
     ----------
     narrow_math : bool
-        Whether float64 transcendental functions are evaluated in float32.
-        Set per compiled function through `subtarget`.
+        Whether float64 transcendental functions are evaluated in float32
+        when libclc is unavailable. Set per compiled function through
+        `subtarget`.
+    fast_math : bool
+        Whether float32 math uses the device's built-in functions instead of
+        libclc. Set per compiled function through `subtarget`.
     """
 
     implement_powi_as_math_call = True
     strict_alignment = True
     # Evaluate float64 transcendental functions in float32 (set per function).
     narrow_math = False
+    # Prefer the device's built-in float32 math over libclc (set per function).
+    fast_math = False
 
     def __init__(self, typingctx, target=TARGET_NAME):
         super().__init__(typingctx, target)

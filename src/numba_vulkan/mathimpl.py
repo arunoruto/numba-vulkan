@@ -7,6 +7,7 @@ from llvmlite import ir
 from numba.core import cgutils, types
 from numba.core.imputils import Registry
 
+from numba_vulkan import libclc
 from numba_vulkan.errors import VulkanUnsupportedError
 
 registry = Registry("vkmathimpl")
@@ -37,6 +38,39 @@ _ANY_FLOAT = {
     math.fabs: "llvm.fabs",
 }
 _BINARY = (math.pow, math.atan2)
+
+# Name of each function in libclc (OpenCL spelling).
+_LIBCLC = {
+    math.sin: "sin",
+    math.cos: "cos",
+    math.tan: "tan",
+    math.asin: "asin",
+    math.acos: "acos",
+    math.atan: "atan",
+    math.sinh: "sinh",
+    math.cosh: "cosh",
+    math.tanh: "tanh",
+    math.asinh: "asinh",
+    math.acosh: "acosh",
+    math.atanh: "atanh",
+    math.exp: "exp",
+    math.exp2: "exp2",
+    math.expm1: "expm1",
+    math.log: "log",
+    math.log2: "log2",
+    math.log10: "log10",
+    math.log1p: "log1p",
+    math.pow: "pow",
+    math.atan2: "atan2",
+    math.hypot: "hypot",
+    math.erf: "erf",
+    math.erfc: "erfc",
+}
+# Functions libclc has, but whose code does not survive the SPIR-V backend
+# yet, by (name, bit width); they fall back to this package's own versions.
+# Empty at present. libclc's lgamma and tgamma are not listed in `_LIBCLC`
+# at all, because their control flow cannot be restructured yet.
+_LIBCLC_BROKEN = set()
 _ROUNDING = {
     math.floor: "llvm.floor",
     math.ceil: "llvm.ceil",
@@ -71,11 +105,42 @@ def call_intrinsic(builder, name, args):
     return builder.call(builder.module.declare_intrinsic(name, [ty], fnty), args)
 
 
+def libclc_name(context, pyfn, ty):
+    """Decide whether a ``math`` function is taken from libclc.
+
+    libclc is preferred: its functions are accurate to the last digit or
+    two, give the same results on every device, and exist in double
+    precision. With ``fastmath``, float32 functions use the device's
+    built-in versions instead, which are faster but less accurate and
+    differ between drivers. float64 has no built-in alternative.
+
+    Parameters
+    ----------
+    context : VulkanTargetContext
+        The target context; its ``fast_math`` flag is consulted.
+    pyfn : callable
+        The ``math`` function.
+    ty : numba.types.Float
+        Type the function is evaluated in.
+
+    Returns
+    -------
+    str or None
+        The libclc name to call, or ``None`` to use another implementation.
+    """
+    name = _LIBCLC.get(pyfn)
+    if name is None or (name, ty.bitwidth) in _LIBCLC_BROKEN or not libclc.available():
+        return None
+    if ty == types.float32 and context.fast_math:
+        return None
+    return name
+
+
 def _float_math(context, builder, pyfn, name, f32_only, sig, args):
-    """Lower a ``math`` function to an LLVM intrinsic.
+    """Lower a ``math`` function to a libclc call or an LLVM intrinsic.
 
     Integer arguments are converted to float64 first, as Numba's typing
-    prescribes.
+    prescribes. See `libclc_name` for how the implementation is chosen.
 
     Parameters
     ----------
@@ -102,16 +167,20 @@ def _float_math(context, builder, pyfn, name, f32_only, sig, args):
     Raises
     ------
     VulkanUnsupportedError
-        For a float64 call of a 32-bit-only function without
-        ``narrow_math``.
+        For a float64 call of a 32-bit-only function when libclc is not
+        installed and ``narrow_math`` is off.
     """
     ty = sig.return_type if isinstance(sig.return_type, types.Float) else types.float64
     vals = [context.cast(builder, a, t, ty) for a, t in zip(args, sig.args)]
+    from_libclc = libclc_name(context, pyfn, ty)
+    if from_libclc is not None:
+        return libclc.call(builder, from_libclc, vals)
     if f32_only and ty == types.float64:
         if not context.narrow_math:
             raise VulkanUnsupportedError(
-                f"math.{pyfn.__name__} on float64 is not available in Vulkan shaders "
-                "(the GLSL.std.450 math library is 32-bit only); use float32 values "
+                f"math.{pyfn.__name__} on float64 needs libclc, which was not found "
+                "(Vulkan's own math library, GLSL.std.450, is 32-bit only). Install "
+                f"libclc or set {libclc.ENV_VAR}; alternatively use float32 values, "
                 "or pass narrow_math=True to compute in float32"
             )
         vals = [builder.fptrunc(v, ir.FloatType()) for v in vals]

@@ -30,14 +30,17 @@ class VulkanDispatcher:
     py_func : function
         The Python function.
     targetoptions : dict, optional
-        Options; only ``narrow_math`` is used.
+        Options; ``fastmath`` and ``narrow_math`` are used.
 
     Attributes
     ----------
     py_func : function
         The Python function.
+    fastmath : bool
+        Whether speed is preferred over accuracy; see `jit`.
     narrow_math : bool
-        Whether float64 transcendental functions are computed in float32.
+        Whether float64 transcendental functions are computed in float32
+        when libclc is unavailable.
     overloads : dict
         Compile results by tuple of argument types.
 
@@ -64,6 +67,7 @@ class VulkanDispatcher:
         self.py_func = py_func
         self.targetoptions = dict(targetoptions or {})
         self.narrow_math = bool(self.targetoptions.get("narrow_math", False))
+        self.fastmath = bool(self.targetoptions.get("fastmath", False))
         self.overloads = {}
         self._kernels = {}
         self._compiling = 0
@@ -124,7 +128,9 @@ class VulkanDispatcher:
         if args not in self.overloads:
             self._compiling += 1
             try:
-                cres = compile_vulkan(self.py_func, return_type, args, self.narrow_math)
+                cres = compile_vulkan(
+                    self.py_func, return_type, args, self.narrow_math, self.fastmath
+                )
             finally:
                 self._compiling -= 1
             self.overloads[args] = cres
@@ -257,7 +263,7 @@ class VulkanDispatcher:
         key = (tuple(bound), ndim)
         if key not in self._kernels:
             cres = self.compile_device(key[0])
-            self._kernels[key] = compile_kernel(cres, ndim)
+            self._kernels[key] = compile_kernel(cres, ndim, exact=not self.fastmath)
         return self._kernels[key]
 
     def forall(self, extent, device=None):
@@ -355,7 +361,7 @@ class VulkanDispatcher:
                 original[...] = hosts[index] != 0
 
 
-def jit(pyfunc=None, *, narrow_math=False, **options):
+def jit(pyfunc=None, *, fastmath=False, narrow_math=False, **options):
     """Compile a Python function for Vulkan.
 
     Parameters
@@ -363,9 +369,13 @@ def jit(pyfunc=None, *, narrow_math=False, **options):
     pyfunc : function, optional
         The function. Kernels must return ``None`` and write into arrays;
         functions called from kernels may return values.
+    fastmath : bool
+        Trade accuracy for speed: float32 math functions use the device's
+        built-in versions instead of libclc, and the driver may reassociate
+        and contract float arithmetic. Results then differ between devices.
     narrow_math : bool
-        Evaluate float64 transcendental functions in float32 precision
-        instead of rejecting them (Vulkan has no float64 math library).
+        Without libclc installed, evaluate float64 transcendental functions
+        in float32 precision instead of rejecting them.
     **options
         Accepted for compatibility with Numba's generic ``jit`` and ignored.
 
@@ -374,6 +384,7 @@ def jit(pyfunc=None, *, narrow_math=False, **options):
     VulkanDispatcher
     """
     options["narrow_math"] = narrow_math
+    options["fastmath"] = fastmath
     if pyfunc is None:
         return lambda f: VulkanDispatcher(f, options)
     return VulkanDispatcher(pyfunc, options)

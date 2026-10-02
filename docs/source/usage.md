@@ -113,14 +113,12 @@ def kernel(x, out):
 NumPy functions cannot be applied to whole arrays inside a kernel; a kernel
 computes one element per invocation.
 
-## Keeping kernels in float32
+## Precision
 
-Numba types Python literals as `float64` and `int64`. Mixing them into
-`float32` arithmetic promotes the whole expression to `float64`, which is
-slower on GPUs, unavailable on some devices, and not supported at all for
-functions such as `sin` or `exp` (see {doc}`limitations`).
-
-Use typed constants to stay in single precision:
+Numba types Python literals as `float64` and `int64`, and mixing them into
+`float32` arithmetic promotes the whole expression to `float64`. That works
+(see {doc}`math_library`), but `float64` is slower on GPUs and unavailable
+on some devices. Use typed constants to stay in single precision:
 
 ```python
 HALF = np.float32(0.5)
@@ -133,8 +131,11 @@ def kernel(x, out):
         # out[i] = 0.5 * math.sin(x[i])     # promotes to float64
 ```
 
-To accept the precision loss instead, `@nv.jit(narrow_math=True)` evaluates
-`float64` transcendental functions in `float32`.
+By default, math functions come from libclc and float arithmetic is kept
+exactly as written, so results match the CPU closely and agree between
+devices. `@nv.jit(fastmath=True)` trades that for speed: `float32` math
+uses the device's built-in functions and the driver may reorder
+arithmetic.
 
 ## Choosing a device
 

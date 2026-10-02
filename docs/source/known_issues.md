@@ -14,33 +14,31 @@ uv run pytest tests/test_known_issues.py -rxX
 ```
 
 Numbers are not reused: KI-02, KI-03 and KI-07 (NumPy functions on scalars,
-missing `math` functions, complex numbers) have been fixed.
+missing `math` functions, complex numbers) have been fixed, and KI-01 no
+longer applies when libclc is installed.
 
 ## Language and library coverage
 
-### KI-01: `float64` transcendental functions and float powers
+### KI-01: `float64` math needs libclc
 
 ```python
 out[i] = math.sin(x[i])     # x is float64
 out[i] = x[i] ** 2.5        # x is float64, or float32 with a Python float
 ```
 
-**Symptom:** `VulkanUnsupportedError: math.pow on float64 is not available in
-Vulkan shaders`.
+These work, with full double accuracy, when libclc is installed (see
+{doc}`math_library`). Without it:
 
-**Cause:** GLSL.std.450, the math library of Vulkan shaders, defines `sin`,
-`cos`, `tan`, their inverses, `exp`, `log` and `pow` for 32-bit floats only.
-A Python float literal is typed `float64`, so `x ** 2.5` is a `float64` power
-even for a `float32` array.
+**Symptom:** `VulkanUnsupportedError: math.pow on float64 needs libclc`.
 
-**Workaround:** keep the computation in `float32` (`x[i] ** np.float32(2.5)`),
-or use `@nv.jit(narrow_math=True)`. Powers with integer exponents and
-`math.sqrt` work in both precisions.
+**Cause:** Vulkan's own math library defines `sin`, `exp`, `log`, `pow` and
+friends for 32-bit floats only.
 
-Functions that are built from these (`log1p`, `expm1`, `asinh`, `erf`,
-`gamma`... and the matching NumPy ufuncs) inherit the restriction.
+**Workaround:** install libclc, keep the computation in `float32`, or use
+`@nv.jit(narrow_math=True)`.
 
-**Fix:** a software `float64` math library, in `mathimpl.py`.
+**Fix:** bundle libclc's `clspv--.bc` with the package, so that it is
+always available.
 
 ### KI-04: slices, array methods and iteration
 
@@ -171,13 +169,17 @@ every selection inside a loop has its merge block inside the loop. Without
 `spirv-val`, an invalid module reaches the driver unchecked, so a built-in
 structural check of the generated module would also be worth having.
 
-### KI-23: accuracy of `erf`, `erfc`, `gamma` and `lgamma`
+### KI-23: `gamma` and `lgamma` are less accurate than the rest
 
-These are implemented in Python (`mathfuncs.py`) with approximations that
-suit `float32`: `erf` and `erfc` have an absolute error of about 1.5e-7,
-which becomes a large *relative* error where `erfc` is tiny; `gamma` and
-`lgamma` are accurate to about 1e-5 relative. With `narrow_math=True` the
-`float64` versions are no better than that.
+Most math functions come from libclc and are accurate to the last digit.
+`gamma` and `lgamma` do not: libclc's versions contain control flow that
+cannot be restructured yet (KI-24), so this package's own Lanczos
+approximation is used. It is accurate to about 1e-10 in `float64` and 1e-5
+in `float32`.
+
+The same applies to all functions without libclc, and to `float32` with
+`fastmath=True`: then `erf` and `erfc` have an absolute error of about
+1.5e-7, and the trigonometric functions are only as good as the driver's.
 
 ## Performance
 
@@ -200,6 +202,15 @@ Nothing is cached on disk, and pipelines are cached only in memory.
 
 **Fix:** cache SPIR-V on disk keyed by the optimised LLVM IR; keep one
 long-lived worker process instead of starting one per kernel.
+
+### KI-25: libclc is linked in full for every kernel
+
+Each kernel that calls a math function parses and links the whole of libclc
+(13,000 functions) before discarding what it does not need. That roughly
+doubles the compile time, from 0.4 s to 0.8 s.
+
+**Fix:** cache a reduced copy of the library holding only the functions
+this target uses.
 
 ### KI-15: one specialisation per buffer binding
 
@@ -239,8 +250,8 @@ be expected.
 ### KI-19: LLVM IR is rewritten as text
 
 Several steps patch textual LLVM IR with regular expressions: the shader
-attributes on the entry point (`compiler.compile_kernel`), the rewrites of
-`srem`, `fcmp uno`/`ord` and `llvm.copysign` (`codegen.py`), the
+attributes on the entry point (`compiler.compile_kernel`), about ten
+rewrites of constructs the backend cannot handle (`legalize.py`), the
 control-flow restructuring (`structurize.py`) and the buffer access
 expansion (`buffers.expand_buffer_access`). They depend on how LLVM 22
 prints IR and may break with other LLVM versions. A small IR library that
@@ -259,6 +270,15 @@ The `srem` rewrite and the pointer-select check exist because of behaviour
 observed with NVIDIA driver 580.x and llvmlite 0.50 (LLVM 22). They should
 be re-evaluated when either changes. The benchmark dependency group pins
 `numpy<2.5`, because numba-cuda 0.30.4 does not import with NumPy 2.5.
+
+### KI-26: libclc is not packaged
+
+The math library depends on a file, `clspv--.bc`, that `pip` cannot
+install and that distributions are dropping (current nixpkgs has removed
+libclc; the devenv shell pins an older revision for it). It must also come
+from an LLVM no newer than the one inside llvmlite.
+
+**Fix:** bundle the file in the package, as clspv does.
 
 ### KI-22: lint warnings
 

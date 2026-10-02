@@ -76,6 +76,8 @@ where it hurts; it is not ready for real workloads.
 
 - [Numba](https://numba.pydata.org/): bytecode frontend, type inference,
   lowering and the target extension API
+- [libclc](https://libclc.llvm.org/), LLVM's OpenCL math library, linked into
+  kernels for accurate and double-precision math
 - [llvmlite](https://llvmlite.readthedocs.io/) 0.50+ (LLVM 22), whose SPIR-V
   backend emits Vulkan-flavoured SPIR-V
 - [vulkan](https://pypi.org/project/vulkan/): Python bindings for the Vulkan API
@@ -103,6 +105,9 @@ where it hurts; it is not ready for real workloads.
 
 ### Prerequisites
 
+- libclc's `clspv--.bc` from LLVM 22 or older, for float64 and accurate
+  float32 math (the devenv shell provides it; see the
+  [math library docs](docs/source/math_library.md)).
 - A Vulkan 1.2 driver. [lavapipe](https://docs.mesa3d.org/drivers/llvmpipe.html)
   (Mesa's CPU implementation) is enough to try it without a GPU.
 - Python 3.11 or newer.
@@ -225,12 +230,12 @@ One run on an Intel i9-9900K (8 cores), NVIDIA TITAN X (Pascal) and Intel UHD
 
 | Backend | Mandelbrot 2048², 200 iter. | Option pricing, 4.2M | saxpy, 4.2M |
 | --- | ---: | ---: | ---: |
-| Numba CPU, 1 thread | 460.4 | 106.8 | 2.4 |
-| Numba CPU, parallel | 91.9 | 22.2 | 5.5 |
-| **numba-vulkan**, NVIDIA TITAN X | 19.7 | 29.0 | 22.8 |
-| **numba-vulkan**, Intel UHD 630 | 51.2 | 28.9 | 23.4 |
-| **numba-vulkan**, llvmpipe (CPU) | 61.7 | 25.5 | 18.8 |
-| numba-cuda, NVIDIA TITAN X | 12.6 | 18.2 | 11.1 |
+| Numba CPU, 1 thread | 462.5 | 109.6 | 2.8 |
+| Numba CPU, parallel | 90.4 | 23.3 | 6.0 |
+| **numba-vulkan**, NVIDIA TITAN X | 22.9 | 31.6 | 23.1 |
+| **numba-vulkan**, Intel UHD 630 | 56.5 | 30.5 | 22.2 |
+| **numba-vulkan**, llvmpipe (CPU) | 71.6 | 48.9 | 17.6 |
+| numba-cuda, NVIDIA TITAN X | 14.2 | 16.7 | 11.4 |
 
 Reading the numbers:
 
@@ -239,8 +244,8 @@ Reading the numbers:
 - On memory-bound kernels (saxpy) every GPU backend loses to a single CPU
   thread, because the time goes into copying arrays. numba-vulkan copies all
   arguments on every call and has no device arrays yet.
-- First-call (compile) time is about 0.5 s for Vulkan, against 0.05 to 0.3 s
-  for CUDA.
+- First-call (compile) time is 0.5 to 0.9 s for Vulkan (the higher figure
+  when the math library is linked in), against 0.05 to 0.3 s for CUDA.
 - All backends agree with the CPU result to float32 rounding; saxpy is
   bit-identical on Vulkan.
 - Repeated runs vary by around 25 %, so small differences are not meaningful.
@@ -259,16 +264,18 @@ Works:
   integer indexing (including negative indices), `.shape`, `.size` and `len()`
 - arithmetic, comparisons, bit operations, casts, tuples, complex numbers,
   `if`/`while`/`for ... in range(...)`, early `return`s, `min`/`max`/`abs`
-- the `math` module (including `hypot`, `log1p`, `erf`, `gamma`, `isnan`...)
-  and `**` with integer exponents
+- the `math` module in float32 **and float64** (including `hypot`, `log1p`,
+  `erf`, `gamma`, `isnan`...), accurate to the last digit and consistent
+  across devices, and the `**` operator
 - NumPy functions on scalars, such as `np.sqrt(x[i])` or `np.maximum(a, b)`
 - calling other `@nv.jit` and `@njit` functions; `@overload(target="vulkan")`
 
 Does not work:
 
-- **float64 `sin`/`exp`/`pow`/...** Vulkan's math library is 32-bit only.
-  Such calls raise unless you opt in with `@nv.jit(narrow_math=True)`, which
-  computes them in float32.
+- **float64 math without libclc.** Vulkan's math library is 32-bit only, so
+  `sin`, `exp`, `pow` and friends in float64 come from libclc, LLVM's OpenCL
+  math library. It is not bundled yet; without it such calls raise, unless
+  you opt in to float32 precision with `@nv.jit(narrow_math=True)`.
 - **Slices, array views, NumPy functions on whole arrays, array allocation,
   exceptions, recursion.** Errors raised inside a kernel are silently dropped.
 - **Devices without float64, int64 or int8 support.** Numba types Python
@@ -291,6 +298,8 @@ Things found along the way:
   short-circuit conditions; control flow is restructured beforehand.
 - All three drivers reassociate float arithmetic unless told not to, so
   every float operation is marked exact.
+- LLVM's SPIR-V backend mistakes `x = a * b; (x < 0) ? -y : y` for GLSL's
+  `faceforward` and crashes; such comparisons are rewritten.
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
@@ -302,7 +311,7 @@ ones most likely to bite:
 
 | | Issue | Workaround |
 | --- | --- | --- |
-| KI-01 | `x ** 2.5` and `math.sin(x)` fail for float64, and for float32 mixed with Python float literals | stay in float32 (`np.float32(2.5)`), or `narrow_math=True` |
+| KI-01 | float64 `math.sin(x)`, `x ** 2.5`... need libclc, which is not bundled | install libclc, or stay in float32 |
 | KI-24 | some deeply nested loops with `return`/`break` fail to compile | simplify the loop exits |
 | KI-04 | no slices, array methods or iteration over arrays | index explicitly |
 | KI-06 | global NumPy arrays cannot be used in kernels | pass them as arguments |
@@ -328,10 +337,13 @@ To continue the work, start with the
 - [x] Kernels, device functions, overloads
 - [x] Test suite running on every available Vulkan device
 - [x] Sphinx documentation and benchmark suite
+- [x] Math functions, NumPy ufuncs on scalars, complex numbers
+- [x] Early returns and short-circuit conditions (control-flow restructuring)
 - [ ] Device arrays and buffer reuse, to avoid copying on every call
 - [ ] Slices and array views
 - [ ] A float32-by-default typing mode, so kernels run on devices without float64
-- [ ] Software float64 math library
+- [x] float64 math, through libclc
+- [ ] Bundle libclc so that `pip install` is self-contained
 - [ ] `@vectorize`-style ufuncs
 - [ ] Shared memory, atomics and barriers
 - [ ] On-disk caching of compiled kernels

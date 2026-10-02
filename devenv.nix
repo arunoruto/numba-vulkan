@@ -15,6 +15,15 @@
     pkgs.vulkan-tools
   ];
 
+  # libclc: LLVM's OpenCL math library as bitcode. numba-vulkan links its
+  # functions into kernels for accurate and double-precision math. The
+  # version must not be newer than the LLVM inside llvmlite (22).
+  env.NUMBA_VULKAN_LIBCLC =
+    let
+      libclcPkgs = inputs.nixpkgs-libclc.legacyPackages.${pkgs.stdenv.hostPlatform.system};
+    in
+    "${libclcPkgs.llvmPackages_22.libclc}/share/clc/clspv--.bc";
+
   enterShell = ''
     if [ ! -L "$DEVENV_ROOT/.venv" ]; then
         ln -s "$DEVENV_STATE/venv/" "$DEVENV_ROOT/.venv"
