@@ -40,7 +40,8 @@ The logo is an original drawing: a snake forming an N (blue, for Numba) and
 a V (red, for Vulkan), with a lightning bolt for a tail. The bolt is a
 deliberate nod to Numba's own logo. It does not reuse any part of the Numba
 or Vulkan logos, both of which are trademarks of their respective owners,
-and it does not imply endorsement by either project.
+and it does not imply endorsement by either project. The favicon is the same
+drawing without the bolt and the eye, which are lost at that size.
 
 ## Future contributions
 
