@@ -187,14 +187,14 @@ kernels are currently narrowed to `float32` (KI-17).
 
 ## Open points
 
-- **Where libclc comes from.** Wheels bundle `clspv--.bc` (2.7 MB) from
-  the `nixpkgs-libclc` input in `devenv.yaml`, which follows the NixOS
-  26.05 release. nixpkgs-unstable removed `llvmPackages.libclc` in August
-  2026, because nothing used it any more: Mesa moved to its own fork,
-  `mesa-libclc`, which pins libclc since its interface to OpenCL runtimes
-  is not stable, and which no longer builds the `clspv` target. So 26.11
-  will most likely not have libclc. Options then: stay on 26.05, take
-  libclc from conda-forge, or package it in this repository. LLVM 23 also
+- **Where libclc comes from.** Wheels bundle `clspv--.bc` (2.7 MB), built
+  by `nix/libclc.nix` from the LLVM 22 sources in nixpkgs. nixpkgs-unstable
+  removed its own `llvmPackages.libclc` in August 2026, because nothing
+  used it any more: Mesa moved to its own fork, `mesa-libclc`, which pins
+  libclc since its interface to OpenCL runtimes is not stable, and which no
+  longer builds the `clspv` target. The derivation here builds only that
+  target; for LLVM 22.1.8 its output is byte for byte the file nixpkgs
+  26.05 still ships. Without Nix, conda-forge's package is used. LLVM 23 also
   renames the `clspv` target to the `spirv-unknown-vulkan` triple, built as
   part of LLVM's runtimes build, which will change the file name once
   llvmlite moves to LLVM 23. Once the bundled libclc has the new `tgamma`,

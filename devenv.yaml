@@ -1,10 +1,4 @@
 inputs:
   nixpkgs:
     url: github:cachix/devenv-nixpkgs/rolling
-  # libclc for LLVM 22, the version inside llvmlite. nixpkgs-unstable dropped
-  # it (Mesa moved to its own fork, which has no Vulkan target); the 26.05
-  # release still builds it. See docs/source/math_library.md before moving
-  # this to 26.11.
-  nixpkgs-libclc:
-    url: github:NixOS/nixpkgs/nixos-26.05
 allow_unfree: true

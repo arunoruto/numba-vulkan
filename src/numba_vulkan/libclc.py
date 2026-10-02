@@ -34,8 +34,9 @@ _EXTERNAL_DEFINITION = re.compile(
 )
 _FILE = "clspv--.bc"
 _VERSION_FILE = "libclc-version.txt"
-# Nix store paths name the package: /nix/store/<hash>-libclc-22.1.8/...
-_STORE_VERSION = re.compile(r"-libclc-(\d[\w.]*)/")
+# Nix store paths name the package: /nix/store/<hash>-libclc-22.1.8/...,
+# or libclc-clspv-22.1.8 for this project's own build (nix/libclc.nix).
+_STORE_VERSION = re.compile(r"-libclc(?:-clspv)?-(\d[\w.]*)/")
 _SEARCH = (
     os.path.join(os.path.dirname(__file__), "data"),
     "/usr/share/clc",

@@ -5,10 +5,11 @@ docs/source/math_library.md). Wheels carry a copy, together with a
 ``libclc-version.txt`` that says which one. It comes from
 
 ``nix`` (the default where Nix is installed)
-    the ``nixpkgs-libclc`` input of devenv.lock, the same package the
-    development shell and the tests use. Its version is whatever that
-    nixpkgs revision has; moving the input updates it, and reverting the
-    lock file goes back.
+    built by nix/libclc.nix from the LLVM 22 sources of the nixpkgs that
+    devenv.lock pins, the same file the development shell and the tests
+    use. Its version is whatever ``llvmPackages_22`` has there; updating
+    the lock updates it, and reverting the lock file goes back. Building
+    takes about half a minute; clang and LLVM come from the binary cache.
 ``conda``
     conda-forge's libclc package, for building without Nix. A plain
     download, so it is pinned by URL and SHA-256 and must be moved by hand
@@ -19,7 +20,7 @@ docs/source/math_library.md). Wheels carry a copy, together with a
     python scripts/fetch_libclc.py --source conda --output x.bc
 
 The LLVM inside llvmlite must be at least as new as the one libclc was built
-with: llvmlite 0.50 has LLVM 22, hence ``llvmPackages_22``.
+with: llvmlite 0.50 has LLVM 22, hence ``llvmPackages_22`` in nix/libclc.nix.
 """
 
 import argparse
@@ -34,7 +35,6 @@ import tarfile
 import urllib.request
 import zipfile
 
-LLVM = "22"
 ROOT = pathlib.Path(__file__).parent.parent
 CONDA_VERSION = "22.1.8"
 CONDA_PACKAGE = f"libclc-{CONDA_VERSION}-h0f8336f_0"
@@ -61,17 +61,20 @@ def _zstd_decompress(data):
 
 
 def _nix(*args):
-    """Run a ``nix`` command and return its standard output."""
-    return subprocess.run(
-        ["nix", "--extra-experimental-features", "nix-command flakes", *args],
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
+    """Run a ``nix`` command and return its standard output.
+
+    Its messages go to the terminal, so that failures and build progress
+    are visible.
+    """
+    command = ["nix", "--extra-experimental-features", "nix-command flakes", *args]
+    result = subprocess.run(command, stdout=subprocess.PIPE, text=True, check=False)
+    if result.returncode != 0:
+        sys.exit(f"nix failed ({result.returncode}): {' '.join(command)}")
+    return result.stdout.strip()
 
 
 def from_nix():
-    """Fetch libclc with Nix, from the revision devenv.lock pins.
+    """Build libclc with Nix, against the nixpkgs devenv.lock pins.
 
     Returns
     -------
@@ -80,18 +83,23 @@ def from_nix():
     version : str
         Description of the version, for ``libclc-version.txt``.
     """
-    lock = json.loads((ROOT / "devenv.lock").read_text())
-    rev = lock["nodes"]["nixpkgs-libclc"]["locked"]["rev"]
-    reference = f"github:NixOS/nixpkgs/{rev}#llvmPackages_{LLVM}.libclc"
-    version = _nix("eval", "--raw", f"{reference}.version")
-    out = _nix("build", "--no-link", "--print-out-paths", reference).split()[0]
+    lock = json.loads((ROOT / "devenv.lock").read_text())["nodes"]["nixpkgs"]["locked"]
+    nixpkgs = f"github:{lock['owner']}/{lock['repo']}/{lock['rev']}"
+    package = (
+        f'(builtins.getFlake "{nixpkgs}").legacyPackages.${{builtins.currentSystem}}'
+        f".callPackage {ROOT / 'nix' / 'libclc.nix'} {{ }}"
+    )
+    version = _nix("eval", "--raw", "--impure", "--expr", f"({package}).version")
+    out = _nix(
+        "build", "--no-link", "--print-out-paths", "--impure", "--expr", package
+    ).split()[0]
     if version != CONDA_VERSION:
         print(
             f"note: nixpkgs has libclc {version}, the conda-forge fallback "
             f"{CONDA_VERSION}; consider moving the fallback"
         )
     data = (pathlib.Path(out) / MEMBER).read_bytes()
-    return data, f"{version} (nixpkgs {rev})"
+    return data, f"{version} (nix/libclc.nix, {lock['repo']} {lock['rev']})"
 
 
 def from_conda():
