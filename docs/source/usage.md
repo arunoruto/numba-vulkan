@@ -39,8 +39,40 @@ def stencil(src, dst):
 stencil.forall((src.shape[1], src.shape[0]))(src, dst)
 ```
 
-Arguments are NumPy arrays (C-contiguous) and scalars. Arrays are copied to
-the device before the call; arrays the kernel writes to are copied back.
+Arguments are NumPy arrays (C-contiguous), device arrays and scalars. NumPy
+arrays are copied to the device before the call, and those the kernel
+writes to are copied back.
+
+## Keeping data on the device
+
+Copying is often slower than the kernel itself. A
+{py:class}`~numba_vulkan.runtime.DeviceArray` lives on the device and is
+used in place, so a chain of kernels transfers data only at its ends, as
+with `numba.cuda`:
+
+```python
+x = nv.to_device(np.arange(1000, dtype=np.float32))   # host -> device
+y = nv.device_array_like(x)                           # uninitialised
+tmp = nv.device_array(1000, np.float32)
+
+first.forall(1000)(x, tmp)        # no copies
+second.forall(1000)(tmp, y)       # no copies
+result = y.copy_to_host()         # device -> host
+x.copy_to_device(new_values)      # overwrite in place
+```
+
+Host and device arrays can be mixed in one call. A device array belongs to
+the device it was created on (`device=` selects it, as for `forall`) and
+cannot be passed to a kernel that runs on another one. There is no indexing
+or arithmetic on device arrays from Python; copy to the host for that.
+
+The buffers behind device arrays and behind the temporary copies of NumPy
+arguments are recycled: when an array is dropped, its buffer goes to a pool
+and serves the next request of a similar size. The pool holds up to
+`NUMBA_VULKAN_POOL_MB` megabytes (default 1024) per device;
+`nv.get_device().trim()` empties it.
+
+A launch returns when the kernel has finished. Devices are not thread-safe.
 
 ## Functions called from kernels
 

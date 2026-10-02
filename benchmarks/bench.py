@@ -2,7 +2,8 @@
 
 Every workload is one scalar "core" function that is compiled unchanged for
 each backend, plus a thin per-backend driver. Timings are wall-clock for a
-full call with host (NumPy) arrays, so GPU numbers include data transfer.
+full call. GPU backends are timed with host (NumPy) arrays, which includes
+data transfer, and with device arrays, which does not.
 
     uv run python benchmarks/bench.py
     uv run python benchmarks/bench.py --size 1024 --repeat 3 --json out.json
@@ -125,7 +126,13 @@ def vulkan_backend(device):
     def run_saxpy(*args):
         saxpy_kernel.forall(args[-1].size, device=device)(*args)
 
-    return {"mandelbrot": run_mandelbrot, "option": run_option, "saxpy": run_saxpy}
+    return {
+        "mandelbrot": run_mandelbrot,
+        "option": run_option,
+        "saxpy": run_saxpy,
+        "to_device": lambda array: nv.to_device(array, device),
+        "sync": lambda: None,  # launches return when the kernel has finished
+    }
 
 
 def cuda_backend():
@@ -161,7 +168,13 @@ def cuda_backend():
     def run_saxpy(*args):
         saxpy_kernel.forall(args[-1].size)(*args)
 
-    return {"mandelbrot": run_mandelbrot, "option": run_option, "saxpy": run_saxpy}
+    return {
+        "mandelbrot": run_mandelbrot,
+        "option": run_option,
+        "saxpy": run_saxpy,
+        "to_device": cuda.to_device,
+        "sync": cuda.synchronize,
+    }
 
 
 # -- workloads ------------------------------------------------------------------
@@ -193,16 +206,24 @@ def make_workloads(size, maxiter):
     }
 
 
-def measure(fn, args, repeat):
+def measure(kernels, name, args, repeat, on_device=False):
+    """Time one workload; with `on_device`, without the transfers."""
+    fn, sync = kernels[name], kernels.get("sync", lambda: None)
+    if on_device:
+        args = [
+            kernels["to_device"](a) if isinstance(a, np.ndarray) else a for a in args
+        ]
     start = time.perf_counter()
     fn(*args)
+    sync()
     first = time.perf_counter() - start
     best = math.inf
     for _ in range(repeat):
         start = time.perf_counter()
         fn(*args)
+        sync()
         best = min(best, time.perf_counter() - start)
-    return first, best, args[-1].copy()
+    return first, best, args[-1].copy_to_host() if on_device else args[-1].copy()
 
 
 def agreement(name, result, reference):
@@ -288,33 +309,41 @@ def main():
         "numba cpu (1 thread)": cpu_backend(False),
         "numba cpu (parallel)": cpu_backend(True),
     }
+    # GPU backends run twice: with NumPy arrays, which are copied to and from
+    # the device on every call, and with arrays that stay on the device.
+    on_device = set()
     for info in nv.list_devices():
         backends[f"vulkan: {info.name}"] = vulkan_backend(info.index)
     if HAVE_CUDA:
         name = cuda.get_current_device().name
         name = name.decode() if isinstance(name, bytes) else name
         backends[f"numba-cuda: {name}"] = cuda_backend()
+    for label in [b for b in backends if "to_device" in backends[b]]:
+        backends[f"{label}, device arrays"] = backends[label]
+        on_device.add(f"{label}, device arrays")
 
     records = []
     for name, (description, args) in make_workloads(opts.size, opts.maxiter).items():
         print(f"\n{name} ({description})")
         print(
-            f"  {'backend':<46}{'first call':>12}{'best':>12}{'speedup':>9}  agreement"
+            f"  {'backend':<60}{'first call':>12}{'best':>12}{'speedup':>9}  agreement"
         )
         reference = baseline = None
         for label, kernels in backends.items():
             try:
-                first, best, result = measure(kernels[name], args, opts.repeat)
+                first, best, result = measure(
+                    kernels, name, args, opts.repeat, label in on_device
+                )
             except Exception as exc:
                 print(
-                    f"  {label:<46}  failed: {type(exc).__name__}: {str(exc).splitlines()[0][:60]}"
+                    f"  {label:<60}  failed: {type(exc).__name__}: {str(exc).splitlines()[0][:60]}"
                 )
                 continue
             if reference is None:
                 reference, baseline = result, best
             check = agreement(name, result, reference)
             print(
-                f"  {label:<46}{first * 1e3:>10.1f}ms{best * 1e3:>10.2f}ms"
+                f"  {label:<60}{first * 1e3:>10.1f}ms{best * 1e3:>10.2f}ms"
                 f"{baseline / best:>8.2f}x  {check}"
             )
             records.append(

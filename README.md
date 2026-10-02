@@ -98,6 +98,7 @@ where it hurts; it is not ready for real workloads.
    aborting Python.
 5. The runtime uploads the arguments (binding 0: array shapes, binding
    `1 + k`: argument `k`), dispatches, and copies written buffers back.
+   Device arrays are used in place.
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
@@ -165,6 +166,16 @@ y = np.ones(1000, dtype=np.float32)
 saxpy.forall(x.size)(np.float32(2.0), x, y)
 ```
 
+NumPy arrays are copied to the device and back on every call. Device arrays
+stay there, as with `numba.cuda`:
+
+```python
+dx, dy = nv.to_device(x), nv.to_device(y)
+saxpy.forall(x.size)(np.float32(2.0), dx, dy)   # no copies
+saxpy.forall(x.size)(np.float32(0.5), dx, dy)
+y = dy.copy_to_host()
+```
+
 Functions compiled with `@nv.jit` can be called from kernels, may return
 values or tuples, and can take arrays. Functions compiled with `numba.njit`
 are recompiled for Vulkan when a kernel calls them:
@@ -218,8 +229,8 @@ Set `NUMBA_VULKAN_VALIDATE=1` to run every generated shader through
 ## Benchmarks
 
 `benchmarks/bench.py` compiles the same scalar function for Numba's CPU
-target, numba-vulkan and numba-cuda and times a full call with NumPy arrays,
-so GPU timings include data transfer.
+target, numba-vulkan and numba-cuda and times a full call: with NumPy arrays,
+so that GPU timings include data transfer, and with device arrays.
 
 ```sh
 uv run python benchmarks/bench.py            # --size, --maxiter, --repeat, --json
@@ -230,20 +241,25 @@ One run on an Intel i9-9900K (8 cores), NVIDIA TITAN X (Pascal) and Intel UHD
 
 | Backend | Mandelbrot 2048², 200 iter. | Option pricing, 4.2M | saxpy, 4.2M |
 | --- | ---: | ---: | ---: |
-| Numba CPU, 1 thread | 462.5 | 109.6 | 2.8 |
-| Numba CPU, parallel | 90.4 | 23.3 | 6.0 |
-| **numba-vulkan**, NVIDIA TITAN X | 22.9 | 31.6 | 23.1 |
-| **numba-vulkan**, Intel UHD 630 | 56.5 | 30.5 | 22.2 |
-| **numba-vulkan**, llvmpipe (CPU) | 71.6 | 48.9 | 17.6 |
-| numba-cuda, NVIDIA TITAN X | 14.2 | 16.7 | 11.4 |
+| Numba CPU, 1 thread | 464.3 | 107.7 | 2.9 |
+| Numba CPU, parallel | 93.9 | 23.0 | 6.0 |
+| **numba-vulkan**, NVIDIA TITAN X | 12.9 | 14.1 | 8.2 |
+| **numba-vulkan**, Intel UHD 630 | 54.6 | 15.6 | 10.8 |
+| **numba-vulkan**, llvmpipe (CPU) | 70.5 | 44.3 | 8.7 |
+| numba-cuda, NVIDIA TITAN X | 10.5 | 16.3 | 12.6 |
+| **numba-vulkan**, NVIDIA TITAN X, device arrays | 8.8 | 0.69 | 0.51 |
+| **numba-vulkan**, Intel UHD 630, device arrays | 52.8 | 6.0 | 5.0 |
+| **numba-vulkan**, llvmpipe (CPU), device arrays | 66.3 | 35.1 | 3.9 |
+| numba-cuda, NVIDIA TITAN X, device arrays | 7.6 | 0.28 | 0.22 |
 
 Reading the numbers:
 
 - On compute-heavy kernels (Mandelbrot) Vulkan beats the parallel CPU on both
-  GPUs and is roughly 1.5x slower than CUDA on the same card.
-- On memory-bound kernels (saxpy) every GPU backend loses to a single CPU
-  thread, because the time goes into copying arrays. numba-vulkan copies all
-  arguments on every call and has no device arrays yet.
+  GPUs and is within about 20 % of CUDA on the same card.
+- On memory-bound kernels (saxpy) with NumPy arguments, every GPU backend
+  loses to a single CPU thread, because the time goes into copying arrays.
+  With device arrays nothing is copied, and the discrete GPU is several
+  times faster than the CPU.
 - First-call (compile) time is 0.5 to 0.9 s for Vulkan (the higher figure
   when the math library is linked in), against 0.05 to 0.3 s for CUDA.
 - All backends agree with the CPU result to float32 rounding; saxpy is
@@ -315,7 +331,6 @@ ones most likely to bite:
 | KI-04 | no slices, array methods or iteration over arrays | index explicitly |
 | KI-06 | global NumPy arrays cannot be used in kernels | pass them as arguments |
 | KI-10 | errors raised in kernels are dropped; no bounds checks | check inputs on the host |
-| KI-13 | every call copies all arrays to and from the device | none yet |
 | KI-17 | most kernels need the optional float64/int64/int8 device features | none yet |
 
 `tests/test_known_issues.py` reproduces the coverage gaps as expected
@@ -338,7 +353,9 @@ To continue the work, start with the
 - [x] Sphinx documentation and benchmark suite
 - [x] Math functions, NumPy ufuncs on scalars, complex numbers
 - [x] Early returns and short-circuit conditions (control-flow restructuring)
-- [ ] Device arrays and buffer reuse, to avoid copying on every call
+- [x] Loops with `break`/`return` anywhere, `while` loops (fuzz-tested)
+- [x] Device arrays and buffer reuse, to avoid copying on every call
+- [ ] Asynchronous launches; scalars as push constants
 - [ ] Slices and array views
 - [ ] A float32-by-default typing mode, so kernels run on devices without float64
 - [x] float64 math, through libclc
