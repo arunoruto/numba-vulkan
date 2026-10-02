@@ -155,3 +155,42 @@ def test_pool_sizes_round_up():
     assert runtime._pool_size(1 << 16) == 1 << 16
     assert runtime._pool_size((1 << 16) + 1) == 2 << 16
     assert runtime._pool_size(1_000_000) == 16 << 16
+
+
+@nv.jit
+def scaled(factor, a, out):
+    i = nv.global_id(0)
+    if i < a.shape[0]:
+        out[i] = factor * a[i]
+
+
+def test_repeated_launches_follow_changes_of_buffers_kernels_and_grids(run, device):
+    # Launches reuse the descriptor set and the recorded commands while
+    # nothing changes; every kind of change must be noticed.
+    dev = nv.get_device(device)
+    a = nv.to_device(np.arange(100, dtype=f32), device)
+    b = nv.to_device(np.arange(100, dtype=f32) + 1000, device)
+    out1, out2 = nv.device_array_like(a), nv.device_array_like(a)
+
+    run(scaled, 100, f32(2), a, out1)
+    state = dev._pipelines[id(next(iter(scaled._kernels.values())))]
+    bound = state.bound
+    run(scaled, 100, f32(3), a, out1)  # same buffers, other scalar value
+    assert state.bound == bound
+    np.testing.assert_array_equal(out1.copy_to_host(), 3 * np.arange(100))
+
+    run(scaled, 100, f32(2), b, out2)  # other buffers
+    assert state.bound != bound
+    np.testing.assert_array_equal(out2.copy_to_host(), 2 * (np.arange(100) + 1000))
+    np.testing.assert_array_equal(out1.copy_to_host(), 3 * np.arange(100))
+
+    out2.copy_to_device(np.zeros(100, dtype=f32))
+    run(scaled, 50, f32(5), a, out2)  # smaller grid: fewer workgroups
+    got = out2.copy_to_host()
+    np.testing.assert_array_equal(got[:64], 5 * np.arange(64))
+    assert (got[64:] == 0).all()
+
+    run(add_one, 100, out1)  # another kernel in between
+    run(scaled, 100, f32(5), a, out2)
+    np.testing.assert_array_equal(out1.copy_to_host(), 3 * np.arange(100) + 1)
+    np.testing.assert_array_equal(out2.copy_to_host(), 5 * np.arange(100))

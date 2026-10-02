@@ -30,16 +30,17 @@ rows, which reuse the kernels compiled for the rows above.
   Vulkan copies somewhat faster than CUDA here, because it maps buffers
   that are kept from call to call.
 - With device arrays nothing is copied. `saxpy` over 4 million elements
-  then takes about 0.5 ms on the discrete GPU, several times faster than
-  the CPU. CUDA is two to three times faster still on such short kernels:
-  a Vulkan launch costs about 0.4 ms and waits for the kernel to finish
-  (KI-28 in {doc}`known_issues`).
+  then takes about 0.3 ms on the discrete GPU, ten times faster than the
+  CPU, and within a factor of 1.3 of CUDA, which does not have to wait for
+  each kernel as a Vulkan launch does (KI-28 in {doc}`known_issues`).
 - The integrated GPU and llvmpipe share memory with the CPU and gain less
   from device arrays; `saxpy` is limited by memory bandwidth there.
 - Compiling a Vulkan kernel takes 0.05 to 0.25 s, about as long as for
   CUDA; the higher figure applies to kernels that call math functions,
   which link libclc. (The very first kernel of a workload also pays for
-  Numba's type inference of the shared core function.)
+  Numba's type inference of the shared core function.) The tables were
+  produced with the on-disk kernel cache turned off; with it, a kernel
+  that was compiled in an earlier run takes about 0.05 s.
 - The `option` workload calls `log`, `exp` and `sqrt` from libclc. On the
   GPUs that costs little compared with the built-in functions; on llvmpipe
   it roughly doubles the run time.
@@ -58,8 +59,10 @@ around 25 %, so small differences between rows are not meaningful.
 uv sync --group bench        # adds numba-cuda; optional
 uv run python benchmarks/bench.py
 
-# Regenerate the tables on this page:
-uv run python benchmarks/bench.py --markdown docs/source/_generated/benchmark_results.md
+# Regenerate the tables on this page (without the kernel cache, so that
+# "first call" shows a real compilation):
+NUMBA_VULKAN_CACHE=0 uv run python benchmarks/bench.py \
+    --markdown docs/source/_generated/benchmark_results.md
 ```
 
 Options: `--size` (grid edge; arrays have `size**2` elements), `--maxiter`,

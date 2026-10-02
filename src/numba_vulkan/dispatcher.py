@@ -99,6 +99,8 @@ class VulkanDispatcher:
             self.narrow = True
         self._overloads = {}
         self._kernels = {}
+        # Kernels by the argument types of a launch, before binding.
+        self._launched = {}
         self._compiling = 0
         functools.update_wrapper(self, py_func)
 
@@ -405,8 +407,7 @@ class VulkanDispatcher:
                         f"{arg._stored} elements, which does not match a kernel "
                         f"compiled with narrow={self.narrow}"
                     )
-                dtype = numpy_support.from_dtype(arg.dtype)
-                argtypes.append(types.Array(dtype, arg.ndim, "C"))
+                argtypes.append(_device_array_type(arg.dtype, arg.ndim))
                 shapes.extend(arg.shape)
                 hosts.append(arg)
             elif isinstance(arg, np.ndarray):
@@ -426,7 +427,10 @@ class VulkanDispatcher:
                 argtypes.append(ty)
                 stored = narrowing.stored_dtype(np.dtype(str(ty)), mode)
                 hosts.append(np.array([arg], dtype=stored))
-        kernel = self.compile(argtypes, ndim=len(extent), mode=mode)
+        key = (tuple(argtypes), len(extent), mode)
+        kernel = self._launched.get(key)
+        if kernel is None:
+            kernel = self._launched[key] = self.compile(argtypes, len(extent), mode)
         groups = [1, 1, 1]
         for axis, n in enumerate(extent):
             groups[axis] = -(-int(n) // kernel.local_size[axis])
@@ -465,6 +469,12 @@ class VulkanDispatcher:
             where += f", in {location[0]} at {location[1]}:{location[2]}"
         error.add_note(where)
         raise error
+
+
+@functools.lru_cache(maxsize=None)
+def _device_array_type(dtype, ndim):
+    """Numba type of a device array."""
+    return types.Array(numpy_support.from_dtype(dtype), ndim, "C")
 
 
 def jit(

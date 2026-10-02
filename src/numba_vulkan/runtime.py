@@ -1,8 +1,9 @@
 """Minimal Vulkan compute runtime: devices, device arrays and kernel launch."""
 
+import itertools
 import os
 import weakref
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 import vulkan as vk
@@ -209,15 +210,32 @@ class Device:
             queueFamilyIndex=self.family,
         )
         self.command_pool = vk.vkCreateCommandPool(self.handle, pool, None)
-        self._command_buffer = vk.vkAllocateCommandBuffers(
+        # One command buffer for transfers and one for kernels, so that the
+        # recording of a kernel launch can be submitted again unchanged.
+        self._transfer_commands, self._launch_commands = vk.vkAllocateCommandBuffers(
             self.handle,
             vk.VkCommandBufferAllocateInfo(
                 sType=vk.VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
                 commandPool=self.command_pool,
                 level=vk.VK_COMMAND_BUFFER_LEVEL_PRIMARY,
-                commandBufferCount=1,
+                commandBufferCount=2,
             ),
-        )[0]
+        )
+        self._begin_info = vk.VkCommandBufferBeginInfo(
+            sType=vk.VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO
+        )
+        self._submit_info = {
+            id(cmd): [
+                vk.VkSubmitInfo(
+                    sType=vk.VK_STRUCTURE_TYPE_SUBMIT_INFO,
+                    commandBufferCount=1,
+                    pCommandBuffers=[cmd],
+                )
+            ]
+            for cmd in (self._transfer_commands, self._launch_commands)
+        }
+        # What the kernel command buffer currently holds: (pipeline, groups).
+        self._recorded = None
         self._pipelines = {}
         # 64-bit types this device cannot use and kernels must do without.
         self.mode = narrowing.Mode(floats=not info.float64, ints=not info.int64)
@@ -260,13 +278,7 @@ class Device:
 
         Returns
         -------
-        pipeline : object
-            The ``VkPipeline`` handle.
-        layout : object
-            The ``VkPipelineLayout`` handle.
-        desc_set : object
-            The ``VkDescriptorSet`` of the kernel, with one storage buffer
-            per binding; it is rewritten on every launch.
+        _Pipeline
 
         Raises
         ------
@@ -275,7 +287,7 @@ class Device:
         """
         key = id(kernel)
         if key in self._pipelines:
-            return self._pipelines[key][:4]
+            return self._pipelines[key]
         self.check_support(kernel)
         dev = self.handle
         module = vk.vkCreateShaderModule(
@@ -365,10 +377,10 @@ class Device:
             buffer = self._acquire(max(data.size, 4), host=False)
             self._upload(buffer, data)
             constants.append((buffer, max(data.size, 4)))
-        self._pipelines[key] = (
-            pipeline, layout, desc_set, constants, set_layout, pool, module, kernel
-        )  # fmt: skip
-        return pipeline, layout, desc_set, constants
+        self._pipelines[key] = _Pipeline(
+            pipeline, layout, desc_set, constants, (set_layout, pool, module, kernel)
+        )
+        return self._pipelines[key]
 
     # -- buffers ---------------------------------------------------------
 
@@ -515,30 +527,23 @@ class Device:
                 vk.vkDestroyBuffer(self.handle, buffer.handle, None)
                 vk.vkFreeMemory(self.handle, buffer.memory, None)
 
-    def _submit(self, record):
-        """Record commands with `record`, run them and wait for completion.
+    def _submit(self, record, cmd=None):
+        """Run a command buffer and wait for completion.
 
         Parameters
         ----------
-        record : callable
-            Called with the command buffer to fill.
+        record : callable or None
+            Called with the command buffer to fill it. ``None`` submits
+            the buffer as it was recorded last.
+        cmd : object, optional
+            The command buffer; the one for transfers by default.
         """
-        cmd = self._command_buffer
-        vk.vkBeginCommandBuffer(
-            cmd,
-            vk.VkCommandBufferBeginInfo(
-                sType=vk.VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
-                flags=vk.VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
-            ),
-        )
-        record(cmd)
-        vk.vkEndCommandBuffer(cmd)
-        submit = vk.VkSubmitInfo(
-            sType=vk.VK_STRUCTURE_TYPE_SUBMIT_INFO,
-            commandBufferCount=1,
-            pCommandBuffers=[cmd],
-        )
-        vk.vkQueueSubmit(self.queue, 1, [submit], vk.VK_NULL_HANDLE)
+        cmd = self._transfer_commands if cmd is None else cmd
+        if record is not None:
+            vk.vkBeginCommandBuffer(cmd, self._begin_info)
+            record(cmd)
+            vk.vkEndCommandBuffer(cmd)
+        vk.vkQueueSubmit(self.queue, 1, self._submit_info[id(cmd)], vk.VK_NULL_HANDLE)
         vk.vkQueueWaitIdle(self.queue)
 
     def _upload(self, buffer, data):
@@ -605,8 +610,7 @@ class Device:
         ValueError
             If a device array belongs to another device.
         """
-        dev = self.handle
-        pipeline, layout, desc_set, constants = self._pipeline(kernel)
+        state = self._pipeline(kernel)
         buffers, transient = [], []
         try:
             for array in arrays:
@@ -622,41 +626,52 @@ class Device:
                 transient.append(buffer)
                 buffers.append((buffer, max(array.nbytes, 4)))
                 self._upload(buffer, array.reshape(-1).view(np.uint8))
-            buffers += constants
+            buffers += state.constants
 
-            writes = [
-                vk.VkWriteDescriptorSet(
-                    sType=vk.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-                    dstSet=desc_set,
-                    dstBinding=i,
-                    descriptorCount=1,
-                    descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                    pBufferInfo=[
-                        vk.VkDescriptorBufferInfo(
-                            buffer=buffer.handle, offset=0, range=nbytes
-                        )
-                    ],
-                )
-                for i, (buffer, nbytes) in enumerate(buffers)
-            ]
-            vk.vkUpdateDescriptorSets(dev, len(writes), writes, 0, None)
+            # Repeated launches mostly see the same buffers, and then neither
+            # the descriptor set nor the recorded commands have to change.
+            bound = tuple((buffer.serial, nbytes) for buffer, nbytes in buffers)
+            if bound != state.bound:
+                writes = [
+                    vk.VkWriteDescriptorSet(
+                        sType=vk.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                        dstSet=state.desc_set,
+                        dstBinding=i,
+                        descriptorCount=1,
+                        descriptorType=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                        pBufferInfo=[
+                            vk.VkDescriptorBufferInfo(
+                                buffer=buffer.handle, offset=0, range=nbytes
+                            )
+                        ],
+                    )
+                    for i, (buffer, nbytes) in enumerate(buffers)
+                ]
+                vk.vkUpdateDescriptorSets(self.handle, len(writes), writes, 0, None)
+                state.bound = bound
+                self._recorded = None  # updating a set invalidates its users
 
             def record(cmd):
                 """Bind the kernel and dispatch it."""
-                vk.vkCmdBindPipeline(cmd, vk.VK_PIPELINE_BIND_POINT_COMPUTE, pipeline)
+                vk.vkCmdBindPipeline(
+                    cmd, vk.VK_PIPELINE_BIND_POINT_COMPUTE, state.pipeline
+                )
                 vk.vkCmdBindDescriptorSets(
                     cmd,
                     vk.VK_PIPELINE_BIND_POINT_COMPUTE,
-                    layout,
+                    state.layout,
                     0,
                     1,
-                    [desc_set],
+                    [state.desc_set],
                     0,
                     None,
                 )
                 vk.vkCmdDispatch(cmd, *groups)
 
-            self._submit(record)
+            fresh = self._recorded != (id(state), groups)
+            self._recorded = None  # stays unset if recording fails
+            self._submit(record if fresh else None, self._launch_commands)
+            self._recorded = (id(state), groups)
 
             for binding, (array, (buffer, _)) in enumerate(zip(arrays, buffers)):
                 if isinstance(array, DeviceArray):
@@ -664,8 +679,36 @@ class Device:
                 if binding in kernel.written_bindings:
                     self._download(buffer, array.reshape(-1).view(np.uint8))
         finally:
-            for buffer in transient:
+            # In reverse, so that the next launch gets the same buffers at
+            # the same bindings from the pool.
+            for buffer in reversed(transient):
                 self._release(buffer)
+
+
+@dataclass
+class _Pipeline:
+    """A kernel as set up on a device.
+
+    Attributes
+    ----------
+    pipeline, layout, desc_set : object
+        The ``VkPipeline``, ``VkPipelineLayout`` and ``VkDescriptorSet``
+        handles. The set has one storage buffer per binding.
+    constants : list of tuple
+        Buffer and size in bytes of each constant array of the kernel.
+    keep : tuple
+        Objects that must live as long as the pipeline.
+    bound : tuple or None
+        Serial number and size of the buffer at each binding of the
+        descriptor set, as last written.
+    """
+
+    pipeline: object
+    layout: object
+    desc_set: object
+    constants: list
+    keep: tuple
+    bound: tuple = None
 
 
 @dataclass
@@ -685,6 +728,9 @@ class _Buffer:
     view : numpy.ndarray or None
         The mapped contents as bytes, or ``None`` if the memory cannot be
         mapped.
+    serial : int
+        A number that identifies the buffer for good; unlike ``id()`` it is
+        not reused after the buffer has been destroyed.
     """
 
     handle: object
@@ -692,6 +738,7 @@ class _Buffer:
     nbytes: int
     host: bool
     view: object
+    serial: int = field(default_factory=itertools.count().__next__)
 
 
 def _pool_size(nbytes):

@@ -140,16 +140,18 @@ generated module would be worth having.
 
 ## Performance
 
-### KI-28: launches are synchronous and cost about 0.4 ms
+### KI-28: launches are synchronous
 
-Every launch waits for the kernel to finish, and takes about 0.4 ms even
-for a tiny kernel on device arrays (numba-cuda: about 0.2 ms). Most of it is spent in the Python Vulkan bindings: scalars and
-array shapes are uploaded as small buffers and the descriptor set is
-rewritten on each call.
+Every launch waits for the kernel to finish. A repeated launch on the same
+arrays costs about 0.1 ms on top of the kernel itself; a launch with other
+buffers than the previous one costs about 0.3 ms, because the descriptor
+set is rewritten and the commands are recorded again. Scalars and array
+shapes travel as small buffers.
 
-**Fix:** pass scalars and shapes as push constants, keep descriptor sets
-per argument combination, and offer an asynchronous launch that returns a
-handle to wait on.
+**Fix:** an asynchronous launch that returns a handle to wait on, which
+needs a command buffer, descriptor set and status buffer per launch in
+flight; descriptor sets kept per argument combination; scalars and shapes
+as push constants.
 
 ### KI-29: device arrays are bare buffers
 
