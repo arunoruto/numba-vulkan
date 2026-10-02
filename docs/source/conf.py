@@ -1,4 +1,5 @@
 import datetime
+import sys
 import tomllib
 from pathlib import Path
 
@@ -21,6 +22,15 @@ author = "Mirza Arnaut"
 copyright = f"{datetime.datetime.now().year}, {author}"
 version = _project["version"]
 release = version
+
+# Charts of the collected benchmark results (benchmarks/report.py), drawn
+# afresh on every build.
+_benchmarks = str(ROOT / "benchmarks")
+sys.path.insert(0, _benchmarks)
+import report  # noqa: E402
+
+report.report(Path(__file__).parent / "_generated" / "benchmarks")
+sys.path.remove(_benchmarks)
 
 # -- General configuration ---------------------------------------------------
 
