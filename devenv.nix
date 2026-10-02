@@ -24,15 +24,9 @@
     in
     "${libclcPkgs.llvmPackages_22.libclc}/share/clc/clspv--.bc";
 
-  # Building distributions: the wheel ships libclc, so that `pip install`
-  # needs nothing else. The bitcode is copied from the Nix store into the
-  # package directory (ignored by git) before the build.
-  scripts.bundle-libclc.exec = ''
-    install -Dm644 "$NUMBA_VULKAN_LIBCLC" \
-      "$DEVENV_ROOT/src/numba_vulkan/data/clspv--.bc"
-  '';
+  # sdist and wheel with libclc bundled; see the Makefile, which works without Nix.
   scripts.build-dist.exec = ''
-    bundle-libclc && cd "$DEVENV_ROOT" && uv build "$@"
+    cd "$DEVENV_ROOT" && make dist
   '';
 
   enterShell = ''

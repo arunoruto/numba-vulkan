@@ -5,8 +5,8 @@ provides the missing functions, and double precision versions of all of
 them, as LLVM bitcode. Its ``clspv`` build is written for Vulkan shaders,
 which makes it this target's counterpart of CUDA's libdevice.
 
-The bitcode is not part of this package; see `find_bitcode` for where it
-is looked for.
+Wheels bundle the bitcode; see `find_bitcode` for where it is looked for
+and `version` for which one is in use.
 """
 
 import hashlib
@@ -33,6 +33,9 @@ _EXTERNAL_DEFINITION = re.compile(
     re.MULTILINE,
 )
 _FILE = "clspv--.bc"
+_VERSION_FILE = "libclc-version.txt"
+# Nix store paths name the package: /nix/store/<hash>-libclc-22.1.8/...
+_STORE_VERSION = re.compile(r"-libclc-(\d[\w.]*)/")
 _SEARCH = (
     os.path.join(os.path.dirname(__file__), "data"),
     "/usr/share/clc",
@@ -77,6 +80,35 @@ def available():
     bool
     """
     return find_bitcode() is not None
+
+
+def version():
+    """Describe the libclc in use.
+
+    The bundled copy carries a ``libclc-version.txt``, written when the
+    wheel was built. A copy from the Nix store is identified by its path.
+
+    Returns
+    -------
+    str or None
+        For example ``"22.1.8 (nixpkgs 774debe...)"``; ``None`` if libclc
+        is missing or its version is unknown.
+
+    Examples
+    --------
+    >>> from numba_vulkan import libclc
+    >>> libclc.version()  # doctest: +SKIP
+    '22.1.8 (nixpkgs 774debe7a0d1b496e35677ad955a1011c6ff74f3)'
+    """
+    path = find_bitcode()
+    if path is None:
+        return None
+    sidecar = os.path.join(os.path.dirname(path), _VERSION_FILE)
+    if os.path.isfile(sidecar):
+        with open(sidecar) as fh:
+            return fh.read().strip()
+    match = _STORE_VERSION.search(os.path.realpath(path))
+    return f"{match.group(1)} (nix)" if match else None
 
 
 @lru_cache

@@ -126,6 +126,26 @@ def test_float64_versions_need_libclc(monkeypatch):
         _elementwise(math.log1p, 1).forall(8)(x, np.zeros(8))
 
 
+def test_libclc_version_from_the_version_file(tmp_path, monkeypatch):
+    (tmp_path / "clspv--.bc").write_bytes(b"BC\xc0\xde")
+    (tmp_path / "libclc-version.txt").write_text("22.1.8 (conda-forge x)\n")
+    monkeypatch.setattr(libclc, "find_bitcode", lambda: str(tmp_path / "clspv--.bc"))
+    assert libclc.version() == "22.1.8 (conda-forge x)"
+
+
+def test_libclc_version_from_a_nix_store_path(tmp_path, monkeypatch):
+    path = tmp_path / "abc-libclc-22.1.8" / "share" / "clc" / "clspv--.bc"
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b"BC\xc0\xde")
+    monkeypatch.setattr(libclc, "find_bitcode", lambda: str(path))
+    assert libclc.version() == "22.1.8 (nix)"
+
+
+def test_libclc_version_without_libclc(monkeypatch):
+    monkeypatch.setattr(libclc, "find_bitcode", lambda: None)
+    assert libclc.version() is None
+
+
 DOUBLE = {
     "sin": (math.sin, np.sin, SYM),
     "cos": (math.cos, np.cos, SYM),

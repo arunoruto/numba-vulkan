@@ -1,7 +1,7 @@
 <a id="readme-top"></a>
 
 <div align="center">
-  <img src="docs/source/_static/logo.svg" alt="numba-vulkan logo" width="160" />
+  <img src="https://raw.githubusercontent.com/arunoruto/numba-vulkan/main/docs/source/_static/logo.svg" alt="numba-vulkan logo" width="160" />
   <h1 align="center">numba-vulkan</h1>
 
   <p align="center">
@@ -109,7 +109,7 @@ where it hurts; it is not ready for real workloads.
 - libclc's `clspv--.bc` from LLVM 22 or older, for float64 and accurate
   float32 math. Wheels bundle it and the devenv shell provides it; only a
   bare source checkout needs it installed (see the
-  [math library docs](docs/source/math_library.md)).
+  [math library docs](https://arunoruto.github.io/numba-vulkan/math_library.html)).
 - A Vulkan 1.2 driver. [lavapipe](https://docs.mesa3d.org/drivers/llvmpipe.html)
   (Mesa's CPU implementation) is enough to try it without a GPU.
 - Python 3.11 or newer.
@@ -323,7 +323,7 @@ Kernels compute with 32-bit integers by default, as CUDA C code does with
 `int`; `narrow=False` gives Numba's 64-bit integers. `float64` stays 64-bit
 where the device supports it, with a warning that it is slow.
 
-The [documentation](docs/source/benchmarks.md) has the full tables, including
+The [documentation](https://arunoruto.github.io/numba-vulkan/benchmarks.html) has the full tables, including
 compile times and the software versions used.
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
@@ -383,7 +383,7 @@ Things found along the way:
 ## Known Issues
 
 The full list, with causes, workarounds and pointers to where each would be
-fixed, is in [docs/source/known_issues.md](docs/source/known_issues.md). The
+fixed, is in [known issues](https://arunoruto.github.io/numba-vulkan/known_issues.html). The
 ones most likely to bite:
 
 | | Issue | Workaround |
@@ -401,7 +401,7 @@ uv run pytest tests/test_known_issues.py -rxX
 ```
 
 To continue the work, start with the
-[development guide](docs/source/development.md).
+[development guide](https://arunoruto.github.io/numba-vulkan/development.html).
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
@@ -474,7 +474,7 @@ project itself: say which tool produced them, and have a human review them.
 ## License
 
 Distributed under the BSD 2-Clause License, the same license as Numba. See
-[LICENSE](LICENSE).
+[LICENSE](https://github.com/arunoruto/numba-vulkan/blob/main/LICENSE).
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 

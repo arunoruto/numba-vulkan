@@ -50,10 +50,29 @@ cd docs && uv run sphinx-build -M html ./source ./build -W
 build-dist                                     # sdist and wheel, with libclc
 ```
 
-`build-dist` is a devenv script: it copies libclc's `clspv--.bc` from the
-Nix store to `src/numba_vulkan/data/` (ignored by git) and runs `uv build`,
-so the distributions in `dist/` carry the math library. A plain `uv build`
-without that file produces a wheel without it.
+Distributions are built with `make dist`, which works on any system with
+[uv](https://docs.astral.sh/uv/), with or without Nix (`build-dist` in the
+devenv shell runs it). It fetches libclc's `clspv--.bc`
+(`scripts/fetch_libclc.py`), checks its SHA-256, puts it into
+`src/numba_vulkan/data/` (ignored by git) and runs `uv build`; a check then
+makes sure both distributions carry it. libclc comes from Nix where Nix is
+installed: the `nixpkgs-libclc` input of `devenv.lock`, the same package
+the development shell and the tests use. Its version is whatever that
+revision has, so moving the input updates the bundled libclc and reverting
+`devenv.lock` undoes it. Without Nix it comes from conda-forge
+(`make dist LIBCLC_SOURCE=conda` forces that); that download is pinned by
+URL and SHA-256 in the script and has to be moved by hand, and the Nix
+build prints a note when the two versions differ. Either way the wheel
+carries a `libclc-version.txt`, which `numba_vulkan.libclc.version()`
+reports. `make check` installs the wheel into a clean uv-managed Python,
+outside Nix, and runs a `float64` math kernel with it.
+
+Releases are published by `.github/workflows/publish.yml` when a GitHub
+release is published: it builds on Ubuntu with Nix (and, as a check, a
+second time with libclc from conda-forge), runs the same check on lavapipe,
+verifies that the tag (`v0.1.0`) matches the version in `pyproject.toml`,
+and uploads to PyPI through trusted publishing from the `pypi` environment.
+Versions stay below 1.0 until the package has been tested widely.
 
 On NixOS, commands must run inside `devenv shell`; the wheels in the
 virtual environment do not find their shared libraries otherwise.

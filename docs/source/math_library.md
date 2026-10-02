@@ -72,9 +72,13 @@ order:
    copy (with its licence, Apache-2.0 with LLVM exceptions);
 3. `/usr/share/clc`, `/usr/lib/clc`, `/usr/lib64/clc`, `/usr/local/share/clc`.
 
-The devenv shell sets the variable. In a source checkout elsewhere, install
-your distribution's libclc package, or copy the file from a clspv or LLVM
-build.
+The devenv shell sets the variable. In a source checkout elsewhere,
+`make libclc` puts the file into `src/numba_vulkan/data/` (from Nix if it
+is installed, from conda-forge otherwise); a distribution's libclc package
+or a clspv or LLVM build works too. `numba_vulkan.libclc.version()` tells
+which libclc is in use, for example
+`'22.1.8 (nixpkgs 774debe7a0d1b496e35677ad955a1011c6ff74f3)'` for the copy
+in a wheel.
 
 The first kernel that needs libclc rewrites it into a form that links
 quickly (a few seconds, once) and stores the result in
@@ -145,10 +149,18 @@ kernels are currently narrowed to `float32` (KI-17).
 
 ## Open points
 
-- **Packaging.** libclc is not on PyPI, and distributions are dropping the
-  package (current nixpkgs has). Bundling `clspv--.bc` (2.7 MB, Apache-2.0
-  with LLVM exception, as clspv does) in `numba_vulkan/data/` would make
-  `pip install` self-contained. Not done yet.
+- **Where libclc comes from.** Wheels bundle `clspv--.bc` (2.7 MB) from
+  the `nixpkgs-libclc` input in `devenv.yaml`, which follows the NixOS
+  26.05 release. nixpkgs-unstable removed `llvmPackages.libclc` in August
+  2026, because nothing used it any more: Mesa moved to its own fork,
+  `mesa-libclc`, which pins libclc since its interface to OpenCL runtimes
+  is not stable, and which no longer builds the `clspv` target. So 26.11
+  will most likely not have libclc. Options then: stay on 26.05, take
+  libclc from conda-forge, or package it in this repository. LLVM 23 also
+  renames the `clspv` target to the `spirv-unknown-vulkan` triple, built as
+  part of LLVM's runtimes build, which will change the file name once
+  llvmlite moves to LLVM 23. The Mesa fork carries a precision fix for
+  `tgamma` without FMA that may be worth taking over.
 - **Compile time.** The whole library is parsed and linked for every
   kernel that uses it. Caching a reduced copy would remove most of the
   0.4 s this costs.
