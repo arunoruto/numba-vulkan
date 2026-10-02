@@ -334,14 +334,111 @@ def _expm1_double(builder, x):
     )
 
 
+# erfc for 1.25 <= |x| < 28, as in fdlibm (and libclc, which copies it):
+# erfc(x) = exp(-z*z - 0.5625) * exp((z - x) * (z + x) + u(t) / v(t)) / x
+# with t = 1 / x**2, z = x rounded to 21 significant bits and v = 1 + t*(...).
+# Coefficients from highest degree down; B below 1 / 0.35, A above.
+#
+# Copyright (C) 1993 by Sun Microsystems, Inc. All rights reserved.
+# Developed at SunPro, a Sun Microsystems, Inc. business.
+# Permission to use, copy, modify, and distribute this software is freely
+# granted, provided that this notice is preserved.
+_ERFC_SPLIT = float.fromhex("0x1.6db6dp+1")  # about 1 / 0.35
+_ERFC_A = (
+    (
+        -4.83519191608651397019e02, -1.02509513161107724954e03,
+        -6.37566443368389627722e02, -1.60636384855821916062e02,
+        -1.77579549177547519889e01, -7.99283237680523006574e-01,
+        -9.86494292470009928597e-03,
+    ),
+    (
+        -2.24409524465858183362e01, 4.74528541206955367215e02,
+        2.55305040643316442583e03, 3.19985821950859553908e03,
+        1.53672958608443695994e03, 3.25792512996573918826e02,
+        3.03380607434824582924e01,
+    ),
+)  # fmt: skip
+_ERFC_B = (
+    (
+        -9.81432934416914548592e00, -8.12874355063065934246e01,
+        -1.84605092906711035994e02, -1.62396669462573470355e02,
+        -6.23753324503260060396e01, -1.05586262253232909814e01,
+        -6.93858572707181764372e-01, -9.86494403484714822705e-03,
+    ),
+    (
+        -6.04244152148580987438e-02, 6.57024977031928170135e00,
+        1.08635005541779435134e02, 4.29008140027567833386e02,
+        6.45387271733267880336e02, 4.34565877475229228821e02,
+        1.37657754143519042600e02, 1.96512716674392571292e01,
+    ),
+)  # fmt: skip
+
+
+def _horner(builder, t, coefficients):
+    """Evaluate a polynomial in ``t``, coefficients from the highest degree."""
+    acc = t.type(coefficients[0])
+    for c in coefficients[1:]:
+        acc = builder.fadd(builder.fmul(acc, t), t.type(c))
+    return acc
+
+
+def _erfc_double(builder, x):
+    """``erfc`` for doubles, with `reduced_exp` from 1.25 to 28 in magnitude.
+
+    libclc's version computes fdlibm's formula with its own ``exp``, whose
+    argument reaches -785 there and which then loses precision on some
+    devices. This evaluates the same formula with `reduced_exp`. ``z`` is
+    split off by Veltkamp's method instead of masking bits; it has 21
+    significant bits, so ``-z*z - 0.5625`` is exact. Elsewhere, and for NaN,
+    libclc's version is used: its ``exp`` arguments are small there, or the
+    result is 0 or 2.
+    """
+    f64 = ir.DoubleType()
+    a = call_intrinsic(builder, "llvm.fabs", [x])
+    ours = builder.and_(
+        builder.fcmp_ordered(">=", a, f64(1.25)),
+        builder.and_(
+            builder.fcmp_ordered("<", x, f64(28.0)),
+            builder.fcmp_ordered(">", x, f64(-6.0)),
+        ),
+    )
+
+    def tail():
+        t = builder.fdiv(f64(1.0), builder.fmul(a, a))
+        below = builder.fcmp_ordered("<", a, f64(_ERFC_SPLIT))
+        u = builder.select(
+            below, _horner(builder, t, _ERFC_B[0]), _horner(builder, t, _ERFC_A[0])
+        )
+        v = builder.select(
+            below, _horner(builder, t, _ERFC_B[1]), _horner(builder, t, _ERFC_A[1])
+        )
+        q = builder.fdiv(u, builder.fadd(builder.fmul(t, v), f64(1.0)))
+        c = builder.fmul(a, f64(2.0**32 + 1))
+        z = builder.fsub(c, builder.fsub(c, a))
+        first = reduced_exp(
+            builder,
+            builder.fsub(builder.fneg(builder.fmul(z, z)), f64(0.5625)),
+        )
+        second = reduced_exp(
+            builder,
+            builder.fadd(builder.fmul(builder.fsub(z, a), builder.fadd(z, a)), q),
+        )
+        value = builder.fdiv(builder.fmul(first, second), a)
+        negative = builder.fcmp_ordered("<", x, f64(0.0))
+        return builder.select(negative, builder.fsub(f64(2.0), value), value)
+
+    return _branch(builder, ours, tail, lambda: libclc.call(builder, "erfc", [x]))
+
+
 # libclc functions whose float64 versions lose precision for large
 # arguments on some devices (KI-31 has the measurements), and the lowering
-# that replaces them.
+# that replaces them. All of them depend on libclc's exp.
 _EXP_FAMILY = {
     "exp": reduced_exp,
     "expm1": _expm1_double,
     "cosh": _cosh_sinh(1),
     "sinh": _cosh_sinh(-1),
+    "erfc": _erfc_double,
 }
 
 
