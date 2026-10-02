@@ -277,8 +277,8 @@ the same CUDA-style kernels with shared memory, barriers and atomics
 per run, and charted in the
 [documentation](https://arunoruto.github.io/numba-vulkan/benchmarks.html),
 including every backend, device and variant and how results change over
-time. The fastest result per backend, data on the device (log scale; further
-left is faster):
+time. The fastest result per backend, GPUs with data on the device (log
+scale; further left is faster):
 
 <p align="center">
   <img src="https://arunoruto.github.io/numba-vulkan/_images/machines.svg" alt="Best time per workload and backend" width="100%" />
@@ -286,12 +286,14 @@ left is faster):
 
 In the first collected run (Intel i9-9900K, NVIDIA TITAN X, Intel UHD 630):
 
-- With data on the device, numba-vulkan is within 15 to 35 % of numba-cuda on
-  the same card, and faster than it on the tiled matrix product (1.7 against
-  1.9 ms).
+- With data on the device, numba-vulkan takes 25 to 55 % longer than
+  numba-cuda on the same card on most workloads, and is about level on the
+  tiled matrix product (1.85 against 1.75 ms). Repeated runs vary by 10 to
+  20 %, so small differences are not meaningful.
 - With NumPy arrays as arguments, the copies dominate: the memory-bound
-  `saxpy` is slower on every GPU backend than on one CPU thread.
-- Compiling a Vulkan kernel takes about 0.1 s on its first call.
+  `saxpy` takes 7 to 10 ms on every GPU backend and 1.8 ms on one CPU thread.
+- A kernel's first call, which compiles it, takes 0.04 to 0.25 s on Vulkan,
+  comparable to numba-cuda.
 
 Please add a run from your machine; it takes a few minutes:
 
