@@ -121,6 +121,7 @@ def test_float64_classification_and_sign_functions(run):
     )
 
 
+@pytest.mark.float64
 def test_float64_versions_need_libclc(monkeypatch):
     monkeypatch.setattr(libclc, "available", lambda: False)
     x = np.linspace(0.1, 1, 8)
@@ -175,6 +176,7 @@ DOUBLE = {
 }
 
 
+@pytest.mark.float64
 @pytest.mark.skipif(not libclc.available(), reason="libclc is not installed")
 @pytest.mark.parametrize("name", DOUBLE)
 def test_float64_math_function(run, name):
@@ -183,6 +185,7 @@ def test_float64_math_function(run, name):
     _check(run, ("double", name), fn, (x,), reference(x), rtol=1e-13, atol=1e-15)
 
 
+@pytest.mark.float64
 @pytest.mark.skipif(not libclc.available(), reason="libclc is not installed")
 def test_gamma_functions_of_negative_arguments(run):
     x = np.array([-0.5, -1.5, -2.25, -3.75, -7.1, 0.5, 1.0, 2.0])
@@ -211,7 +214,10 @@ GAMMA_RANGES = {
 
 
 @pytest.mark.skipif(not libclc.available(), reason="libclc is not installed")
-@pytest.mark.parametrize("case", GAMMA_RANGES)
+@pytest.mark.parametrize(
+    "case",
+    [pytest.param("float64", marks=pytest.mark.float64), "float32"],
+)
 def test_gamma_over_its_range(run, case):
     lo, hi, dtype, rtol = GAMMA_RANGES[case]
     x = _gamma_arguments(lo, hi, dtype)
@@ -243,6 +249,7 @@ EXP_FAMILY = {
 }
 
 
+@pytest.mark.float64
 @pytest.mark.skipif(not libclc.available(), reason="libclc is not installed")
 @pytest.mark.parametrize("name", EXP_FAMILY)
 def test_float64_exp_family_over_its_range(run, name):

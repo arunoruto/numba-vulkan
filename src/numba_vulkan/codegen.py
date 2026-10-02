@@ -121,9 +121,21 @@ class Emitter:
     for every module (see `numba_vulkan._emit`). It is replaced when it
     dies or hangs. On platforms without ``fork`` a new child is started
     for every module.
+
+    With `llc`, LLVM's ``llc`` program translates every module instead, in
+    a process of its own. That serves when llvmlite's own backend is
+    broken, as it is in llvmlite 0.50's macOS arm64 wheel (see
+    ``docs/source/known_issues.md``). Its LLVM must read the IR that
+    llvmlite writes, so it should have the same major version.
+
+    Parameters
+    ----------
+    llc : str, optional
+        Path of ``llc``; by default llvmlite's backend is used.
     """
 
-    def __init__(self):
+    def __init__(self, llc=None):
+        self.llc = llc
         self._proc = None
         self._log = None
         self._lock = threading.Lock()
@@ -166,6 +178,8 @@ class Emitter:
         Called when compilation of a function begins, so that the process
         is ready by the time there is a module to translate.
         """
+        if self.llc is not None:
+            return
         with self._lock:
             if not self._running():
                 self._start()
@@ -199,11 +213,7 @@ class Emitter:
     def _failure(self, start):
         """Describe a failure from what the backend wrote since `start`."""
         self._log.seek(start)
-        lines = self._log.read().decode(errors="replace").strip().splitlines()
-        reason = next(
-            (ln for ln in lines if "LLVM ERROR" in ln or "Assertion" in ln), None
-        )
-        return reason or (lines[-1] if lines else "no message")
+        return _failure_reason(self._log.read())
 
     def emit(self, llvm_ir):
         """Translate a module.
@@ -224,6 +234,8 @@ class Emitter:
             If the backend fails or does not finish within `EMIT_TIMEOUT`
             seconds.
         """
+        if self.llc is not None:
+            return self._emit_with_llc(llvm_ir)
         with self._lock:
             if not self._running():
                 self._start()
@@ -251,8 +263,54 @@ class Emitter:
                     self._stop()
             raise SpirvCodegenError(f"LLVM's SPIR-V backend failed: {reason}")
 
+    def _emit_with_llc(self, llvm_ir):
+        """Translate a module with the ``llc`` program; see `emit`."""
+        proc = subprocess.Popen(
+            [self.llc, "-O0", "-filetype=obj", f"--spirv-ext={_emit.EXTENSIONS}"]
+            + ["-o", "-", "-"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
+        try:
+            spirv, log = proc.communicate(llvm_ir.encode(), timeout=EMIT_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            os.killpg(proc.pid, signal.SIGKILL)
+            proc.communicate()
+            raise SpirvCodegenError(
+                f"LLVM's SPIR-V backend did not finish within {EMIT_TIMEOUT} seconds"
+            ) from None
+        if proc.returncode == 0:
+            return spirv
+        if proc.returncode < 0:
+            # A crash ends standard error with a stack dump, not a message.
+            reason = f"llc was killed by {signal.Signals(-proc.returncode).name}"
+        else:
+            reason = _failure_reason(log)
+        raise SpirvCodegenError(f"LLVM's SPIR-V backend failed: {reason}")
 
-emitter = Emitter()
+
+def _failure_reason(log):
+    """The line of the backend's standard error that describes its failure.
+
+    Parameters
+    ----------
+    log : bytes
+        What the backend wrote to standard error.
+
+    Returns
+    -------
+    str
+    """
+    lines = log.decode(errors="replace").strip().splitlines()
+    reason = next((ln for ln in lines if "LLVM ERROR" in ln or "Assertion" in ln), None)
+    return reason or (lines[-1] if lines else "no message")
+
+
+# Environment variable naming an ``llc`` to use instead of llvmlite's backend.
+LLC_ENV_VAR = "NUMBA_VULKAN_LLC"
+emitter = Emitter(llc=os.environ.get(LLC_ENV_VAR) or None)
 atexit.register(emitter.close)
 
 

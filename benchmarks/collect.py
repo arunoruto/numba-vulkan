@@ -17,7 +17,8 @@ File format (``"schema": 1``)
 -----------------------------
 ``schema``, ``user``, ``machine``, ``date`` (UTC, ISO 8601)
 ``git``: ``commit``, ``branch``, ``dirty`` (uncommitted changes)
-``software``: package versions, Python, operating system, libclc
+``software``: package versions, Python, operating system, libclc, and
+the LLVM version of ``llc`` if it replaces llvmlite's backend
 ``hardware``: ``cpu`` (``model``, ``threads``), ``memory_gib``, ``vulkan`` (one
 entry per device: name, kind, vendor and device ID, driver, API version,
 float64 support, workarounds applied by numba-vulkan), ``cuda``
@@ -53,7 +54,7 @@ from importlib import metadata
 import vulkan as vk
 
 import numba_vulkan as nv
-from numba_vulkan import libclc
+from numba_vulkan import codegen, libclc
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
 import bench
@@ -120,7 +121,29 @@ def software_info():
         except metadata.PackageNotFoundError:
             info[package] = None
     info["libclc"] = libclc.version()
+    info["llc"] = _llc_version()
     return info
+
+
+def _llc_version():
+    """LLVM version of the ``llc`` that replaces llvmlite's backend, if any.
+
+    Returns
+    -------
+    str or None
+        ``None`` when llvmlite's own backend translates the kernels.
+    """
+    llc = codegen.emitter.llc
+    if llc is None:
+        return None
+    try:
+        out = subprocess.run(
+            [llc, "--version"], capture_output=True, text=True, check=False
+        ).stdout
+    except OSError:
+        return "unknown"
+    found = re.search(r"LLVM version (\S+)", out)
+    return found.group(1) if found else "unknown"
 
 
 def _cpu_model():

@@ -40,14 +40,29 @@ uv run pytest
 
 On macOS, Vulkan runs on top of Metal through
 [MoltenVK](https://github.com/KhronosGroup/MoltenVK). numba-vulkan asks the
-Vulkan loader for such "portability" drivers and enables what they need,
-but it has not been tested on a Mac yet; reports are welcome.
+Vulkan loader for such "portability" drivers and enables what they need.
+The test suite passes on an Apple M3 Pro with MoltenVK 1.4.2.
+
+llvmlite's SPIR-V backend crashes on macOS arm64 (KI-32 in
+{doc}`known_issues`), so numba-vulkan needs an `llc` of LLVM 22 there, named
+by `NUMBA_VULKAN_LLC`. The devenv shell provides it, together with MoltenVK,
+the Vulkan loader and libclc, and sets the environment variables that find
+them; this is the tested setup:
+
+```sh
+devenv shell -- uv run pytest
+```
+
+Without Nix, Homebrew provides the same parts. This way has not been
+tested:
 
 ```sh
 brew install molten-vk vulkan-loader vulkan-tools
 # Homebrew on Apple silicon installs into /opt/homebrew/lib, where the
 # `vulkan` Python package does not look by itself:
 export DYLD_FALLBACK_LIBRARY_PATH=/opt/homebrew/lib
+# An llc of LLVM 22, the version inside llvmlite, from wherever it is installed:
+export NUMBA_VULKAN_LLC=/path/to/llvm-22/bin/llc
 vulkaninfo --summary       # should list the GPU with the MoltenVK driver
 uv sync
 make libclc                # optional: accurate float32 math (see below)
@@ -64,6 +79,7 @@ Apple GPUs have no `float64` (Metal does not offer it), so kernels compute
 `make libclc` puts libclc into the source checkout; it downloads
 conda-forge's package unless Nix is installed, and the file is the same on
 every platform. Without it, `float32` math uses the driver's functions.
+CUDA does not exist on macOS, so the benchmarks leave out numba-cuda.
 
 ## Checking the setup
 

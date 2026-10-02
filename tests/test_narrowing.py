@@ -146,6 +146,7 @@ def test_device_arrays_store_32_bit_elements_on_a_limited_device(limited):
     np.testing.assert_allclose(array.copy_to_host(), np.arange(10), rtol=1e-6)
 
 
+@pytest.mark.float64
 def test_wide_device_array_does_not_fit_a_narrow_kernel(device):
     @nv.jit(narrow=True)
     def kernel(a):
@@ -251,6 +252,7 @@ def test_stored_dtype():
 # -- 32-bit integers by default, float64 kept ---------------------------------------
 
 
+@pytest.mark.float64
 @pytest.mark.skipif(not narrowing.NARROW_INTS, reason="NUMBA_VULKAN_INT64=1")
 def test_integers_are_32_bit_by_default_and_floats_64_bit(run):
     @nv.jit
@@ -289,6 +291,7 @@ def test_large_int64_inputs_raise_instead_of_wrapping(run):
         nv.to_device(big)
 
 
+@pytest.mark.float64
 def test_float_literal_hint(run):
     @nv.jit
     def scale(x, out):

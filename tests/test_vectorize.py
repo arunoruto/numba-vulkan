@@ -187,6 +187,7 @@ def test_gufunc_reductions_over_the_core_dimension(device):
     assert got.dtype == np.float64
 
 
+@pytest.mark.float64
 def test_gufunc_with_matrices_and_loop_broadcasting(device):
     matrix = RNG.random((4, 1, 3, 5))
     vectors = RNG.random((2, 5))

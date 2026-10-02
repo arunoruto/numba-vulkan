@@ -27,6 +27,34 @@ def device(request):
     return request.param.index
 
 
+@pytest.fixture(autouse=True)
+def _needs_float64(request):
+    """Skip a test marked ``float64`` on a device without float64.
+
+    Such devices, Apple GPUs among them, compute float64 kernels in float32
+    (see numba_vulkan.narrowing), so float64 precision and the errors about
+    float64 cannot be expected there. The device is the test's ``device``
+    or, for tests without one, the selected device.
+
+    ``NUMBA_VULKAN_TEST_FLOAT64`` overrides the check: ``1`` runs these
+    tests on every device (to see how far float32 is off), ``0`` skips
+    them on every device.
+    """
+    if request.node.get_closest_marker("float64") is None:
+        return
+    forced = os.environ.get("NUMBA_VULKAN_TEST_FLOAT64")
+    if forced == "1":
+        return
+    if forced == "0":
+        pytest.skip("NUMBA_VULKAN_TEST_FLOAT64=0")
+    if "device" in request.fixturenames:
+        info = _DEVICES[request.getfixturevalue("device")]
+    else:
+        info = nv.get_device().info
+    if not info.float64:
+        pytest.skip(f"{info.name} has no float64")
+
+
 @pytest.fixture
 def run(device):
     """Launch a kernel on the device, skipping if it lacks a capability."""

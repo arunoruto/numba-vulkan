@@ -132,9 +132,11 @@ uv sync
 uv run pytest
 ```
 
-On macOS, Vulkan runs on MoltenVK (`brew install molten-vk vulkan-loader`);
-see [Getting started](https://arunoruto.github.io/numba-vulkan/getting_started.html#macos)
-for the details. It is untested so far.
+On macOS, Vulkan runs on MoltenVK, and llvmlite's SPIR-V backend has to be
+replaced by an `llc` of LLVM 22 (KI-32). The devenv shell sets up both
+(`devenv shell -- uv run pytest`); the test suite passes on an Apple M3 Pro.
+See [Getting started](https://arunoruto.github.io/numba-vulkan/getting_started.html#macos)
+for the details and a Homebrew alternative.
 
 The test suite runs every test on every Vulkan device it finds.
 
@@ -336,8 +338,8 @@ Does not work:
   such as `a * 2 + b` work.
 - **float64 precision on devices without float64.** Many mobile GPUs and
   Apple devices lack float64 or int64. Kernels are narrowed to 32-bit types
-  there, with a warning; this path is tested only on desktop GPUs with the
-  features switched off.
+  there, with a warning; float narrowing is tested on an Apple M3 Pro,
+  integer narrowing only on desktop GPUs with the feature switched off.
 - **Selecting between array elements by reference** in ways the optimiser
   turns into pointer selects is rejected.
 
@@ -370,7 +372,8 @@ ones most likely to bite:
 | KI-01 | float64 `math.sin(x)`, `x ** 2.5`... need libclc, which a source checkout lacks | install a wheel, or set `NUMBA_VULKAN_LIBCLC` |
 | KI-04 | no arrays of run-time size: `a[mask]`, `a.copy()`, `np.zeros(n)`, `axis=` reductions | constant-shape arrays, array expressions |
 | KI-10 | indices and divisions by zero are only checked on request | `@nv.jit(boundscheck=True, error_model="python")` while debugging |
-| KI-17 | running without float64/int64 (mobile, Apple) is tested only with the features switched off on desktop GPUs | report what you find |
+| KI-17 | running without int64 (mobile) is tested only with the feature switched off on desktop GPUs | report what you find |
+| KI-32 | llvmlite's SPIR-V backend segfaults on macOS arm64 | set `NUMBA_VULKAN_LLC` to an LLVM 22 `llc`; the devenv shell does |
 
 `tests/test_known_issues.py` reproduces the coverage gaps as expected
 failures, so the list stays honest:
@@ -408,7 +411,8 @@ To continue the work, start with the
 - [ ] Other ufunc methods (`accumulate`, `outer`)
 - [x] Shared memory, atomics, barriers and CUDA-style launch configuration
 - [x] On-disk caching of compiled kernels
-- [ ] Testing on AMD, Apple (MoltenVK) and mobile GPUs
+- [x] Testing on Apple (MoltenVK)
+- [ ] Testing on AMD and mobile GPUs
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 

@@ -71,6 +71,7 @@ def _check_rounding(run):
     np.testing.assert_array_equal(np.signbit(e), np.signbit(np.rint(LARGE)))
 
 
+@pytest.mark.float64
 @needs_libclc
 def test_float64_trig_over_the_whole_range(run):
     _check_trig(run, _trig_arguments())
@@ -81,6 +82,7 @@ def test_float32_trig_over_the_whole_range(run):
     _check_trig(run, x[np.isfinite(x)])
 
 
+@pytest.mark.float64
 def test_float64_trunc_and_round_of_large_values(run):
     _check_rounding(run)
 

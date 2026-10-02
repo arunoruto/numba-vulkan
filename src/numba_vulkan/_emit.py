@@ -15,6 +15,7 @@ message is then on standard error. See `numba_vulkan.codegen.Emitter`.
 """
 
 import os
+import signal
 import struct
 import sys
 
@@ -23,6 +24,9 @@ import llvmlite.binding as llvm
 HEADER = struct.Struct("<Q")
 FAILED = 2**64 - 1
 CAN_FORK = hasattr(os, "fork")
+# Lets the backend use float atomics; they are emitted only for devices that
+# support them (see numba_vulkan.narrowing.Mode).
+EXTENSIONS = "+SPV_EXT_shader_atomic_float_add"
 
 
 def _read(stream, count):
@@ -52,9 +56,7 @@ def main():
     exits.
     """
     triple = sys.argv[1]
-    # Lets the backend use float atomics; they are emitted only for devices
-    # that support them (see numba_vulkan.narrowing.Mode).
-    llvm.set_option("", "--spirv-ext=+SPV_EXT_shader_atomic_float_add")
+    llvm.set_option("", f"--spirv-ext={EXTENSIONS}")
     llvm.initialize_all_targets()
     llvm.initialize_all_asmprinters()
     target = llvm.Target.from_triple(triple)
@@ -79,7 +81,12 @@ def main():
                 print(f"{type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
             finally:
                 os._exit(status)
-        if os.waitpid(pid, 0)[1] != 0:
+        status = os.waitpid(pid, 0)[1]
+        if os.WIFSIGNALED(status):
+            # A crash leaves no message of its own.
+            name = signal.Signals(os.WTERMSIG(status)).name
+            print(f"the backend was killed by {name}", file=sys.stderr, flush=True)
+        if status != 0:
             stdout.write(HEADER.pack(FAILED))
             stdout.flush()
 

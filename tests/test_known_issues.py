@@ -1,14 +1,18 @@
 """Executable list of known issues (see docs/source/known_issues.md).
 
-Every case is expected to fail. The marks are strict, so fixing an issue
+Every case is expected to fail (KI-32 only on macOS arm64). The marks are strict, so fixing an issue
 turns its test red until the case is moved to the regular test suite and
 the entry is removed from the documentation.
 """
+
+import platform
+import sys
 
 import numpy as np
 import pytest
 
 import numba_vulkan as nv
+from numba_vulkan import codegen
 
 f32 = np.float32
 N = 16
@@ -60,3 +64,28 @@ def test_known_issue(issue):
             rtol=2e-3,
             atol=1e-5,
         )
+
+
+# KI-32: llvmlite's own backend (not NUMBA_VULKAN_LLC), in a child process.
+SELECT_AFTER_FCMP_SELECT = f"""
+target triple = "{codegen.TRIPLE}"
+define i32 @main(i1 %c, float %f, i32 %i) {{
+  %k = fcmp ogt float %f, 0.0
+  %a = select i1 %k, float 0.0, float 1.0
+  %b = select i1 %c, i32 %i, i32 0
+  ret i32 %b
+}}
+"""
+
+
+@pytest.mark.xfail(
+    sys.platform == "darwin" and platform.machine() == "arm64",
+    strict=True,
+    reason="KI-32, documented in docs/source/known_issues.md",
+)
+def test_llvmlite_backend_on_macos_arm64():
+    emitter = codegen.Emitter()
+    try:
+        assert emitter.emit(SELECT_AFTER_FCMP_SELECT)[:4] == b"\x03\x02\x23\x07"
+    finally:
+        emitter.close()

@@ -1,6 +1,7 @@
 """The child process that runs LLVM's SPIR-V backend, and the libclc cache."""
 
 import os
+import shutil
 
 import pytest
 
@@ -69,6 +70,27 @@ def test_warm_up_and_close():
     emitter.close()
     assert emitter._proc is None
     emitter.close()
+
+
+LLC = os.environ.get(codegen.LLC_ENV_VAR) or shutil.which("llc")
+
+
+@pytest.mark.skipif(LLC is None, reason="llc is not installed")
+def test_llc_translates_and_reports_failures():
+    emitter = codegen.Emitter(llc=LLC)
+    emitter.warm_up()  # nothing to start
+    assert emitter.emit(SHADER)[:4] == b"\x03\x02\x23\x07"
+    with pytest.raises(SpirvCodegenError, match="SPIR-V backend failed: .+"):
+        emitter.emit("this is not LLVM IR")
+    assert emitter._proc is None
+
+
+def test_crashing_llc_is_reported(tmp_path):
+    llc = tmp_path / "llc"
+    llc.write_text('#!/bin/sh\necho "#0 0x0 stack frame" >&2\nkill -SEGV $$\n')
+    llc.chmod(0o755)
+    with pytest.raises(SpirvCodegenError, match="llc was killed by SIGSEGV"):
+        codegen.Emitter(llc=str(llc)).emit(SHADER)
 
 
 @pytest.mark.skipif(not libclc.available(), reason="libclc is not installed")

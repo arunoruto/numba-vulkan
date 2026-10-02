@@ -31,7 +31,8 @@ docs = [
     "matplotlib>=3.10",
 ]
 bench = [
-    "numba-cuda[cu12]>=0.30.4",
+    # CUDA does not exist on macOS, and numba-cuda has no wheels there.
+    "numba-cuda[cu12]>=0.30.4; sys_platform != 'darwin'",
     "numpy<2.5",
 ]
 test = [
@@ -48,6 +49,9 @@ convention = "numpy"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = "test_*.py"
+markers = [
+    "float64: needs a device with float64; skipped on the others, which compute in float32",
+]
 
 [build-system]
 requires = ["uv_build >= 0.8.0, <0.13.0"]

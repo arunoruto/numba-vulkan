@@ -112,7 +112,8 @@ def test_atomics_on_multidimensional_arrays_and_views(run):
     np.testing.assert_array_equal(grid, np.full((3, 5), 10))
 
 
-def test_atomic_errors():
+@pytest.mark.float64
+def test_float64_atomic_add_needs_64_bit_compare_exchange():
     @nv.jit
     def on_float64(cells):
         nv.atomic.add(cells, 0, 1.0)
@@ -120,6 +121,8 @@ def test_atomic_errors():
     with pytest.raises(errors.NumbaError, match="float64 needs 64-bit compare"):
         on_float64.forall(1)(np.zeros(1))
 
+
+def test_atomic_errors():
     @nv.jit
     def bitwise_on_float(cells):
         nv.atomic.and_(cells, 0, f32(1))
@@ -307,6 +310,7 @@ def test_float_add_uses_the_native_instruction_where_available(device):
         assert ("float32_atomic_add" in compiled.capabilities) == native
 
 
+@pytest.mark.float64
 def test_narrow_ints_only(run):
     @nv.jit(narrow="ints")
     def scale(values, out):

@@ -17,6 +17,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import tempfile
 import zipfile
 from functools import lru_cache
@@ -49,7 +50,8 @@ def fingerprint():
     """Hash of everything besides a kernel's IR that shapes its SPIR-V.
 
     That is the source of this package, the version of llvmlite (and with
-    it of LLVM), and the libclc file in use.
+    it of LLVM), the libclc file in use, and the ``llc`` program if one
+    replaces llvmlite's backend.
 
     Returns
     -------
@@ -61,11 +63,25 @@ def fingerprint():
         if name.endswith(".py"):
             with open(os.path.join(package, name), "rb") as fh:
                 digest.update(name.encode() + fh.read())
-    bitcode = libclc.find_bitcode()
-    if bitcode is not None:
-        stat = os.stat(bitcode)
-        digest.update(f"{bitcode} {stat.st_size} {stat.st_mtime_ns}".encode())
+    for path in (libclc.find_bitcode(), _llc()):
+        if path is not None:
+            stat = os.stat(path)
+            digest.update(f"{path} {stat.st_size} {stat.st_mtime_ns}".encode())
     return digest.hexdigest()
+
+
+def _llc():
+    """The ``llc`` that replaces llvmlite's backend, if one is configured.
+
+    Returns
+    -------
+    str or None
+        Its resolved path; see `numba_vulkan.codegen.Emitter`.
+    """
+    from numba_vulkan import codegen  # imports this module
+
+    llc = codegen.emitter.llc
+    return None if llc is None else os.path.realpath(shutil.which(llc) or llc)
 
 
 def normalise(source):

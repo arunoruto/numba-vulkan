@@ -35,8 +35,11 @@ def with_table(table):
 
 
 @pytest.fixture
-def cache(tmp_path, monkeypatch):
+def cache(tmp_path, monkeypatch, device):
     """Turn the cache on, in an empty directory; report backend runs."""
+    # Opening a device for the first time compiles the driver probe
+    # (numba_vulkan.probes), which is not a backend run of the test's.
+    nv.get_device(device)
     monkeypatch.setenv(kernelcache.ENV_VAR, "1")
     monkeypatch.setenv("NUMBA_VULKAN_CACHE_DIR", str(tmp_path))
     emitted = []
@@ -100,6 +103,7 @@ def test_table_contents_are_not_part_of_the_entry(cache, device):
     np.testing.assert_allclose(second, base + TABLE_B[np.arange(16) % 4], rtol=1e-6)
 
 
+@pytest.mark.float64
 def test_settings_are_part_of_the_key(cache, device):
     emitted, entries = cache
     launch(body, device)

@@ -146,6 +146,7 @@ def test_mandelbrot_2d_grid(run):
     assert np.abs(out - expected).max() <= maxiter
 
 
+@pytest.mark.float64
 def test_stencil_2d_arrays(run):
     rng = np.random.default_rng(2)
     src = rng.random((33, 70))
@@ -183,6 +184,7 @@ def _sine_body(x, out):
         out[i] = math.sin(x[i])
 
 
+@pytest.mark.float64
 @pytest.mark.skipif(not libclc.available(), reason="libclc is not installed")
 def test_float64_transcendentals_use_libclc(run):
     x = np.linspace(0, 3, 64)
@@ -191,6 +193,7 @@ def test_float64_transcendentals_use_libclc(run):
     np.testing.assert_allclose(out, np.sin(x), rtol=1e-14, atol=1e-15)
 
 
+@pytest.mark.float64
 def test_float64_transcendentals_without_libclc(run, monkeypatch):
     # Without libclc there is no float64 math library: the call is rejected
     # unless narrow_math asks for float32 precision.

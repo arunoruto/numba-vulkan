@@ -111,6 +111,7 @@ def smoothstep_kernel(x, out):
         out[i] = smoothstep(0.0, 1.0, x[i])
 
 
+@pytest.mark.float64
 def test_overload_extension_for_vulkan_target(run):
     x = np.linspace(-1, 2, 100)
     out = np.zeros_like(x)
@@ -146,6 +147,7 @@ def language_kernel(x, out):
         out[i, 3] = float(i) if x[i] > 0 else -1.0
 
 
+@pytest.mark.float64
 def test_tuples_loops_and_negative_indices(run):
     x = np.linspace(-4, 4, 50)
     out = np.zeros((50, 4))

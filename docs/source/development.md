@@ -106,7 +106,9 @@ Useful environment variables:
 | `NUMBA_VULKAN_VALIDATE=1` | run every shader through `spirv-val`; the test suite sets this |
 | `NUMBA_VULKAN_DEVICE=llvmpipe` | default device, by name substring or index |
 | `NUMBA_VULKAN_LIBCLC=/path/clspv--.bc` | where to find libclc; the devenv shell sets it |
+| `NUMBA_VULKAN_LLC=/path/llc` | translate with this `llc` instead of llvmlite's SPIR-V backend; the devenv shell sets it on macOS (KI-32) |
 | `NUMBA_VULKAN_CACHE_DIR=/path` | where the prepared copy of libclc and compiled kernels are kept (default `~/.cache/numba-vulkan`) |
+| `NUMBA_VULKAN_TEST_FLOAT64=1` | run tests marked `float64` also on devices without float64, which skip them by default; `0` skips them everywhere |
 | `NUMBA_VULKAN_CACHE=0` | do not read or write compiled kernels on disk; the test suite sets this, so that it tests the compiler |
 | `NUMBA_VULKAN_POOL_MB=1024` | size of the per-device pool of released buffers |
 | `NUMBA_BOUNDSCHECK=1` | check array indices in all kernels |

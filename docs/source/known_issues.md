@@ -187,23 +187,52 @@ compare-and-swap needs a repair of the generated SPIR-V
 
 Devices without `shaderFloat64` or `shaderInt64` run kernels narrowed to
 32-bit types (`narrowing.py`; see {doc}`how_it_works`). The tests exercise
-this on the three desktop devices, opened without those features, where
-the kernels also declare no optional capability at all. No device that
-really lacks the features has been tried, and such drivers tend to have
-restrictions of their own.
+this on the Linux devices, opened without those features, where the
+kernels also declare no optional capability at all. The Apple M3 Pro
+(MoltenVK) really lacks `shaderFloat64`, and the test suite passes on it;
+tests that need `float64` precision are marked `float64` and skipped there.
+No device that really lacks `shaderInt64` has been tried, and such drivers
+tend to have restrictions of their own.
 
 Narrowing is all or nothing per type: one `float64` value that is really
 needed, for example a sum that must not lose precision, cannot be kept.
 Kernels that use `int8` or `int16` arrays still need those features.
 
-### KI-18: tested on three devices only
+### KI-18: tested on four devices only
 
-NVIDIA TITAN X (Pascal), Intel UHD Graphics 630 and llvmpipe, all on Linux.
-AMD, Apple, Windows and mobile GPUs are untested. On macOS, numba-vulkan
-enables what MoltenVK needs (`VK_KHR_portability_enumeration` and
-`VK_KHR_portability_subset`), but has not run there yet. Two driver problems were
-found on this small sample alone (see {doc}`how_it_works`), so more should
-be expected.
+NVIDIA TITAN X (Pascal), Intel UHD Graphics 630 and llvmpipe on Linux, and
+an Apple M3 Pro through MoltenVK 1.4.2 on macOS. AMD, Windows and mobile
+GPUs are untested. Two driver problems were found on the Linux sample alone
+(see {doc}`how_it_works`), and macOS needs another LLVM (KI-32), so more
+should be expected.
+
+### KI-32: llvmlite's SPIR-V backend crashes on macOS arm64
+
+The SPIR-V backend in llvmlite 0.50.0's macOS arm64 wheel (LLVM 22.1.0)
+segfaults on common kernels: those of 33 tests in the suite, among them
+clamps, `min`, `max`, `hypot`, complex arithmetic and float atomics.
+`llvm-reduce` brings one down to a `select` on an `fcmp`, followed by any
+other `select`:
+
+```llvm
+define i32 @main(i1 %c, float %f, i32 %i) {
+  %k = fcmp ogt float %f, 0.0
+  %a = select i1 %k, float 0.0, float 1.0
+  %b = select i1 %c, i32 %i, i32 0
+  ret i32 %b
+}
+```
+
+The same modules translate with nixpkgs' `llc` of LLVM 22.1.8 on the same
+machine, and the test suite passes with llvmlite's Linux wheel. The crash is in a child process
+(see {doc}`development`) and is reported as "the backend was killed by
+SIGSEGV".
+
+**Workaround:** set `NUMBA_VULKAN_LLC` to an `llc` of LLVM 22; every module
+is then translated by it instead. The devenv shell does this on macOS.
+`tests/test_known_issues.py::test_llvmlite_backend_on_macos_arm64` turns
+red once llvmlite's own backend translates the case above; the setting and
+this entry can then go.
 
 ## Implementation debt
 
