@@ -340,8 +340,8 @@ Works:
 - arithmetic, comparisons, bit operations, casts, tuples, complex numbers,
   `if`/`while`/`for ... in range(...)`, early `return`s, `min`/`max`/`abs`
 - the `math` module in float32 **and float64** (including `hypot`, `log1p`,
-  `erf`, `gamma`, `isnan`...), accurate to the last digit and consistent
-  across devices, and the `**` operator
+  `erf`, `gamma`, `isnan`...), accurate to the last digit (except `gamma`
+  for large arguments) and consistent across devices, and the `**` operator
 - NumPy functions on scalars, such as `np.sqrt(x[i])` or `np.maximum(a, b)`
 - calling other `@nv.jit` and `@njit` functions; `@overload(target="vulkan")`
 
