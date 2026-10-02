@@ -228,14 +228,15 @@ def test_gamma_with_fastmath_keeps_its_accuracy(run):
     np.testing.assert_allclose(out, want, rtol=1e-5, atol=2 * float(np.finfo(f32).tiny))
 
 
-# libclc's float64 exp, expm1, sinh and cosh lose up to 670 ulp for large
-# arguments on llvmpipe and 200 on the UHD 630; their replacements in
-# mathimpl measure 1 ulp. NumPy's versions are accurate to the last bit.
+# libclc's float64 exp, expm1, sinh, cosh and erfc lose up to 670 ulp for
+# large arguments on llvmpipe and 200 on the UHD 630; their replacements in
+# mathimpl measure 1 to 2 ulp. The references are accurate to about 1 ulp.
 EXP_FAMILY = {
     "exp": (math.exp, np.exp, (-745.0, 709.7)),
     "expm1": (math.expm1, np.expm1, (-50.0, 709.7)),
     "sinh": (math.sinh, np.sinh, (-710.4, 710.4)),
     "cosh": (math.cosh, np.cosh, (-710.4, 710.4)),
+    "erfc": (math.erfc, np.vectorize(math.erfc), (-7.0, 27.2)),
 }
 
 

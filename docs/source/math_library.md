@@ -53,11 +53,13 @@ large negative arguments. This package uses a port of the newer upstream
 `fastmath`. It is within 7 ulp in both precisions on all three tested
 devices; numba-cuda and Numba's CPU target are within 3 ulp.
 
-In `float64`, `exp`, `expm1`, `sinh` and `cosh` are not libclc's either,
-except for small arguments: on Intel's and Mesa's drivers, libclc's versions
-lose up to a few hundred ulp for large arguments (KI-31). This package
-reduces the argument to `k ln 2 + r` exactly and lets libclc compute only
-`exp(r)`, which gives 1 ulp on every tested device.
+In `float64`, `exp`, `expm1`, `sinh`, `cosh` and `erfc` are not libclc's
+either, except for arguments where libclc's versions are accurate: on
+Intel's and Mesa's drivers, they lose up to a few hundred ulp for large
+arguments. This package reduces the argument of `exp` to `k ln 2 + r`
+exactly and lets libclc compute only `exp(r)`, which gives 1 ulp on every
+tested device; the other four are built on that (`erfc` with fdlibm's
+formula, as in libclc) and measure 1 to 2 ulp.
 
 ### Choosing speed over accuracy
 
