@@ -26,8 +26,9 @@ uv run pytest
 ### Without Nix
 
 Install the Vulkan loader (`libvulkan1` on Debian and Ubuntu, `vulkan-loader`
-on Fedora and Arch) and a driver for your GPU. For libclc, install your
-distribution's package or point `NUMBA_VULKAN_LIBCLC` at `clspv--.bc`.
+on Fedora and Arch) and a driver for your GPU. Wheels contain libclc. When
+working from a source checkout instead, install your distribution's libclc
+package or point `NUMBA_VULKAN_LIBCLC` at `clspv--.bc`.
 Then:
 
 ```sh

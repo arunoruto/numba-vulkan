@@ -47,7 +47,13 @@ uv run pytest -k llvmpipe                      # one device
 uv run pytest tests/test_known_issues.py -rxX  # list known issues
 uv run python benchmarks/bench.py
 cd docs && uv run sphinx-build -M html ./source ./build -W
+build-dist                                     # sdist and wheel, with libclc
 ```
+
+`build-dist` is a devenv script: it copies libclc's `clspv--.bc` from the
+Nix store to `src/numba_vulkan/data/` (ignored by git) and runs `uv build`,
+so the distributions in `dist/` carry the math library. A plain `uv build`
+without that file produces a wheel without it.
 
 On NixOS, commands must run inside `devenv shell`; the wheels in the
 virtual environment do not find their shared libraries otherwise.
