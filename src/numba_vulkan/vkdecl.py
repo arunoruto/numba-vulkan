@@ -259,6 +259,10 @@ def _atomic_target(array, index, dtypes):
     """Whether atomics apply to `array` at an index of type `index`."""
     if not isinstance(array, VulkanArray) or array.dtype not in dtypes:
         return False
+    if array.half:
+        raise errors.TypingError(
+            "atomic operations on float16 arrays are not supported"
+        )
     if array.binding >= LOCAL_BASE:
         raise errors.TypingError("atomic operations on local arrays are not supported")
     if not array.mutable:

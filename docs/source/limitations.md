@@ -13,6 +13,8 @@ are tracked in {doc}`known_issues`.
 - views: slices refer to the same data, can be passed to functions and
   written through; `a[1:3] = x` fills a slice from a scalar or an array
 - iteration over arrays (`for v in a`, `enumerate`, `zip`)
+- `float16` arrays (stored as halves, computed as `float32`)
+- `print()` of constant strings and numbers
 - arrays of a constant shape inside kernels (`np.zeros(4)`,
   `nv.local.array`), and array expressions (`a * 2 + b`, `np.sqrt(a)`),
   computed element by element where they are used
@@ -60,8 +62,8 @@ Exceptions and recursion
 : An exception raised inside a kernel is raised by the launch once the
   kernel has finished; it does not stop the other invocations, and
   `try`/`except` is not available. Out-of-bounds accesses are checked only
-  with `boundscheck=True`, and arithmetic errors such as integer division
-  by zero are not reported. Recursive functions cannot be compiled, because
+  with `boundscheck=True`, and integer division by zero only with
+  `error_model="python"`. Recursive functions cannot be compiled, because
   everything is inlined.
 
 Devices without `float64` or `int64`

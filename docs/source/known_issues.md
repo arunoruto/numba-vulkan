@@ -13,11 +13,11 @@ the entry is removed from this page.
 uv run pytest tests/test_known_issues.py -rxX
 ```
 
-Numbers are not reused: KI-02, KI-03, KI-05, KI-06, KI-07, KI-13, KI-24 and
-KI-25 (NumPy functions on scalars, missing `math` functions, allocating
-arrays in kernels, global constant arrays, complex numbers, all data copied
-on every call, nested loop exits that failed to compile, libclc linked in
-full for every kernel) have been fixed.
+Numbers are not reused: KI-02, KI-03, KI-05, KI-06, KI-07, KI-08, KI-13,
+KI-24 and KI-25 (NumPy functions on scalars, missing `math` functions,
+allocating arrays in kernels, global constant arrays, complex numbers,
+`print`, all data copied on every call, nested loop exits that failed to
+compile, libclc linked in full for every kernel) have been fixed.
 
 ## Language and library coverage
 
@@ -65,39 +65,30 @@ time and raises `ValueError`, where NumPy would compute a temporary first.
 **Fix:** reductions along an axis can be added as `@overload`s on top of
 expressions, as `arrayfuncs.py` does for whole-array reductions.
 
-### KI-08: `print`
+### KI-09: structured (record) arrays
 
-**Symptom:** `No definition for lowering <built-in function print>`.
-
-**Fix:** the `debugPrintf` extension of the validation layers could back
-it, as Taichi does. Low priority.
-
-### KI-09: unsupported array kinds
-
-| Kind | Symptom |
-| --- | --- |
-| `float16` arrays | `NotImplementedError: float16` |
-| structured (record) arrays | `VulkanUnsupportedError: arrays of Record(...)` |
+**Symptom:** `VulkanUnsupportedError: arrays of Record(...)`.
 
 Supported element types are `bool`, signed and unsigned integers of 8 to 64
-bits, `float32` and `float64`. NumPy arrays that are not C-contiguous
-(strided, Fortran-ordered) work, but are copied to a contiguous array on the
-host for every call; device arrays are always contiguous.
+bits, `float16` (stored as halves, computed as `float32`), `float32` and
+`float64`. NumPy arrays that are not C-contiguous (strided,
+Fortran-ordered) work, but are copied to a contiguous array on the host
+for every call; device arrays are always contiguous.
+
+**Fix:** a record would map to a SPIR-V struct in the buffer, with field
+access as member access chains; Numba's record model assumes a data
+pointer, so this needs its own type, like `VulkanArray`.
 
 ## Behaviour that differs from Numba on the CPU
 
-### KI-10: only explicit errors are reported
+### KI-10: errors are reported after the kernel
 
-An exception raised with `raise` is reported by the launch (see
-{doc}`usage`), and `boundscheck=True` adds index checks. Everything else
-that raises on the CPU does not: integer division by zero yields an
-unspecified value, and array indices are unchecked by default, as in
-`numba.cuda`. There is no `try`/`except`, and an exception stops only the
-invocation that raised it.
-
-**Fix:** arithmetic errors would need Numba's Python error model, which
-adds a test to every division; it could become an option like
-`boundscheck`.
+An exception raised with `raise`, an index out of bounds with
+`boundscheck=True`, and an integer division by zero with
+`error_model="python"` are raised by the launch once the kernel has
+finished (see {doc}`usage`). The invocation that raised stops; the others
+run to completion. There is no `try`/`except`. By default, indices are not
+checked and divisions by zero give NumPy's results, as in `numba.cuda`.
 
 ### KI-11: `round()` on llvmpipe
 

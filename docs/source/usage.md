@@ -438,6 +438,11 @@ so the output arrays are partly written. If several invocations raise, one
 of their exceptions is reported. Kernels that cannot raise pay nothing for
 this.
 
+Integer division by zero gives NumPy's result by default (0), as in
+`numba.cuda`. With `@nv.jit(error_model="python")` it raises
+`ZeroDivisionError` instead, as Numba does on the CPU; each division then
+costs a comparison.
+
 Array indices are not checked by default. An out-of-bounds access reads
 garbage or writes to memory it should not, depending on the driver. While
 debugging, turn the check on for a function, or for everything with the
@@ -449,6 +454,32 @@ def kernel(a, out):
     i = nv.global_id(0)
     out[i] = a[i]        # IndexError if the grid is larger than the arrays
 ```
+
+## Printing
+
+`print()` works inside kernels for constant strings and numbers:
+
+```python
+@nv.jit
+def kernel(x):
+    i = nv.global_id(0)
+    if i < x.shape[0] and x[i] < 0:
+        print("negative value at", i, ":", x[i])
+```
+
+As with CUDA's `printf`, each call appends a record to a buffer, and the
+host prints the records after the kernel, in no particular order. A kernel
+that prints therefore always waits for completion. The buffer holds
+`NUMBA_VULKAN_PRINT_WORDS` 32-bit words (default 262144, 1 MiB); output
+beyond that is dropped with a warning.
+
+## float16 arrays
+
+Arrays of `np.float16` can be passed in and created as device arrays. They
+are stored as halves and computed with as `float32`: reading an element
+gives a `float32`, writing one rounds to `float16`. This needs only the
+`storageBuffer16BitAccess` device feature, which most GPUs have, not
+`shaderFloat16`. Atomics on them are not supported.
 
 ## Choosing a device
 

@@ -29,6 +29,7 @@ _LLVM_TYPES = {
     "i16": "i16",
     "i32": "i32",
     "i64": "i64",
+    "f16": "half",
     "f32": "float",
     "f64": "double",
 }
@@ -53,7 +54,44 @@ _CAS = re.compile(
 _BARRIER = re.compile(
     rf'^(\s*)(?:tail )?call void @"?{_PREFIX}\.barrier"?\(\).*$', re.MULTILINE
 )
+# Conversions between half and float; see numba_vulkan.vkimpl.half_conversion.
+_HALF_CONVERSION = re.compile(
+    rf'^(\s*%\S+) = (?:tail )?call (half|float) @"?{_PREFIX}\.(?:to|from)half"?'
+    r"\((\S+ [^)]+)\).*$",
+    re.MULTILINE,
+)
 _DECLARE = re.compile(rf'^declare [^\n]*@"?{_PREFIX}\.[^\n]*\n', re.MULTILINE)
+
+
+# Placeholder binding of the buffer that print() writes to. Each kernel that
+# prints gets it as its last binding (see renumber_print).
+PRINT_BINDING = (1 << 20) - 1
+# What each print() call prints, by the number its records start with.
+print_formats = {}
+_PRINT_ACCESS = re.compile(
+    rf'(@"?{_PREFIX}\.(?:load|store|atomic\.\w+)\.\w+"?\(i32 ){PRINT_BINDING}(,)'
+)
+
+
+def renumber_print(text, binding):
+    """Give the print buffer of a kernel its binding.
+
+    Parameters
+    ----------
+    text : str
+        Textual LLVM IR with placeholder accesses.
+    binding : int
+        The binding to use.
+
+    Returns
+    -------
+    text : str
+        The IR with the placeholder binding replaced.
+    used : bool
+        Whether the kernel prints.
+    """
+    text, count = _PRINT_ACCESS.subn(rf"\g<1>{binding}\g<2>", text)
+    return text, count > 0
 
 
 # Arrays used as global constants are typed with bindings from here upwards.
@@ -214,6 +252,8 @@ def _mangle(llty):
     """
     if isinstance(llty, ir.IntType) and f"i{llty.width}" in _LLVM_TYPES:
         return f"i{llty.width}"
+    if isinstance(llty, ir.HalfType):
+        return "f16"
     if isinstance(llty, ir.FloatType):
         return "f32"
     if isinstance(llty, ir.DoubleType):
@@ -538,6 +578,13 @@ def expand_buffer_access(text):
         )
 
     text = _DECLARE.sub("", text)
+    text = _HALF_CONVERSION.sub(
+        lambda m: (
+            f"{m.group(1)} = {'fptrunc' if m.group(2) == 'half' else 'fpext'} "
+            f"{m.group(3)} to {m.group(2)}"
+        ),
+        text,
+    )
     text = _STORE.sub(store, _LOAD.sub(load, text))
     text = _CAS.sub(cas, _ATOMIC.sub(atomic, text))
     text = _BARRIER.sub(

@@ -19,7 +19,7 @@ from numba_vulkan.buffers import STATUS_INDEX, arg_binding
 from numba_vulkan.compiler import compile_kernel, compile_vulkan
 from numba_vulkan.errors import VulkanPrecisionWarning, VulkanUnsupportedError
 from numba_vulkan.target import TARGET_NAME, exception_table, vulkan_target
-from numba_vulkan.vktypes import VulkanArray, VulkanDispatcherType
+from numba_vulkan.vktypes import HalfArray, VulkanArray, VulkanDispatcherType
 
 
 class VulkanDispatcher:
@@ -94,6 +94,11 @@ class VulkanDispatcher:
         self.narrow_math = bool(self.targetoptions.get("narrow_math", False))
         self.fastmath = bool(self.targetoptions.get("fastmath", False))
         self.boundscheck = bool(self.targetoptions.get("boundscheck", False))
+        self.error_model = self.targetoptions.get("error_model", "numpy")
+        if self.error_model not in ("numpy", "python"):
+            raise ValueError(
+                f"error_model must be 'numpy' or 'python', not {self.error_model!r}"
+            )
         self.narrow = self.targetoptions.get("narrow")
         if self.narrow not in (None, True, False, "ints", "floats"):
             raise ValueError(
@@ -170,6 +175,7 @@ class VulkanDispatcher:
                     self.narrow_math,
                     self.fastmath,
                     self.boundscheck,
+                    self.error_model,
                 )
             except errors.TypingError as exc:
                 # Numba's array constructors ask for an allocator.
@@ -323,6 +329,7 @@ class VulkanDispatcher:
                     ty.layout,
                     arg_binding(index),
                     readonly=not ty.mutable,
+                    half=isinstance(ty, HalfArray),
                 )
             bound.append(ty)
         local_size = _shape3(local_size) if local_size else None
@@ -479,7 +486,10 @@ class VulkanDispatcher:
                 hosts.append(arg)
             elif isinstance(arg, np.ndarray):
                 on_host = True
-                argtypes.append(typeof(arg).copy(layout="C", readonly=False))
+                if arg.dtype == np.float16:
+                    argtypes.append(HalfArray(arg.ndim, "C"))
+                else:
+                    argtypes.append(typeof(arg).copy(layout="C", readonly=False))
                 shapes.extend(arg.shape)
                 stored = narrowing.stored_dtype(arg.dtype, mode)
                 if stored != arg.dtype or not arg.flags.c_contiguous:
@@ -513,7 +523,12 @@ class VulkanDispatcher:
             return
         # Element 0 receives the status of the kernel, the shapes follow.
         meta = np.array([0, *shapes], dtype=np.int32)
-        if not on_host and STATUS_BINDING not in kernel.written_bindings and _ASYNC:
+        if (
+            _ASYNC
+            and not on_host
+            and STATUS_BINDING not in kernel.written_bindings
+            and kernel.print_binding is None
+        ):
             # Nothing to copy back and no exception to report: do not wait.
             target.launch(kernel, tuple(groups), [meta, *hosts])
             return
@@ -567,6 +582,8 @@ def _shape3(shape):
 @functools.cache
 def _device_array_type(dtype, ndim):
     """Numba type of a device array."""
+    if dtype == np.float16:
+        return HalfArray(ndim, "C")
     return types.Array(numpy_support.from_dtype(dtype), ndim, "C")
 
 
@@ -576,6 +593,7 @@ def jit(
     fastmath=False,
     narrow_math=False,
     boundscheck=False,
+    error_model="numpy",
     narrow=None,
     **options,
 ):
@@ -599,6 +617,11 @@ def jit(
         read or corrupt unrelated memory of the buffer or are ignored,
         depending on the driver. The environment variable
         ``NUMBA_BOUNDSCHECK=1`` turns the check on everywhere.
+    error_model : {'numpy', 'python'}
+        What a division by zero does: ``'numpy'`` (the default, as in
+        ``numba.cuda``) gives NumPy's result, ``'python'`` raises
+        ``ZeroDivisionError`` from the launch, as Numba does on the CPU.
+        The check costs a comparison per division.
     narrow : bool, {'ints', 'floats'} or None
         Whether a kernel computes with 32-bit floats and integers where its
         code says ``float64`` and ``int64``, which Numba uses for Python
@@ -620,6 +643,7 @@ def jit(
     options["narrow_math"] = narrow_math
     options["fastmath"] = fastmath
     options["boundscheck"] = boundscheck
+    options["error_model"] = error_model
     options["narrow"] = narrow
     if pyfunc is None:
         return lambda f: VulkanDispatcher(f, options)

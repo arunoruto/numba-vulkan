@@ -3,6 +3,7 @@
 import itertools
 import math
 import operator
+import zlib
 
 import numpy as np
 from llvmlite import ir
@@ -13,6 +14,8 @@ from numba.cpython import slicing
 
 from numba_vulkan import narrowing, stubs, vkdecl
 from numba_vulkan.buffers import (
+    PRINT_BINDING,
+    print_formats,
     atomic_element,
     barrier,
     compare_and_swap,
@@ -145,7 +148,7 @@ def _unpack(context, builder, aryty, ary):
     proxy = cgutils.create_struct_proxy(aryty)(context, builder, value=ary)
     shape = cgutils.unpack_tuple(builder, proxy.shape, count=aryty.ndim)
     strides = cgutils.unpack_tuple(builder, proxy.strides, count=aryty.ndim)
-    itemsize = context.get_abi_sizeof(buffer_element_type(context, aryty.dtype))
+    itemsize = context.get_abi_sizeof(storage_type(context, aryty))
     # Positions are computed in 32 bits: buffers are indexed with 32-bit
     # integers anyway, and 64-bit arithmetic is slow on GPUs.
     if aryty.layout == "C":
@@ -293,30 +296,87 @@ def _make_view(context, builder, viewty, selection):
     for extent in selection.shape:
         nitems = builder.mul(nitems, extent)
     proxy.nitems = nitems
-    proxy.itemsize = intp(
-        context.get_abi_sizeof(buffer_element_type(context, viewty.dtype))
-    )
+    proxy.itemsize = intp(context.get_abi_sizeof(storage_type(context, viewty)))
     proxy.shape = cgutils.pack_array(builder, selection.shape, ty=intp)
     proxy.strides = cgutils.pack_array(builder, selection.strides, ty=intp)
     proxy.offset = builder.sext(selection.offset, intp)
     return proxy._getvalue()
 
 
+def half_conversion(builder, value, target):
+    """Convert between ``half`` and ``float`` behind LLVM's back.
+
+    LLVM would fold ``fptrunc(fpext(x) * 2)`` into a ``half`` multiply,
+    which needs the ``shaderFloat16`` device feature. The conversions are
+    therefore placeholder calls until after optimisation (see
+    `numba_vulkan.buffers.expand_buffer_access`).
+
+    Parameters
+    ----------
+    builder : llvmlite.ir.IRBuilder
+        Builder positioned where the code is emitted.
+    value : llvmlite.ir.Value
+        A ``half`` or ``float`` value.
+    target : llvmlite.ir.Type
+        The other of the two types.
+
+    Returns
+    -------
+    llvmlite.ir.Value
+    """
+    name = (
+        "numba_vulkan.tohalf"
+        if isinstance(target, ir.HalfType)
+        else "numba_vulkan.fromhalf"
+    )
+    fn = builder.module.globals.get(name)
+    if fn is None:
+        fn = ir.Function(builder.module, ir.FunctionType(target, [value.type]), name)
+        fn.attributes.add("readnone")
+        fn.attributes.add("nounwind")
+    return builder.call(fn, [value])
+
+
+def storage_type(context, aryty):
+    """LLVM type of one element of an array's buffer.
+
+    Parameters
+    ----------
+    context : VulkanTargetContext
+        The target context.
+    aryty : VulkanArray
+        The array type.
+
+    Returns
+    -------
+    llvmlite.ir.Type
+        ``half`` for arrays of ``float16`` values, otherwise see
+        `buffer_element_type`.
+    """
+    if getattr(aryty, "half", False):
+        return ir.HalfType()
+    return buffer_element_type(context, aryty.dtype)
+
+
 def _load(context, builder, aryty, position):
     """Read the element at a position of an array's buffer."""
-    elem = buffer_element_type(context, aryty.dtype)
+    elem = storage_type(context, aryty)
     val = load_element(builder, aryty.binding, elem, position)
     if isinstance(aryty.dtype, types.Boolean):
         val = builder.icmp_unsigned("!=", val, i32(0))
+    elif isinstance(elem, ir.HalfType):
+        val = half_conversion(builder, val, ir.FloatType())
     return val
 
 
 def _store(context, builder, aryty, position, val, valty):
     """Write a value, cast to the element type, at a position of a buffer."""
     val = context.cast(builder, val, valty, aryty.dtype)
+    elem = storage_type(context, aryty)
     if isinstance(aryty.dtype, types.Boolean):
         val = builder.zext(val, i32)
-    elem = buffer_element_type(context, aryty.dtype)
+    elif isinstance(elem, ir.HalfType):
+        val = half_conversion(builder, val, elem)
     store_element(builder, aryty.binding, elem, position, val)
 
 
@@ -672,7 +732,7 @@ def static_array(context, builder, aryty, shape):
         The metadata structure, with C-contiguous strides and offset 0.
     """
     intp = context.get_value_type(types.intp)
-    itemsize = context.get_abi_sizeof(buffer_element_type(context, aryty.dtype))
+    itemsize = context.get_abi_sizeof(storage_type(context, aryty))
     strides, step = [], itemsize
     for extent in reversed(shape):
         strides.insert(0, step)
@@ -1149,7 +1209,7 @@ def assign_expression(context, builder, aryty, selection, exprty, expr):
                 ValueError,
                 ("cannot assign slice from input of different size",),
             )
-    itemsize = context.get_abi_sizeof(buffer_element_type(context, aryty.dtype))
+    itemsize = context.get_abi_sizeof(storage_type(context, aryty))
     view_steps = [
         _i32(builder, builder.sdiv(stride, stride.type(itemsize), flags=["exact"]))
         for stride in selection.strides
@@ -1229,3 +1289,80 @@ def _register_inplace(op, plain):
 
 for _op, _plain in vkdecl._INPLACE_OPERATORS.items():
     _register_inplace(_op, _plain)
+
+
+# -- print ------------------------------------------------------------------------
+
+
+def _print_words(context, builder, ty, value):
+    """How a value is recorded: its format code and its 32-bit words."""
+    if isinstance(ty, types.Boolean):
+        return "b", [builder.zext(value, i32)]
+    if isinstance(ty, types.Integer):
+        wide = context.cast(
+            builder, value, ty, types.int64 if ty.signed else types.uint64
+        )
+        high = (
+            builder.ashr(wide, wide.type(32))
+            if ty.signed
+            else builder.lshr(wide, wide.type(32))
+        )
+        return ("i" if ty.signed else "u"), [
+            builder.trunc(wide, i32),
+            builder.trunc(high, i32),
+        ]
+    if isinstance(ty, types.Float):
+        if ty == types.float32 or narrowing.current.floats:
+            single = context.cast(builder, value, ty, types.float32)
+            single = narrowing.to_single(builder, single)
+            return "f", [builder.bitcast(single, i32)]
+        bits = builder.bitcast(
+            context.cast(builder, value, ty, types.float64), ir.IntType(64)
+        )
+        return "d", [
+            builder.trunc(bits, i32),
+            builder.trunc(builder.lshr(bits, bits.type(32)), i32),
+        ]
+    raise VulkanUnsupportedError(
+        f"print() in Vulkan kernels supports constant strings and numbers, not {ty}"
+    )
+
+
+@lower(print, types.VarArg(types.Any))
+def lower_print(context, builder, sig, args):
+    """Lower ``print(...)`` to a record in the kernel's print buffer.
+
+    The buffer starts with a cursor and its capacity, in 32-bit words. A
+    call reserves room for its record with an atomic addition to the cursor
+    and, if it fits, writes the number of its format followed by the
+    values. The host prints the records after the kernel (see
+    `numba_vulkan.runtime.print_records`). String constants are part of
+    the format and are not written.
+
+    Returns
+    -------
+    llvmlite.ir.Value
+        A dummy value.
+    """
+    parts, words = [], []
+    for ty, value in zip(sig.args, args):
+        if isinstance(ty, types.StringLiteral):
+            parts.append(("s", ty.literal_value))
+            continue
+        code, values = _print_words(context, builder, ty, value)
+        parts.append((code,))
+        words += values
+    form = tuple(parts)
+    key = zlib.crc32(repr(form).encode()) & 0x7FFFFFFF
+    print_formats[key] = form
+    words = [i32(key)] + words
+    start = atomic_element(builder, PRINT_BINDING, i32, i32(0), "add", i32(len(words)))
+    capacity = load_element(builder, PRINT_BINDING, i32, i32(1))
+    position = builder.add(start, i32(2))
+    end = builder.add(position, i32(len(words)))
+    with builder.if_then(builder.icmp_unsigned("<=", end, capacity)):
+        for k, word in enumerate(words):
+            store_element(
+                builder, PRINT_BINDING, i32, builder.add(position, i32(k)), word
+            )
+    return context.get_dummy_value()
