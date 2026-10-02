@@ -15,6 +15,7 @@ from numba_vulkan.runtime import (
     get_device,
     list_devices,
     select_device,
+    synchronize,
     to_device,
 )
 from numba_vulkan.stubs import (
@@ -53,6 +54,7 @@ __all__ = [
     "num_groups",
     "select_device",
     "shared",
+    "synchronize",
     "syncthreads",
     "to_device",
 ]

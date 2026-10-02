@@ -149,7 +149,12 @@ and serves the next request of a similar size. The pool holds up to
 `NUMBA_VULKAN_POOL_MB` megabytes (default 1024) per device;
 `nv.get_device().trim()` empties it.
 
-A launch returns when the kernel has finished. Devices are not thread-safe.
+A launch whose arrays are all device arrays returns at once, before the
+kernel has run, as in `numba.cuda`; later launches and copies wait for it
+as needed. `nv.synchronize()` waits for everything, which is what to call
+before measuring time. Launches with NumPy arrays, and of kernels that can
+raise an exception, wait for the kernel. `NUMBA_VULKAN_SYNC=1` makes every
+launch wait. Devices are not thread-safe.
 
 ## Functions called from kernels
 

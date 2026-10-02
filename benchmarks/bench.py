@@ -131,7 +131,7 @@ def vulkan_backend(device):
         "option": run_option,
         "saxpy": run_saxpy,
         "to_device": lambda array: nv.to_device(array, device),
-        "sync": lambda: None,  # launches return when the kernel has finished
+        "sync": lambda: nv.synchronize(device),
     }
 
 

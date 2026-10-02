@@ -173,6 +173,8 @@ class Backend:
     def sync(self):
         if self.name == "cuda":
             cuda.synchronize()
+        else:
+            nv.synchronize()
 
 
 def best_of(function, repeat, before=None):
