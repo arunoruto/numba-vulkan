@@ -197,9 +197,20 @@ def workarounds(device):
         key = _driver_key(device)
         measured = _load().get(key)
     if not isinstance(measured, dict) or set(measured) != set(forced):
-        measured = _measure(device)
-        if kernelcache.enabled():
-            _store(key, measured)
+        try:
+            measured = _measure(device)
+        except Exception as exc:  # noqa: BLE001
+            # A driver that cannot run the probe should still run kernels
+            # that avoid what failed; the result is not stored.
+            warnings.warn(
+                f"could not probe {device.info.name} ({type(exc).__name__}: "
+                f"{exc}); compiling without workarounds",
+                stacklevel=2,
+            )
+            measured = {name: False for name in forced}
+        else:
+            if kernelcache.enabled():
+                _store(key, measured)
     return {
         name: bool(measured[name] if value is None else value)
         for name, value in forced.items()

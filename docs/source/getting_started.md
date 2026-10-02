@@ -36,6 +36,35 @@ uv sync
 uv run pytest
 ```
 
+### macOS
+
+On macOS, Vulkan runs on top of Metal through
+[MoltenVK](https://github.com/KhronosGroup/MoltenVK). numba-vulkan asks the
+Vulkan loader for such "portability" drivers and enables what they need,
+but it has not been tested on a Mac yet; reports are welcome.
+
+```sh
+brew install molten-vk vulkan-loader vulkan-tools
+# Homebrew on Apple silicon installs into /opt/homebrew/lib, where the
+# `vulkan` Python package does not look by itself:
+export DYLD_FALLBACK_LIBRARY_PATH=/opt/homebrew/lib
+vulkaninfo --summary       # should list the GPU with the MoltenVK driver
+uv sync
+make libclc                # optional: accurate float32 math (see below)
+uv run python -c "import numba_vulkan as nv; print(nv.list_devices())"
+```
+
+If `vulkaninfo` lists no device, point the loader at MoltenVK's manifest
+with `export VK_DRIVER_FILES=/opt/homebrew/etc/vulkan/icd.d/MoltenVK_icd.json`
+(or the `share/vulkan/icd.d` directory, depending on the version). The
+LunarG Vulkan SDK is an alternative to Homebrew.
+
+Apple GPUs have no `float64` (Metal does not offer it), so kernels compute
+`float64` values in `float32` and warn about it (see {doc}`limitations`).
+`make libclc` puts libclc into the source checkout; it downloads
+conda-forge's package unless Nix is installed, and the file is the same on
+every platform. Without it, `float32` math uses the driver's functions.
+
 ## Checking the setup
 
 ```python

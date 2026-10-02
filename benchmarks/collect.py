@@ -5,13 +5,13 @@ per run, so that results from different people, machines and versions can be
 collected in the repository and compared (``benchmarks/report.py`` draws the
 charts in the documentation).
 
-    uv run --group bench python benchmarks/collect.py --user arunoruto --machine desktop
+    uv run --group bench python benchmarks/collect.py --user arunoruto
     uv run python benchmarks/collect.py --user me --machine laptop --quick
 
-Nothing identifying is recorded automatically: no host name, no user name of
-the operating system. The file holds the ``--user`` handle (for example a
-GitHub name) and the ``--machine`` label given on the command line, and the
-hardware and software models and versions.
+The file holds the ``--user`` handle (for example a GitHub name), the
+``--machine`` label (by default the short host name), and the hardware and
+software models and versions. Nothing else identifies the machine or its
+user; pass ``--machine`` to choose another label.
 
 File format (``"schema": 1``)
 -----------------------------
@@ -45,6 +45,7 @@ import os
 import pathlib
 import platform
 import re
+import socket
 import subprocess
 import sys
 from importlib import metadata
@@ -86,8 +87,20 @@ def git_info():
     }
 
 
+def _sysctl(name):
+    """A value from macOS's ``sysctl``, or ``None``."""
+    try:
+        return subprocess.run(
+            ["sysctl", "-n", name], capture_output=True, text=True, check=True
+        ).stdout.strip()
+    except (OSError, subprocess.CalledProcessError):
+        return None
+
+
 def _os_name():
     """Operating system and its version."""
+    if sys.platform == "darwin":
+        return f"macOS {platform.mac_ver()[0]} ({platform.machine()})"
     name = f"{platform.system()} {platform.release()}"
     try:
         with open("/etc/os-release") as fh:
@@ -112,6 +125,8 @@ def software_info():
 
 def _cpu_model():
     """The CPU's model name."""
+    if sys.platform == "darwin":
+        return _sysctl("machdep.cpu.brand_string") or platform.machine()
     try:
         with open("/proc/cpuinfo") as fh:
             for line in fh:
@@ -124,6 +139,9 @@ def _cpu_model():
 
 def _memory_gib():
     """Installed memory in GiB, or ``None``."""
+    if sys.platform == "darwin":
+        size = _sysctl("hw.memsize")
+        return round(int(size) / 2**30, 1) if size and size.isdigit() else None
     try:
         with open("/proc/meminfo") as fh:
             for line in fh:
@@ -245,6 +263,12 @@ def collect(user, machine, quick=False, verbose=True):
     }
 
 
+def _default_machine():
+    """The host name up to the first dot, with unusual characters replaced."""
+    name = socket.gethostname().split(".")[0]
+    return re.sub(r"[^A-Za-z0-9._-]", "-", name).strip("-._") or None
+
+
 def _default_user():
     """The user handle from the environment or git, or ``None``."""
     return os.environ.get("NUMBA_VULKAN_BENCH_USER") or _git("config", "github.user")
@@ -260,9 +284,9 @@ def main():
     )
     parser.add_argument(
         "--machine",
-        default=os.environ.get("NUMBA_VULKAN_BENCH_MACHINE"),
-        help="a label for this machine, e.g. 'desktop' "
-        "(default: $NUMBA_VULKAN_BENCH_MACHINE)",
+        default=os.environ.get("NUMBA_VULKAN_BENCH_MACHINE") or _default_machine(),
+        help="a label for this machine (default: $NUMBA_VULKAN_BENCH_MACHINE or "
+        "the host name)",
     )
     parser.add_argument(
         "--quick", action="store_true", help="small problem sizes, for trying it out"

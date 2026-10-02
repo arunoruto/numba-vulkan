@@ -199,7 +199,9 @@ Kernels that use `int8` or `int16` arrays still need those features.
 ### KI-18: tested on three devices only
 
 NVIDIA TITAN X (Pascal), Intel UHD Graphics 630 and llvmpipe, all on Linux.
-AMD, Apple, Windows and mobile GPUs are untested. Two driver problems were
+AMD, Apple, Windows and mobile GPUs are untested. On macOS, numba-vulkan
+enables what MoltenVK needs (`VK_KHR_portability_enumeration` and
+`VK_KHR_portability_subset`), but has not run there yet. Two driver problems were
 found on this small sample alone (see {doc}`how_it_works`), so more should
 be expected.
 

@@ -58,21 +58,23 @@ Every result keeps all timed calls; the charts show the best of them.
 
 ```sh
 uv sync --group bench        # adds numba-cuda; optional
-uv run python benchmarks/collect.py --user <your GitHub name> --machine <label>
+uv run python benchmarks/collect.py --user <your GitHub name>
 ```
 
 This runs both suites (a few minutes) and writes
 `benchmarks/results/<user>/<date>.json`. Commit that file in a pull request.
-`--quick` runs small problem sizes for trying it out; such runs are not
-charted. `NUMBA_VULKAN_BENCH_USER` and `NUMBA_VULKAN_BENCH_MACHINE` can stand
-in for the options.
+The machine is labelled with its host name; `--machine` chooses another
+label. `--quick` runs small problem sizes for trying it out; such runs are
+not charted. `NUMBA_VULKAN_BENCH_USER` and `NUMBA_VULKAN_BENCH_MACHINE` can
+stand in for the options. On a machine without CUDA, such as a Mac, the
+CUDA rows are left out; `uv sync --group bench` is not needed there.
 
-The file holds the handle and machine label given on the command line, the
+The file holds the handle and the machine label, the
 date, the commit, the versions of Python, Numba, llvmlite, NumPy, numba-cuda
 and libclc, the operating system, the CPU model and memory size, every
 Vulkan device with its driver and the workarounds numba-vulkan applies to
 it, and the CUDA device. Nothing else about the machine or its user is
-recorded, in particular no host or user name. `benchmarks/collect.py`
+recorded. `benchmarks/collect.py`
 describes the format; `tests/test_benchmark_results.py` checks every file
 against it.
 
