@@ -56,7 +56,7 @@ The bindings of a kernel are laid out as follows:
 
 | Binding | Contents |
 | --- | --- |
-| 0 | shapes of all array arguments, as `int32` |
+| 0 | error status of the kernel, then the shapes of all array arguments, as `int32` |
 | `1 + k` | argument `k`: the array data, or a one-element buffer for a scalar |
 
 ## Deferring buffer access
@@ -141,9 +141,16 @@ checked for constructs known to crash drivers before it is handed to one.
 
 {py:mod}`numba_vulkan.runtime` is a small Vulkan compute runtime on top of
 the [`vulkan`](https://pypi.org/project/vulkan/) bindings. For each call it
-creates one host-visible storage buffer per binding, uploads the arguments,
-dispatches the shader and reads back the buffers the shader writes to.
-Pipelines are cached per device and kernel specialisation.
+binds one storage buffer per binding, dispatches the shader and waits for it
+to finish. A NumPy argument gets a temporary buffer in mappable memory: it
+is uploaded before the dispatch and read back afterwards if the shader
+writes to it. A device array brings its own buffer, which on discrete GPUs
+lives in device-local memory and is filled and read through a staging
+buffer. If the shader left an error status in binding 0, the matching
+exception is raised.
+
+Buffers are recycled through a per-device pool, and pipelines, descriptor
+sets and the command buffer are kept per device and kernel specialisation.
 
 ## Workarounds for toolchain and driver behaviour
 

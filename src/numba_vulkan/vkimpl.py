@@ -95,7 +95,8 @@ def buffer_element_type(context, dtype):
 def _linear_index(context, builder, aryty, ary, idxty, idx):
     """Compute the flat element index of an array access.
 
-    Negative indices wrap around as in Python. There is no bounds check.
+    Negative indices wrap around as in Python. Indices are checked against
+    the shape only when bounds checking is enabled for the function.
 
     Parameters
     ----------
@@ -146,6 +147,15 @@ def _linear_index(context, builder, aryty, ary, idxty, idx):
             # Python-style wraparound of negative indices.
             negative = builder.icmp_signed("<", index, index.type(0))
             index = builder.select(negative, builder.add(index, shape[dim]), index)
+        if context.enable_boundscheck:
+            # Unsigned, so that indices that are still negative fail as well.
+            outside = builder.icmp_unsigned(">=", index, shape[dim])
+            with builder.if_then(outside, likely=False):
+                message = (
+                    f"index is out of bounds for axis {dim} of a "
+                    f"{aryty.ndim}-dimensional array"
+                )
+                context.call_conv.return_user_exc(builder, IndexError, (message,))
         linear = (
             index
             if linear is None

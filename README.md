@@ -96,7 +96,7 @@ where it hurts; it is not ready for real workloads.
 4. LLVM's SPIR-V backend turns the result into a compute shader. It runs in a
    child process, so a backend failure raises an exception instead of
    aborting Python.
-5. The runtime uploads the arguments (binding 0: array shapes, binding
+5. The runtime uploads the arguments (binding 0: error status and array shapes, binding
    `1 + k`: argument `k`), dispatches, and copies written buffers back.
    Device arrays are used in place.
 
@@ -293,7 +293,7 @@ Does not work:
   math library. It is not bundled yet; without it such calls raise, unless
   you opt in to float32 precision with `@nv.jit(narrow_math=True)`.
 - **Slices, array views, NumPy functions on whole arrays, array allocation,
-  exceptions, recursion.** Errors raised inside a kernel are silently dropped.
+  `try`/`except`, recursion.**
 - **Devices without float64, int64 or int8 support.** Numba types Python
   literals as float64/int64, and the SPIR-V backend currently forces int8, so
   most kernels need all three. Desktop GPUs have them; many mobile GPUs and
@@ -330,7 +330,7 @@ ones most likely to bite:
 | KI-01 | float64 `math.sin(x)`, `x ** 2.5`... need libclc, which is not bundled | install libclc, or stay in float32 |
 | KI-04 | no slices, array methods or iteration over arrays | index explicitly |
 | KI-06 | global NumPy arrays cannot be used in kernels | pass them as arguments |
-| KI-10 | errors raised in kernels are dropped; no bounds checks | check inputs on the host |
+| KI-10 | no bounds checks unless asked for; integer division by zero is not reported | `@nv.jit(boundscheck=True)` while debugging |
 | KI-17 | most kernels need the optional float64/int64/int8 device features | none yet |
 
 `tests/test_known_issues.py` reproduces the coverage gaps as expected

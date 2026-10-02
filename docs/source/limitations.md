@@ -39,8 +39,11 @@ Slices, views and NumPy functions
   expressions, NumPy functions and array allocation are not.
 
 Exceptions and recursion
-: Errors raised inside a kernel are silently dropped, and out-of-bounds
-  accesses are not checked. Recursive functions cannot be compiled, because
+: An exception raised inside a kernel is raised by the launch once the
+  kernel has finished; it does not stop the other invocations, and
+  `try`/`except` is not available. Out-of-bounds accesses are checked only
+  with `boundscheck=True`, and arithmetic errors such as integer division
+  by zero are not reported. Recursive functions cannot be compiled, because
   everything is inlined.
 
 Devices without `float64`, `int64` or `int8`

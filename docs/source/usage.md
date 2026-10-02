@@ -169,6 +169,40 @@ devices. `@nv.jit(fastmath=True)` trades that for speed: `float32` math
 uses the device's built-in functions and the driver may reorder
 arithmetic.
 
+## Errors
+
+An exception raised in a kernel, or in a function it calls, is raised by
+the launch after the kernel has finished:
+
+```python
+@nv.jit
+def checked_log(x):
+    if x <= 0:
+        raise ValueError("log of a non-positive number")
+    return math.log(x)
+
+kernel.forall(n)(x, out)
+# ValueError: log of a non-positive number
+# raised in Vulkan kernel 'kernel', in checked_log at example.py:4
+```
+
+Each invocation that raises stops itself only; the others run to completion,
+so the output arrays are partly written. If several invocations raise, one
+of their exceptions is reported. Kernels that cannot raise pay nothing for
+this.
+
+Array indices are not checked by default. An out-of-bounds access reads
+garbage or writes to memory it should not, depending on the driver. While
+debugging, turn the check on for a function, or for everything with the
+environment variable `NUMBA_BOUNDSCHECK=1`:
+
+```python
+@nv.jit(boundscheck=True)
+def kernel(a, out):
+    i = nv.global_id(0)
+    out[i] = a[i]        # IndexError if the grid is larger than the arrays
+```
+
 ## Choosing a device
 
 ```python

@@ -16,7 +16,14 @@ from numba.core.compiler_machinery import LoweringPass, PassManager, register_pa
 from numba.core.target_extension import target_override
 from numba.core.typed_passes import AnnotateTypes, IRLegalization, NativeLowering
 
-from numba_vulkan.buffers import META_BINDING, arg_binding, i32, load_element
+from numba_vulkan.buffers import (
+    META_BINDING,
+    STATUS_INDEX,
+    arg_binding,
+    i32,
+    load_element,
+    store_element,
+)
 from numba_vulkan.codegen import ENTRY_POINT, CompiledKernel, spirv_capabilities
 from numba_vulkan.target import TARGET_NAME, vulkan_target
 from numba_vulkan.vkimpl import buffer_element_type
@@ -113,7 +120,9 @@ class VulkanCompiler(CompilerBase):
 
 
 @global_compiler_lock
-def compile_vulkan(pyfunc, return_type, args, narrow_math=False, fast_math=False):
+def compile_vulkan(
+    pyfunc, return_type, args, narrow_math=False, fast_math=False, boundscheck=False
+):
     """Run ``pyfunc`` through Numba's pipeline down to LLVM IR.
 
     Parameters
@@ -129,12 +138,15 @@ def compile_vulkan(pyfunc, return_type, args, narrow_math=False, fast_math=False
         not available.
     fast_math : bool
         Use the device's built-in float32 math functions instead of libclc.
+    boundscheck : bool
+        Raise ``IndexError`` for array indices that are out of bounds.
 
     Returns
     -------
     VulkanCompileResult
     """
     flags = Flags()
+    flags.boundscheck = boundscheck
     flags.no_compile = True
     flags.no_cpython_wrapper = True
     flags.no_cfunc_wrapper = True
@@ -236,13 +248,20 @@ def compile_kernel(cres, ndim, exact=True):
     wrapper = ir.Function(module, ir.FunctionType(ir.VoidType(), []), ENTRY_POINT)
     builder = ir.IRBuilder(wrapper.append_basic_block("entry"))
 
-    callargs, shape_offset = [], 0
+    # Element 0 of the shape buffer receives the error status.
+    callargs, shape_offset = [], 1
     for index, ty in enumerate(argtypes):
         callargs.append(_load_argument(context, builder, index, ty, shape_offset))
         if isinstance(ty, VulkanArray):
             shape_offset += ty.ndim
-    # Errors raised inside a kernel are dropped, as numba.cuda does by default.
-    context.call_conv.call_function(builder, func, fndesc.restype, argtypes, callargs)
+    status, _ = context.call_conv.call_function(
+        builder, func, fndesc.restype, argtypes, callargs
+    )
+    # An exception leaves its code for the host to raise after the launch.
+    # Invocations do not synchronise: if several fail, one of them wins.
+    # Kernels that cannot raise lose this store during optimisation.
+    with builder.if_then(status.is_error, likely=False):
+        store_element(builder, META_BINDING, i32, i32(STATUS_INDEX), status.code)
     builder.ret_void()
 
     local = LOCAL_SIZES[ndim]
