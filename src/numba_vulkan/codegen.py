@@ -27,7 +27,7 @@ from numba_vulkan.buffers import (
     renumber_print,
 )
 from numba_vulkan.errors import SpirvCodegenError, VulkanUnsupportedError
-from numba_vulkan.legalize import legalize
+from numba_vulkan.legalize import emulate_fma, emulate_rounding64, legalize
 from numba_vulkan.structurize import structurize
 
 TRIPLE = "spirv1.5-unknown-vulkan1.2-compute"
@@ -1173,6 +1173,13 @@ class VulkanCodeLibrary(CodeLibrary):
                 f"(could not inline {', '.join(leftover)})"
             )
         text = str(linked)
+        # Workarounds for the device (see numba_vulkan.probes). The float64
+        # ones are left out when doubles are narrowed to float anyway.
+        if self.mode.soft_fma:
+            types = ("float",) if self.mode.floats else ("float", "double")
+            text = emulate_fma(text, types)
+        if self.mode.soft_rounding and not self.mode.floats:
+            text = emulate_rounding64(text)
         if early:
             self.narrowed = narrowing.Mode(ints=user_i64)
             text = legalize(text)

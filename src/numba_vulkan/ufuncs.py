@@ -77,6 +77,11 @@ def _via_math(pyfn):
     return impl
 
 
+def _rint(context, builder, sig, args):
+    """``np.rint``: round to the nearest integer, halves to even."""
+    return mathimpl.call_intrinsic(builder, "llvm.rint", list(args))
+
+
 def _int_power(context, builder, sig, args):
     """Integer loops of ``np.power``; see `mathimpl.int_int_power`."""
     return mathimpl.int_int_power(context, builder, sig, args)
@@ -110,6 +115,7 @@ def ufunc_db():
         db[getattr(np, name)] = {"ff->f": _via_math(pyfn), "dd->d": _via_math(pyfn)}
     for name, pyfn in _PREDICATES.items():
         db[getattr(np, name)] = {"f->?": _via_math(pyfn), "d->?": _via_math(pyfn)}
+    db[np.rint] = {"f->f": _rint, "d->d": _rint}
     for sig in cpu["power"][1]:
         if set(sig.replace("->", "")) <= set("bBhHiIlLqQ"):
             db[np.power][sig] = _int_power

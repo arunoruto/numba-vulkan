@@ -111,8 +111,8 @@ def libclc_name(context, pyfn, ty):
     """Decide whether a ``math`` function is taken from libclc.
 
     libclc is preferred: its functions are accurate to the last digit or
-    two (but see KI-31), give the same results on every device, and exist
-    in double precision. With ``fastmath``, float32 functions use the device's
+    two, give the same results on every device, and exist in double
+    precision. With ``fastmath``, float32 functions use the device's
     built-in versions instead, which are faster but less accurate and
     differ between drivers. float64 has no built-in alternative.
 
@@ -431,8 +431,9 @@ def _erfc_double(builder, x):
 
 
 # libclc functions whose float64 versions lose precision for large
-# arguments on some devices (KI-31 has the measurements), and the lowering
-# that replaces them. All of them depend on libclc's exp.
+# arguments on Intel's and Mesa's drivers (up to 670 ulp; see
+# docs/source/math_library.md), and the lowering that replaces them. All of
+# them depend on libclc's exp.
 _EXP_FAMILY = {
     "exp": reduced_exp,
     "expm1": _expm1_double,
@@ -510,8 +511,14 @@ def _register_rounding(pyfn, name):
 
     @lower(pyfn, types.Float)
     def impl(context, builder, sig, args):
-        """Round a float and convert the result to the integer return type."""
+        """Round a float and convert the result to the integer return type.
+
+        The result takes the sign of the argument, which is always right
+        here: Intel's driver returns ``+0.0`` for ``trunc`` and ``ceil`` of
+        values between -1 and 0.
+        """
         res = call_intrinsic(builder, name, list(args))
+        res = call_intrinsic(builder, "llvm.copysign", [res, args[0]])
         return context.cast(builder, res, sig.args[0], sig.return_type)
 
     @lower(pyfn, types.Integer)

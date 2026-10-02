@@ -1530,7 +1530,12 @@ def get_device(which=None):
             raise VulkanSupportError(f"no Vulkan device matching '{which}': {devices}")
         info = matches[0]
     if info.index not in _devices:
-        _devices[info.index] = Device(info)
+        device = _devices[info.index] = Device(info)
+        # The probe launches a kernel on the device, so it runs once the
+        # device is registered.
+        from numba_vulkan import probes
+
+        device.mode = device.mode._replace(**probes.workarounds(device))
     return _devices[info.index]
 
 
