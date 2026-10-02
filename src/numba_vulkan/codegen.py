@@ -18,7 +18,7 @@ from llvmlite import ir
 from numba.core.codegen import Codegen, CodeLibrary
 
 from numba_vulkan import _emit, libclc
-from numba_vulkan.buffers import expand_buffer_access
+from numba_vulkan.buffers import expand_buffer_access, renumber_constants
 from numba_vulkan.errors import SpirvCodegenError, VulkanUnsupportedError
 from numba_vulkan.legalize import legalize
 from numba_vulkan.structurize import structurize
@@ -289,6 +289,7 @@ class CompiledKernel:
     local_size: tuple
     capabilities: set = field(default_factory=set)
     written_bindings: set = field(default_factory=set)
+    constants: dict = field(default_factory=dict)
 
     @property
     def num_bindings(self):
@@ -297,9 +298,10 @@ class CompiledKernel:
         Returns
         -------
         int
-            One for the shape buffer plus one per argument.
+            One for the shape buffer, one per argument and one per constant
+            array.
         """
-        return 1 + len(self.argtypes)
+        return 1 + len(self.argtypes) + len(self.constants)
 
 
 def spirv_capabilities(spirv):
@@ -485,6 +487,8 @@ class VulkanCodeLibrary(CodeLibrary):
         self._linked = None
         self._spirv = {}
         self.written_bindings = set()
+        self.constants = {}
+        self.first_constant_binding = 0
 
     def add_ir_module(self, module):
         """Add a module to the library.
@@ -635,6 +639,7 @@ class VulkanCodeLibrary(CodeLibrary):
                 + ", ".join(sorted(set(missing)))
             )
         text = structurize(text)
+        text, self.constants = renumber_constants(text, self.first_constant_binding)
         text, self.written_bindings = expand_buffer_access(text)
         linked = llvm.parse_assembly(text)
         linked.verify()

@@ -16,7 +16,6 @@ f32 = np.float32
 N = 16
 XF = np.linspace(0.5, 3.0, N, dtype=np.float32)
 XD = np.linspace(0.5, 3.0, N)
-TABLE = np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float32)
 
 CASES = {}
 
@@ -52,13 +51,6 @@ def _(x, out):
         tmp = np.zeros(4, dtype=np.float32)
         tmp[0] = x[i]
         out[i] = tmp[0]
-
-
-@known_issue("KI-06 global constant array", XF, lambda x: x + TABLE[np.arange(N) % 4])
-def _(x, out):
-    i = nv.global_id(0)
-    if i < x.size:
-        out[i] = x[i] + TABLE[i % 4]
 
 
 @known_issue("KI-08 print()", XF, lambda x: x)

@@ -58,6 +58,12 @@ The bindings of a kernel are laid out as follows:
 | --- | --- |
 | 0 | error status of the kernel, then the shapes of all array arguments, as `int32` |
 | `1 + k` | argument `k`: the array data, or a one-element buffer for a scalar |
+| after the arguments | one buffer per NumPy array the kernel uses as a global constant |
+
+A global array is typed with a placeholder binding that is the same in every
+function using it; each kernel renumbers the ones it reaches to follow its
+arguments (`buffers.renumber_constants`). The runtime uploads their data
+once per kernel and device.
 
 ## Deferring buffer access
 

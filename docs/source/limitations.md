@@ -13,6 +13,7 @@ are tracked in {doc}`known_issues`.
 - views: slices refer to the same data, can be passed to functions and
   written through; `a[1:3] = x` fills a slice from a scalar or an array
 - iteration over arrays (`for v in a`, `enumerate`, `zip`)
+- NumPy arrays from the enclosing scope as read-only tables
 - `sum`, `prod`, `mean`, `min`, `max`, `argmin`, `argmax`, `any`, `all` over
   a whole array or view, as methods and as NumPy functions, and `np.dot`
   of two 1-d arrays

@@ -9,6 +9,7 @@ them into real loads and stores, after all optimisation has happened.
 
 import re
 
+import numpy as np
 from llvmlite import ir
 
 from numba_vulkan.errors import SpirvCodegenError, VulkanUnsupportedError
@@ -40,6 +41,78 @@ _STORE = re.compile(
     re.MULTILINE,
 )
 _DECLARE = re.compile(rf"^declare [^\n]*@{_PREFIX}\.[^\n]*\n", re.MULTILINE)
+
+
+# Arrays used as global constants are typed with bindings from here upwards.
+# Each kernel renumbers the ones it uses to follow its arguments.
+CONSTANT_BASE = 1 << 20
+_constants = {}
+_CONSTANT_ACCESS = re.compile(rf"(@{_PREFIX}\.(?:load|store)\.\w+\(i32 )(\d+)(,)")
+
+
+def constant_binding(array):
+    """Binding that stands for a NumPy array used as a global constant.
+
+    The array is copied when it is first seen: like Numba on the CPU, the
+    compiled code keeps the values the array had at that time.
+
+    Parameters
+    ----------
+    array : numpy.ndarray
+        The array.
+
+    Returns
+    -------
+    int
+        A binding at or above `CONSTANT_BASE`, the same for every use of
+        the same array object.
+    """
+    known = _constants.get(id(array))
+    if known is None or known[1] is not array:
+        data = np.ascontiguousarray(array)
+        if data.dtype == np.bool_:
+            data = data.astype(np.int32)  # booleans are int32 on the device
+        elif data is array:
+            data = data.copy()
+        # The original is kept alive so that its id() is not reused.
+        known = _constants[id(array)] = (CONSTANT_BASE + len(_constants), array, data)
+    return known[0]
+
+
+def renumber_constants(text, first):
+    """Give the constant arrays of a kernel bindings after its arguments.
+
+    Parameters
+    ----------
+    text : str
+        Textual LLVM IR with placeholder buffer accesses.
+    first : int
+        Binding for the first constant array.
+
+    Returns
+    -------
+    text : str
+        The IR with the placeholder bindings replaced.
+    constants : dict of int to numpy.ndarray
+        Contents of each constant array by its binding in this kernel.
+    """
+    used = sorted(
+        {
+            int(b)
+            for _, b, _ in _CONSTANT_ACCESS.findall(text)
+            if int(b) >= CONSTANT_BASE
+        }
+    )
+    actual = {virtual: first + k for k, virtual in enumerate(used)}
+    by_binding = {binding: data for binding, _, data in _constants.values()}
+
+    def rename(match):
+        """Replace the binding of one access if it is a constant array."""
+        binding = int(match.group(2))
+        return match.group(1) + str(actual.get(binding, binding)) + match.group(3)
+
+    text = _CONSTANT_ACCESS.sub(rename, text)
+    return text, {actual[virtual]: by_binding[virtual] for virtual in used}
 
 
 def arg_binding(index):

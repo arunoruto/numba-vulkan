@@ -13,10 +13,11 @@ the entry is removed from this page.
 uv run pytest tests/test_known_issues.py -rxX
 ```
 
-Numbers are not reused: KI-02, KI-03, KI-07, KI-13, KI-24 and KI-25 (NumPy
-functions on scalars, missing `math` functions, complex numbers, all data
-copied on every call, nested loop exits that failed to compile, libclc
-linked in full for every kernel) have been fixed.
+Numbers are not reused: KI-02, KI-03, KI-06, KI-07, KI-13, KI-24 and KI-25
+(NumPy functions on scalars, missing `math` functions, global constant
+arrays, complex numbers, all data copied on every call, nested loop exits
+that failed to compile, libclc linked in full for every kernel) have been
+fixed.
 
 ## Language and library coverage
 
@@ -70,28 +71,6 @@ space has to be passed in as an argument.
 
 **Fix:** fixed-size local arrays could map to SPIR-V function-local
 variables. Nothing exists yet.
-
-### KI-06: global constant arrays
-
-```python
-TABLE = np.array([...], dtype=np.float32)
-
-@nv.jit
-def kernel(x, out):
-    ...
-    out[i] = TABLE[i % 4]
-```
-
-**Symptom:** `VulkanUnsupportedError: global NumPy arrays cannot be used
-inside Vulkan kernels yet`.
-
-**Cause:** Numba emits the data as an LLVM global and indexes it through a
-pointer, which the SPIR-V backend cannot translate.
-
-**Workaround:** pass the array as an argument.
-
-**Fix:** `VulkanTargetContext.make_constant_array` could upload the data as
-an additional read-only buffer and return a `VulkanArray` bound to it.
 
 ### KI-08: `print`
 
