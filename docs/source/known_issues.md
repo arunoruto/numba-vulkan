@@ -166,8 +166,9 @@ invisible for kernels but multiplies work for shared helper functions.
 ### KI-16: 64-bit integer atomics and float64 atomics
 
 LLVM's SPIR-V backend does not offer the `Int64Atomics` capability for
-Vulkan, so atomics on `int64` and `uint64` arrays are rejected unless the
-kernel is narrowed (`narrow="ints"`). `float64` atomics would need a 64-bit
+Vulkan, so atomics on `int64` and `uint64` arrays are rejected in kernels
+compiled with 64-bit integers (`narrow=False`); by default kernels use
+32-bit integers and they work. `float64` atomics would need a 64-bit
 compare-and-swap, which the backend cannot emit either. Its 32-bit
 compare-and-swap needs a repair of the generated SPIR-V
 (`codegen.fix_compare_exchange`), as do barriers

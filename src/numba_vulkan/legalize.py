@@ -498,6 +498,67 @@ def expand_byte_table_loads(text):
     return "\n".join(out) + "\n"
 
 
+_SATURATING = re.compile(
+    rf"^(\s*)(%\S+) = (?:tail )?call {_ATTRS}(i\d+) @llvm\.(u|s)(add|sub)\.sat\.i\d+"
+    rf"\(i\d+ (?:noundef )?([^,]+), i\d+ (?:noundef )?([^)]+)\).*$",
+    re.MULTILINE,
+)
+_SATURATING_DECLARATION = re.compile(
+    r"^declare [^\n]*@llvm\.[us](?:add|sub)\.sat\.[^\n]*\n", re.MULTILINE
+)
+
+
+def expand_saturating(text):
+    """Rewrite saturating additions and subtractions as plain arithmetic.
+
+    LLVM's instcombine forms ``llvm.usub.sat`` and its relatives from
+    clamped arithmetic, which the SPIR-V backend cannot select.
+
+    Parameters
+    ----------
+    text : str
+        Textual LLVM IR.
+
+    Returns
+    -------
+    str
+        The rewritten LLVM IR.
+    """
+
+    def repl(match):
+        """Replacement text for one match."""
+        indent, res, ty, kind, op, a, b = match.groups()
+        n, bits = next(_COUNTER), int(ty[1:])
+        p = f"%sat{n}"
+        lines = [f"{p}.r = {op} {ty} {a}, {b}"]
+        if kind == "u":
+            if op == "add":
+                # wrapped around if the result is below an operand
+                lines += [f"{p}.o = icmp ult {ty} {p}.r, {a}"]
+                lines += [f"{res} = select i1 {p}.o, {ty} -1, {ty} {p}.r"]
+            else:
+                lines += [f"{p}.o = icmp ult {ty} {a}, {b}"]
+                lines += [f"{res} = select i1 {p}.o, {ty} 0, {ty} {p}.r"]
+        else:
+            top, bottom = (1 << (bits - 1)) - 1, -(1 << (bits - 1))
+            # Overflow: for an addition, both operands' signs differ from the
+            # result's; for a subtraction, the operands' signs differ and the
+            # result's differs from the first operand's.
+            other = f"{b}, {p}.r" if op == "add" else f"{a}, {b}"
+            lines += [
+                f"{p}.x = xor {ty} {a}, {p}.r",
+                f"{p}.y = xor {ty} {other}",
+                f"{p}.z = and {ty} {p}.x, {p}.y",
+                f"{p}.o = icmp slt {ty} {p}.z, 0",
+                f"{p}.n = icmp slt {ty} {a}, 0",
+                f"{p}.c = select i1 {p}.n, {ty} {bottom}, {ty} {top}",
+                f"{res} = select i1 {p}.o, {ty} {p}.c, {ty} {p}.r",
+            ]
+        return "\n".join(indent + line for line in lines)
+
+    return _SATURATING_DECLARATION.sub("", _SATURATING.sub(repl, text))
+
+
 def legalize(text, narrow_ints=False):
     """Apply all rewrites.
 
@@ -519,6 +580,7 @@ def legalize(text, narrow_ints=False):
         expand_copysign,
         expand_fmuladd,
         expand_ctlz,
+        expand_saturating,
         expand_funnel_shift,
         functools.partial(expand_mul_hi, narrow=narrow_ints),
         avoid_faceforward,

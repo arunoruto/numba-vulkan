@@ -407,6 +407,7 @@ def compile_kernel(cres, ndim, exact=True, local_size=None):
         local_size=local,
         capabilities=spirv_capabilities(spirv),
         written_bindings=set(library.written_bindings),
+        read_bindings=set(library.read_bindings),
         shared_bytes=_shared_bytes(library.get_optimized_llvm_str()),
         print_binding=library.print_binding,
         constants=dict(library.constants),

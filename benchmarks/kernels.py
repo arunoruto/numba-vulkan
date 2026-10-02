@@ -243,8 +243,8 @@ def run(opts):
             backends.append((f"vulkan: {info.name}", Backend("vulkan"), info.index))
             backends.append(
                 (
-                    f'vulkan: {info.name}, narrow="ints"',
-                    Backend("vulkan", narrow="ints"),
+                    f"vulkan: {info.name}, 64-bit integers",
+                    Backend("vulkan", narrow=False),
                     info.index,
                 )
             )

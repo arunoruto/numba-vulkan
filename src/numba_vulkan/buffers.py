@@ -455,6 +455,8 @@ def expand_buffer_access(text):
         The rewritten LLVM IR.
     written : set of int
         Bindings the code stores to.
+    read : set of int
+        Bindings the code loads from.
 
     Raises
     ------
@@ -469,6 +471,7 @@ def expand_buffer_access(text):
     """
     used = set()
     written = set()
+    read = set()
     shared = {}
     cas_spaces = set()
     counter = iter(range(1 << 30))
@@ -524,6 +527,7 @@ def expand_buffer_access(text):
     def load(match):
         """Replacement text for one placeholder load."""
         indent, res, mangled, binding, index = match.groups()
+        read.add(int(binding))
         n, code, space = pointer(indent, mangled, binding, index)
         ty, stored = (
             _LLVM_TYPES[mangled],
@@ -553,6 +557,7 @@ def expand_buffer_access(text):
     def atomic(match):
         """Replacement text for one placeholder read-modify-write."""
         indent, res, op, mangled, binding, index, value = match.groups()
+        read.add(int(binding))
         if int(binding) < SHARED_BASE:
             written.add(int(binding))
         n, code, space = pointer(indent, mangled, binding, index)
@@ -564,6 +569,7 @@ def expand_buffer_access(text):
     def cas(match):
         """Replacement text for one placeholder compare-and-swap."""
         indent, res, mangled, binding, index, expected, value = match.groups()
+        read.add(int(binding))
         if int(binding) < SHARED_BASE:
             written.add(int(binding))
         n, code, space = pointer(indent, mangled, binding, index)
@@ -626,7 +632,7 @@ def expand_buffer_access(text):
         extra.append(
             "declare void @llvm.spv.group.memory.barrier.with.group.sync() convergent"
         )
-    return text + "\n" + "\n".join(extra) + "\n", written
+    return text + "\n" + "\n".join(extra) + "\n", written, read
 
 
 _FLOAT_ADD = re.compile(

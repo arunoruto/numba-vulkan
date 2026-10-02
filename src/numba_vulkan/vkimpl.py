@@ -13,6 +13,7 @@ from numba.core.imputils import RefType, Registry, iternext_impl
 from numba.cpython import slicing
 
 from numba_vulkan import narrowing, stubs, vkdecl
+from numba_vulkan.mathimpl import double_words
 from numba_vulkan.buffers import (
     PRINT_BINDING,
     print_formats,
@@ -1316,13 +1317,8 @@ def _print_words(context, builder, ty, value):
             single = context.cast(builder, value, ty, types.float32)
             single = narrowing.to_single(builder, single)
             return "f", [builder.bitcast(single, i32)]
-        bits = builder.bitcast(
-            context.cast(builder, value, ty, types.float64), ir.IntType(64)
-        )
-        return "d", [
-            builder.trunc(bits, i32),
-            builder.trunc(builder.lshr(bits, bits.type(32)), i32),
-        ]
+        double = context.cast(builder, value, ty, types.float64)
+        return "d", list(double_words(builder, double))
     raise VulkanUnsupportedError(
         f"print() in Vulkan kernels supports constant strings and numbers, not {ty}"
     )

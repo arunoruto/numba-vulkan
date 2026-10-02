@@ -283,16 +283,16 @@ One run on an Intel i9-9900K (8 cores), NVIDIA TITAN X (Pascal) and Intel UHD
 
 | Backend | Mandelbrot 2048², 200 iter. | Option pricing, 4.2M | saxpy, 4.2M |
 | --- | ---: | ---: | ---: |
-| Numba CPU, 1 thread | 474.4 | 105.2 | 2.4 |
-| Numba CPU, parallel | 92.7 | 19.4 | 4.4 |
-| **numba-vulkan**, NVIDIA TITAN X | 14.4 | 10.1 | 8.9 |
-| **numba-vulkan**, Intel UHD 630 | 56.7 | 13.0 | 8.3 |
-| **numba-vulkan**, llvmpipe (CPU) | 82.0 | 37.9 | 9.8 |
-| numba-cuda, NVIDIA TITAN X | 13.4 | 13.4 | 15.9 |
-| **numba-vulkan**, NVIDIA TITAN X, device arrays | 9.5 | 0.40 | 0.28 |
-| **numba-vulkan**, Intel UHD 630, device arrays | 53.6 | 6.2 | 5.3 |
-| **numba-vulkan**, llvmpipe (CPU), device arrays | 70.9 | 31.8 | 3.7 |
-| numba-cuda, NVIDIA TITAN X, device arrays | 8.3 | 0.29 | 0.22 |
+| Numba CPU, 1 thread | 469.7 | 114.8 | 2.3 |
+| Numba CPU, parallel | 93.0 | 24.3 | 5.0 |
+| **numba-vulkan**, NVIDIA TITAN X | 15.5 | 11.2 | 8.0 |
+| **numba-vulkan**, Intel UHD 630 | 47.7 | 13.5 | 11.1 |
+| **numba-vulkan**, llvmpipe (CPU) | 48.1 | 46.8 | 9.2 |
+| numba-cuda, NVIDIA TITAN X | 14.3 | 16.1 | 14.1 |
+| **numba-vulkan**, NVIDIA TITAN X, device arrays | 9.6 | 0.41 | 0.33 |
+| **numba-vulkan**, Intel UHD 630, device arrays | 45.1 | 6.0 | 4.6 |
+| **numba-vulkan**, llvmpipe (CPU), device arrays | 52.3 | 40.6 | 3.8 |
+| numba-cuda, NVIDIA TITAN X, device arrays | 8.5 | 0.26 | 0.20 |
 
 Reading the numbers:
 
@@ -313,11 +313,15 @@ Those workloads let every backend compile a function its own way.
 memory, barriers, atomics) on both GPU backends, with data on the device
 (milliseconds, NVIDIA TITAN X):
 
-| Kernel | numba-vulkan | numba-vulkan, `narrow="ints"` | numba-cuda |
+| Kernel | numba-vulkan | numba-vulkan, 64-bit integers | numba-cuda |
 | --- | ---: | ---: | ---: |
-| Sum of 16M float32 | 0.29 | 0.30 | 0.24 |
-| Histogram of 16M int32, 256 bins | 0.34 | 0.30 | 0.24 |
-| 1024² matrix product, 16×16 tiles | 2.45 | 1.70 | 1.61 |
+| Sum of 16M float32 | 0.26 | 0.34 | 0.21 |
+| Histogram of 16M int32, 256 bins | 0.36 | 0.30 | 0.22 |
+| 1024² matrix product, 16×16 tiles | 2.07 | 3.14 | 1.94 |
+
+Kernels compute with 32-bit integers by default, as CUDA C code does with
+`int`; `narrow=False` gives Numba's 64-bit integers. `float64` stays 64-bit
+where the device supports it, with a warning that it is slow.
 
 The [documentation](docs/source/benchmarks.md) has the full tables, including
 compile times and the software versions used.

@@ -271,12 +271,14 @@ def test_launch_limits(device):
 
 def test_64_bit_integer_atomics(run):
     values = np.arange(N, dtype=np.int32)
-    with pytest.raises(errors.NumbaError, match="does not offer 64-bit integer"):
-        histogram.forall(N)(values, np.zeros(13, dtype=np.int64))
-    # narrowed to 32 bits, they work
+    # integers are 32-bit in kernels by default, so int64 counters work
     bins = np.zeros(13, dtype=np.int64)
-    run(nv.jit(narrow=True)(histogram.py_func), N, values, bins)
+    run(nv.jit(narrow="ints")(histogram.py_func), N, values, bins)
     np.testing.assert_array_equal(bins, np.bincount(values % 13, minlength=13))
+    # with 64-bit integers, LLVM's SPIR-V backend cannot emit them
+    exact = nv.jit(narrow=False)(histogram.py_func)
+    with pytest.raises(errors.NumbaError, match="does not offer 64-bit integer"):
+        exact.forall(N)(values, np.zeros(13, dtype=np.int64))
 
 
 def test_float_add_uses_the_native_instruction_where_available(device):

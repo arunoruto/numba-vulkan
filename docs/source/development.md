@@ -89,6 +89,8 @@ Useful environment variables:
 | `NUMBA_VULKAN_CACHE=0` | do not read or write compiled kernels on disk; the test suite sets this, so that it tests the compiler |
 | `NUMBA_VULKAN_POOL_MB=1024` | size of the per-device pool of released buffers |
 | `NUMBA_BOUNDSCHECK=1` | check array indices in all kernels |
+| `NUMBA_VULKAN_INT64=1` | compute with 64-bit integers in kernels, as Numba does elsewhere (slower) |
+| `NUMBA_VULKAN_WARNINGS=0` | no warnings about float64 being slow or unavailable |
 | `NUMBA_VULKAN_NARROW=1` | compile every kernel without 64-bit types, as for a device that lacks them; the test suite then fails only where it expects float64 accuracy or a narrowing warning |
 | `NUMBA_DUMP_IR=1`, `NUMBA_DUMP_LLVM=1` | Numba's own dumps of its IR and of unoptimised LLVM IR |
 

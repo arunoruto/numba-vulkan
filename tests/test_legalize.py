@@ -230,3 +230,19 @@ define float @f(float %a, float %b) {
 """
     assert legalize.legalize(text) == text
     assert np.isclose(compile_ir(text, "float", ["float", "float"])(1.5, 2.0), 3.5)
+
+
+@pytest.mark.parametrize("kind", ["u", "s"])
+@pytest.mark.parametrize("op", ["add", "sub"])
+def test_saturating_arithmetic(kind, op):
+    text = f"""
+declare i32 @llvm.{kind}{op}.sat.i32(i32, i32)
+define i32 @f(i32 %a, i32 %b) {{
+  %r = call i32 @llvm.{kind}{op}.sat.i32(i32 %a, i32 %b)
+  ret i32 %r
+}}
+"""
+    plain, rewritten = both(text, "i32", ["i32", "i32"], legalize.expand_saturating)
+    for a in INTS32:
+        for b in INTS32:
+            assert rewritten(a, b) == plain(a, b), (kind, op, a, b)

@@ -245,30 +245,41 @@ def kernel(x, out):
         # out[i] = 0.5 * math.sin(x[i])     # promotes to float64
 ```
 
-### Devices without 64-bit types
+### Integer and float width
 
-`float64` and `int64` are optional in Vulkan; many mobile GPUs and Apple
-devices lack one or both. Since Numba uses `int64` for every index, almost
-no kernel would run there as written. On such a device a kernel is
-therefore *narrowed*: every `float64` in it becomes a `float32` and every
-`int64` an `int32`, including the elements of arrays, which are converted
-on the host.
+**Integers are 32-bit inside kernels.** Numba computes with `int64`
+wherever it can, including every index and loop counter, but GPUs execute
+64-bit integer arithmetic as several 32-bit instructions; index-heavy
+kernels run up to 1.5× slower with it. Kernels therefore compute with
+32-bit integers, as CUDA C code using `int` does. `int64` arrays and
+scalars are converted on the host, and a value that does not fit raises
+`OverflowError` rather than wrapping around. Arithmetic inside the kernel
+wraps at 2³¹. For exact 64-bit integers, use `@nv.jit(narrow=False)` or set
+`NUMBA_VULKAN_INT64=1`.
+
+**Floats keep their width** where the device supports `float64`. Most GPUs
+run `float64` at a small fraction of the `float32` speed (1/32 on the
+TITAN X), so a {py:class}`~numba_vulkan.errors.VulkanPerformanceWarning`
+points out kernels that compute in `float64`, once per kernel. Often the
+cause is a Python float literal: `x[i] * 0.1` is a `float64` product even
+for a `float32` array; `x[i] * np.float32(0.1)` is not.
+
+**Devices without `float64`** (many mobile GPUs, Apple devices) get kernels
+computed in `float32`, with a
+{py:class}`~numba_vulkan.errors.VulkanPrecisionWarning`. Results then agree
+with the 64-bit ones to `float32` rounding. Code that cannot work in 32
+bits is rejected at compile time: integer constants beyond 32 bits, shifts
+by 32 or more, tricks on the bit pattern of a `float64`.
 
 ```python
-@nv.jit                 # narrows where the device requires it (default)
-@nv.jit(narrow=True)    # always narrow: no optional features needed
-@nv.jit(narrow=False)   # never: fail on devices without 64-bit types
+@nv.jit                    # 32-bit integers; float64 where available (default)
+@nv.jit(narrow=True)       # 32-bit floats as well: no optional features needed
+@nv.jit(narrow="floats")   # 32-bit floats, 64-bit integers
+@nv.jit(narrow=False)      # exact: 64-bit integers and floats; fails without them
 ```
 
-When narrowing changes float arithmetic, a
-{py:class}`~numba_vulkan.errors.VulkanPrecisionWarning` says so once per
-kernel; `narrow=True` accepts it silently. Results then agree with the
-64-bit ones to `float32` rounding, and integers wrap at 32 bits. Code that
-cannot work in 32 bits is rejected at compile time: integer constants
-beyond 32 bits, shifts by 32 or more, tricks on the bit pattern of a
-`float64`. `narrow=True` is also worth trying on desktop GPUs, where
-`float64` is slow. The environment variable `NUMBA_VULKAN_NARROW=1` makes
-it the default.
+Both warnings are Python warnings: `NUMBA_VULKAN_WARNINGS=0` turns them off,
+as does `warnings.filterwarnings("ignore", category=nv.VulkanPerformanceWarning)`.
 
 ### Exactness
 
@@ -326,29 +337,13 @@ workgroup, so it must not sit under a condition that differs between them.
 
 The atomics `add`, `sub`, `max`, `min`, `exch`, `and_`, `or_`, `xor` and
 `cas` work on elements of array arguments and shared arrays, return the
-previous value, and use relaxed ordering, as in CUDA. Integer atomics need
-`int32` or `uint32` elements: LLVM's SPIR-V backend does not offer 64-bit
-integer atomics for Vulkan, so `int64` arrays are rejected unless the
-kernel is narrowed. `float32` additions use the device's native
+previous value, and use relaxed ordering, as in CUDA. Integer atomics work
+on 32-bit elements; `int64` arrays work as well, because kernels compute
+with 32-bit integers. With `narrow=False` they are rejected: LLVM's SPIR-V
+backend does not offer 64-bit integer atomics for Vulkan. `float32` additions use the device's native
 instruction where it has one (`VK_EXT_shader_atomic_float`) and a
 compare-and-swap loop otherwise; float `max` and `min` always use the loop.
 `float64` atomics are not available.
-
-### 32-bit integers for speed
-
-Numba computes with `int64` wherever it can, including every
-`local_id(0) * 16 + j`. GPUs execute 64-bit integer arithmetic as several
-32-bit instructions, so index-heavy kernels such as tiled matrix products
-run up to 1.5× slower than they need to. `@nv.jit(narrow="ints")` compiles
-all integers as 32-bit, which is what CUDA C programmers would write:
-
-```python
-@nv.jit(narrow="ints")
-def matmul(a, b, c):
-    ...
-```
-
-Integers then wrap at 2³¹, and `int64` arrays are converted on the host.
 
 ## Ufuncs: `vectorize` and `guvectorize`
 
