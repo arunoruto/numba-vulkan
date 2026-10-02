@@ -224,9 +224,12 @@ define i32 @main(i1 %c, float %f, i32 %i) {
 ```
 
 The same modules translate with nixpkgs' `llc` of LLVM 22.1.8 on the same
-machine, and the test suite passes with llvmlite's Linux wheel. The crash is in a child process
-(see {doc}`development`) and is reported as "the backend was killed by
-SIGSEGV".
+machine. llvmlite's Linux x86-64 wheel contains the same LLVM 22.1.0 and
+translates them, so the version alone does not explain the crash; the arm64
+build is the more likely culprit. On Linux the test suite also passes with
+`NUMBA_VULKAN_LLC` set to that `llc`, on all three devices. The crash is in
+a child process (see {doc}`development`) and is reported as "the backend
+was killed by SIGSEGV".
 
 **Workaround:** set `NUMBA_VULKAN_LLC` to an `llc` of LLVM 22; every module
 is then translated by it instead. The devenv shell does this on macOS.
