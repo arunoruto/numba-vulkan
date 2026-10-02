@@ -1,0 +1,1050 @@
+{
+ "schema": 1,
+ "user": "arunoruto",
+ "machine": "desktop",
+ "date": "2026-10-02T16:33:21Z",
+ "git": {
+  "commit": "fa6edcee6025bf58a77820a58b3246d482e79493",
+  "branch": "bench/collect",
+  "dirty": false
+ },
+ "software": {
+  "python": "3.14.7",
+  "os": "Linux 6.18.38 (NixOS 26.05 (Yarara))",
+  "numba-vulkan": "0.0.1",
+  "numba": "0.68.0",
+  "llvmlite": "0.50.0",
+  "numpy": "2.4.6",
+  "numba-cuda": "0.30.4",
+  "vulkan": "1.3.275.1",
+  "libclc": "22.1.8 (nix)"
+ },
+ "hardware": {
+  "cpu": {
+   "model": "Intel(R) Core(TM) i9-9900K CPU @ 3.60GHz",
+   "threads": 16
+  },
+  "memory_gib": 62.5,
+  "vulkan": [
+   {
+    "name": "NVIDIA TITAN X (Pascal)",
+    "kind": "discrete",
+    "vendor_id": "10de",
+    "device_id": "1b00",
+    "driver": "NVIDIA",
+    "driver_info": "580.173.02",
+    "driver_version": "912b4080",
+    "api_version": "1.4.312",
+    "float64": true,
+    "float32_atomic_add": true,
+    "workarounds": []
+   },
+   {
+    "name": "Intel(R) UHD Graphics 630 (CFL GT2)",
+    "kind": "integrated",
+    "vendor_id": "8086",
+    "device_id": "3e98",
+    "driver": "Intel open-source Mesa driver",
+    "driver_info": "Mesa 26.1.8",
+    "driver_version": "6801008",
+    "api_version": "1.4.354",
+    "float64": true,
+    "float32_atomic_add": false,
+    "workarounds": []
+   },
+   {
+    "name": "llvmpipe (LLVM 21.1.8, 256 bits)",
+    "kind": "cpu",
+    "vendor_id": "10005",
+    "device_id": "0000",
+    "driver": "llvmpipe",
+    "driver_info": "Mesa 26.1.8 (LLVM 21.1.8)",
+    "driver_version": "6801008",
+    "api_version": "1.4.354",
+    "float64": true,
+    "float32_atomic_add": true,
+    "workarounds": [
+     "soft_fma",
+     "soft_rounding"
+    ]
+   }
+  ],
+  "cuda": [
+   {
+    "name": "NVIDIA TITAN X (Pascal)",
+    "compute_capability": "6.1",
+    "driver_cuda_version": "13.0"
+   }
+  ]
+ },
+ "settings": {
+  "apps": {
+   "size": 2048,
+   "maxiter": 200,
+   "repeat": 5
+  },
+  "kernels": {
+   "size": 16777216,
+   "matrix": 1024,
+   "repeat": 10
+  },
+  "quick": false,
+  "kernel_cache": false
+ },
+ "results": [
+  {
+   "suite": "apps",
+   "workload": "mandelbrot",
+   "description": "2048x2048, 200 iterations",
+   "backend": "cpu",
+   "device": null,
+   "variant": "1 thread",
+   "label": "numba cpu (1 thread)",
+   "first_s": 0.728912808932364,
+   "samples_s": [
+    0.4520981600508094,
+    0.45546106342226267,
+    0.4467509249225259,
+    0.4513836093246937,
+    0.4435137202963233
+   ],
+   "check": "100.00% equal"
+  },
+  {
+   "suite": "apps",
+   "workload": "mandelbrot",
+   "description": "2048x2048, 200 iterations",
+   "backend": "cpu",
+   "device": null,
+   "variant": "parallel",
+   "label": "numba cpu (parallel)",
+   "first_s": 0.45452751498669386,
+   "samples_s": [
+    0.09033292811363935,
+    0.09228549152612686,
+    0.09169844072312117,
+    0.08880921546369791,
+    0.08956985827535391
+   ],
+   "check": "100.00% equal"
+  },
+  {
+   "suite": "apps",
+   "workload": "mandelbrot",
+   "description": "2048x2048, 200 iterations",
+   "backend": "vulkan",
+   "device": "NVIDIA TITAN X (Pascal)",
+   "variant": "numpy arrays",
+   "label": "vulkan: NVIDIA TITAN X (Pascal)",
+   "first_s": 0.229478033259511,
+   "samples_s": [
+    0.013860811479389668,
+    0.013464121147990227,
+    0.013509375974535942,
+    0.013759929686784744,
+    0.013383371755480766
+   ],
+   "check": "100.00% equal"
+  },
+  {
+   "suite": "apps",
+   "workload": "mandelbrot",
+   "description": "2048x2048, 200 iterations",
+   "backend": "vulkan",
+   "device": "Intel(R) UHD Graphics 630 (CFL GT2)",
+   "variant": "numpy arrays",
+   "label": "vulkan: Intel(R) UHD Graphics 630 (CFL GT2)",
+   "first_s": 0.21551663614809513,
+   "samples_s": [
+    0.04369231220334768,
+    0.04306517820805311,
+    0.04370620846748352,
+    0.0430190060287714,
+    0.04410239402204752
+   ],
+   "check": "100.00% equal"
+  },
+  {
+   "suite": "apps",
+   "workload": "mandelbrot",
+   "description": "2048x2048, 200 iterations",
+   "backend": "vulkan",
+   "device": "llvmpipe (LLVM 21.1.8, 256 bits)",
+   "variant": "numpy arrays",
+   "label": "vulkan: llvmpipe (LLVM 21.1.8, 256 bits)",
+   "first_s": 0.15947648137807846,
+   "samples_s": [
+    0.053679694421589375,
+    0.05710230581462383,
+    0.05524390749633312,
+    0.04832307528704405,
+    0.05067141726613045
+   ],
+   "check": "100.00% equal"
+  },
+  {
+   "suite": "apps",
+   "workload": "mandelbrot",
+   "description": "2048x2048, 200 iterations",
+   "backend": "cuda",
+   "device": "NVIDIA TITAN X (Pascal)",
+   "variant": "numpy arrays",
+   "label": "numba-cuda: NVIDIA TITAN X (Pascal)",
+   "first_s": 0.6399372536689043,
+   "samples_s": [
+    0.012186308391392231,
+    0.01208839938044548,
+    0.011977998539805412,
+    0.011977997608482838,
+    0.01201491430401802
+   ],
+   "check": "100.00% equal"
+  },
+  {
+   "suite": "apps",
+   "workload": "mandelbrot",
+   "description": "2048x2048, 200 iterations",
+   "backend": "vulkan",
+   "device": "NVIDIA TITAN X (Pascal)",
+   "variant": "device arrays",
+   "label": "vulkan: NVIDIA TITAN X (Pascal), device arrays",
+   "first_s": 0.01059909537434578,
+   "samples_s": [
+    0.0100779440253973,
+    0.010090921074151993,
+    0.010075181722640991,
+    0.01017676293849945,
+    0.010122009553015232
+   ],
+   "check": "100.00% equal"
+  },
+  {
+   "suite": "apps",
+   "workload": "mandelbrot",
+   "description": "2048x2048, 200 iterations",
+   "backend": "vulkan",
+   "device": "Intel(R) UHD Graphics 630 (CFL GT2)",
+   "variant": "device arrays",
+   "label": "vulkan: Intel(R) UHD Graphics 630 (CFL GT2), device arrays",
+   "first_s": 0.042439671233296394,
+   "samples_s": [
+    0.041896753013134,
+    0.04204285051673651,
+    0.041991716250777245,
+    0.04086513537913561,
+    0.04108809493482113
+   ],
+   "check": "100.00% equal"
+  },
+  {
+   "suite": "apps",
+   "workload": "mandelbrot",
+   "description": "2048x2048, 200 iterations",
+   "backend": "vulkan",
+   "device": "llvmpipe (LLVM 21.1.8, 256 bits)",
+   "variant": "device arrays",
+   "label": "vulkan: llvmpipe (LLVM 21.1.8, 256 bits), device arrays",
+   "first_s": 0.04426954314112663,
+   "samples_s": [
+    0.05030046496540308,
+    0.056092752143740654,
+    0.050428371876478195,
+    0.042022489942610264,
+    0.05596351809799671
+   ],
+   "check": "100.00% equal"
+  },
+  {
+   "suite": "apps",
+   "workload": "mandelbrot",
+   "description": "2048x2048, 200 iterations",
+   "backend": "cuda",
+   "device": "NVIDIA TITAN X (Pascal)",
+   "variant": "device arrays",
+   "label": "numba-cuda: NVIDIA TITAN X (Pascal), device arrays",
+   "first_s": 0.0082760164514184,
+   "samples_s": [
+    0.008050495758652687,
+    0.008052180521190166,
+    0.008053554221987724,
+    0.008054252713918686,
+    0.008042749017477036
+   ],
+   "check": "100.00% equal"
+  },
+  {
+   "suite": "apps",
+   "workload": "option",
+   "description": "4,194,304 options",
+   "backend": "cpu",
+   "device": null,
+   "variant": "1 thread",
+   "label": "numba cpu (1 thread)",
+   "first_s": 0.24218347668647766,
+   "samples_s": [
+    0.1045147180557251,
+    0.10622439160943031,
+    0.10556019376963377,
+    0.10208579804748297,
+    0.10430228337645531
+   ],
+   "check": "max err 0.0e+00"
+  },
+  {
+   "suite": "apps",
+   "workload": "option",
+   "description": "4,194,304 options",
+   "backend": "cpu",
+   "device": null,
+   "variant": "parallel",
+   "label": "numba cpu (parallel)",
+   "first_s": 0.3166599990800023,
+   "samples_s": [
+    0.021101572550833225,
+    0.017998887225985527,
+    0.02400373201817274,
+    0.018115402199327946,
+    0.02079742308706045
+   ],
+   "check": "max err 0.0e+00"
+  },
+  {
+   "suite": "apps",
+   "workload": "option",
+   "description": "4,194,304 options",
+   "backend": "vulkan",
+   "device": "NVIDIA TITAN X (Pascal)",
+   "variant": "numpy arrays",
+   "label": "vulkan: NVIDIA TITAN X (Pascal)",
+   "first_s": 0.20947672426700592,
+   "samples_s": [
+    0.009824270382523537,
+    0.009556981734931469,
+    0.010858865454792976,
+    0.010204266756772995,
+    0.010324249044060707
+   ],
+   "check": "max err 3.4e-07"
+  },
+  {
+   "suite": "apps",
+   "workload": "option",
+   "description": "4,194,304 options",
+   "backend": "vulkan",
+   "device": "Intel(R) UHD Graphics 630 (CFL GT2)",
+   "variant": "numpy arrays",
+   "label": "vulkan: Intel(R) UHD Graphics 630 (CFL GT2)",
+   "first_s": 0.20429840218275785,
+   "samples_s": [
+    0.011316194199025631,
+    0.011453495360910892,
+    0.012169266119599342,
+    0.013026226311922073,
+    0.014770012348890305
+   ],
+   "check": "max err 3.4e-07"
+  },
+  {
+   "suite": "apps",
+   "workload": "option",
+   "description": "4,194,304 options",
+   "backend": "vulkan",
+   "device": "llvmpipe (LLVM 21.1.8, 256 bits)",
+   "variant": "numpy arrays",
+   "label": "vulkan: llvmpipe (LLVM 21.1.8, 256 bits)",
+   "first_s": 0.251545581035316,
+   "samples_s": [
+    0.04475603438913822,
+    0.04222317039966583,
+    0.04537931736558676,
+    0.038743309676647186,
+    0.037196699529886246
+   ],
+   "check": "max err 2.5e-07"
+  },
+  {
+   "suite": "apps",
+   "workload": "option",
+   "description": "4,194,304 options",
+   "backend": "cuda",
+   "device": "NVIDIA TITAN X (Pascal)",
+   "variant": "numpy arrays",
+   "label": "numba-cuda: NVIDIA TITAN X (Pascal)",
+   "first_s": 0.08841277100145817,
+   "samples_s": [
+    0.012484599836170673,
+    0.013438311405479908,
+    0.013155526481568813,
+    0.01302050519734621,
+    0.01257302612066269
+   ],
+   "check": "max err 2.9e-07"
+  },
+  {
+   "suite": "apps",
+   "workload": "option",
+   "description": "4,194,304 options",
+   "backend": "vulkan",
+   "device": "NVIDIA TITAN X (Pascal)",
+   "variant": "device arrays",
+   "label": "vulkan: NVIDIA TITAN X (Pascal), device arrays",
+   "first_s": 0.0009626308456063271,
+   "samples_s": [
+    0.0004256563261151314,
+    0.0004747668281197548,
+    0.0004257475957274437,
+    0.0004252055659890175,
+    0.0004251524806022644
+   ],
+   "check": "max err 3.4e-07"
+  },
+  {
+   "suite": "apps",
+   "workload": "option",
+   "description": "4,194,304 options",
+   "backend": "vulkan",
+   "device": "Intel(R) UHD Graphics 630 (CFL GT2)",
+   "variant": "device arrays",
+   "label": "vulkan: Intel(R) UHD Graphics 630 (CFL GT2), device arrays",
+   "first_s": 0.008065038360655308,
+   "samples_s": [
+    0.006890201009809971,
+    0.006459277123212814,
+    0.0060203904286026955,
+    0.0060457270592451096,
+    0.005857652984559536
+   ],
+   "check": "max err 3.4e-07"
+  },
+  {
+   "suite": "apps",
+   "workload": "option",
+   "description": "4,194,304 options",
+   "backend": "vulkan",
+   "device": "llvmpipe (LLVM 21.1.8, 256 bits)",
+   "variant": "device arrays",
+   "label": "vulkan: llvmpipe (LLVM 21.1.8, 256 bits), device arrays",
+   "first_s": 0.030351183377206326,
+   "samples_s": [
+    0.03447637986391783,
+    0.037034858018159866,
+    0.037626554258167744,
+    0.03965623117983341,
+    0.037180797196924686
+   ],
+   "check": "max err 2.5e-07"
+  },
+  {
+   "suite": "apps",
+   "workload": "option",
+   "description": "4,194,304 options",
+   "backend": "cuda",
+   "device": "NVIDIA TITAN X (Pascal)",
+   "variant": "device arrays",
+   "label": "numba-cuda: NVIDIA TITAN X (Pascal), device arrays",
+   "first_s": 0.0010012788698077202,
+   "samples_s": [
+    0.0002927146852016449,
+    0.0003025270998477936,
+    0.0002846159040927887,
+    0.0002779494971036911,
+    0.00029581598937511444
+   ],
+   "check": "max err 2.9e-07"
+  },
+  {
+   "suite": "apps",
+   "workload": "saxpy",
+   "description": "4,194,304 elements",
+   "backend": "cpu",
+   "device": null,
+   "variant": "1 thread",
+   "label": "numba cpu (1 thread)",
+   "first_s": 0.10638210829347372,
+   "samples_s": [
+    0.0018773935735225677,
+    0.001839066855609417,
+    0.0018681082874536514,
+    0.001847943291068077,
+    0.0019531380385160446
+   ],
+   "check": "max err 0.0e+00"
+  },
+  {
+   "suite": "apps",
+   "workload": "saxpy",
+   "description": "4,194,304 elements",
+   "backend": "cpu",
+   "device": null,
+   "variant": "parallel",
+   "label": "numba cpu (parallel)",
+   "first_s": 0.25405092164874077,
+   "samples_s": [
+    0.006436202675104141,
+    0.005024435929954052,
+    0.006288493983447552,
+    0.0036635976284742355,
+    0.008012933656573296
+   ],
+   "check": "max err 0.0e+00"
+  },
+  {
+   "suite": "apps",
+   "workload": "saxpy",
+   "description": "4,194,304 elements",
+   "backend": "vulkan",
+   "device": "NVIDIA TITAN X (Pascal)",
+   "variant": "numpy arrays",
+   "label": "vulkan: NVIDIA TITAN X (Pascal)",
+   "first_s": 0.041605422273278236,
+   "samples_s": [
+    0.007998209446668625,
+    0.007287180051207542,
+    0.007203614339232445,
+    0.007061491720378399,
+    0.008276871405541897
+   ],
+   "check": "max err 0.0e+00"
+  },
+  {
+   "suite": "apps",
+   "workload": "saxpy",
+   "description": "4,194,304 elements",
+   "backend": "vulkan",
+   "device": "Intel(R) UHD Graphics 630 (CFL GT2)",
+   "variant": "numpy arrays",
+   "label": "vulkan: Intel(R) UHD Graphics 630 (CFL GT2)",
+   "first_s": 0.05627691559493542,
+   "samples_s": [
+    0.008453017100691795,
+    0.009631226770579815,
+    0.009662187658250332,
+    0.012773741967976093,
+    0.009653357788920403
+   ],
+   "check": "max err 0.0e+00"
+  },
+  {
+   "suite": "apps",
+   "workload": "saxpy",
+   "description": "4,194,304 elements",
+   "backend": "vulkan",
+   "device": "llvmpipe (LLVM 21.1.8, 256 bits)",
+   "variant": "numpy arrays",
+   "label": "vulkan: llvmpipe (LLVM 21.1.8, 256 bits)",
+   "first_s": 0.04385583009570837,
+   "samples_s": [
+    0.008346259593963623,
+    0.008414764888584614,
+    0.007973476313054562,
+    0.009123868308961391,
+    0.008414841257035732
+   ],
+   "check": "max err 0.0e+00"
+  },
+  {
+   "suite": "apps",
+   "workload": "saxpy",
+   "description": "4,194,304 elements",
+   "backend": "cuda",
+   "device": "NVIDIA TITAN X (Pascal)",
+   "variant": "numpy arrays",
+   "label": "numba-cuda: NVIDIA TITAN X (Pascal)",
+   "first_s": 0.05602172948420048,
+   "samples_s": [
+    0.014717208221554756,
+    0.012711217626929283,
+    0.010701409541070461,
+    0.010053940117359161,
+    0.009574277326464653
+   ],
+   "check": "max err 6.8e-08"
+  },
+  {
+   "suite": "apps",
+   "workload": "saxpy",
+   "description": "4,194,304 elements",
+   "backend": "vulkan",
+   "device": "NVIDIA TITAN X (Pascal)",
+   "variant": "device arrays",
+   "label": "vulkan: NVIDIA TITAN X (Pascal), device arrays",
+   "first_s": 0.0007934607565402985,
+   "samples_s": [
+    0.0003389958292245865,
+    0.0003831293433904648,
+    0.0003295624628663063,
+    0.0003100372850894928,
+    0.00036882050335407257
+   ],
+   "check": "max err 0.0e+00"
+  },
+  {
+   "suite": "apps",
+   "workload": "saxpy",
+   "description": "4,194,304 elements",
+   "backend": "vulkan",
+   "device": "Intel(R) UHD Graphics 630 (CFL GT2)",
+   "variant": "device arrays",
+   "label": "vulkan: Intel(R) UHD Graphics 630 (CFL GT2), device arrays",
+   "first_s": 0.00700195599347353,
+   "samples_s": [
+    0.005094324238598347,
+    0.004849673248827457,
+    0.004993250593543053,
+    0.004968021996319294,
+    0.005371554754674435
+   ],
+   "check": "max err 0.0e+00"
+  },
+  {
+   "suite": "apps",
+   "workload": "saxpy",
+   "description": "4,194,304 elements",
+   "backend": "vulkan",
+   "device": "llvmpipe (LLVM 21.1.8, 256 bits)",
+   "variant": "device arrays",
+   "label": "vulkan: llvmpipe (LLVM 21.1.8, 256 bits), device arrays",
+   "first_s": 0.004199706017971039,
+   "samples_s": [
+    0.003756023943424225,
+    0.0036724861711263657,
+    0.0035981759428977966,
+    0.0036179646849632263,
+    0.003620283678174019
+   ],
+   "check": "max err 0.0e+00"
+  },
+  {
+   "suite": "apps",
+   "workload": "saxpy",
+   "description": "4,194,304 elements",
+   "backend": "cuda",
+   "device": "NVIDIA TITAN X (Pascal)",
+   "variant": "device arrays",
+   "label": "numba-cuda: NVIDIA TITAN X (Pascal), device arrays",
+   "first_s": 0.0004179747775197029,
+   "samples_s": [
+    0.00022980943322181702,
+    0.00022336561232805252,
+    0.00022012367844581604,
+    0.0002711210399866104,
+    0.00021914951503276825
+   ],
+   "check": "max err 6.8e-08"
+  },
+  {
+   "suite": "kernels",
+   "workload": "reduce",
+   "description": "16,777,216 float32 values",
+   "backend": "cpu",
+   "device": null,
+   "variant": "parallel",
+   "label": "numba cpu (parallel)",
+   "first_s": null,
+   "samples_s": [
+    0.010059644468128681,
+    0.003940979018807411,
+    0.005437033250927925,
+    0.0065444158390164375,
+    0.006055079400539398,
+    0.005994574166834354,
+    0.006023547612130642,
+    0.010105016641318798,
+    0.005887885577976704,
+    0.008073435164988041
+   ],
+   "check": "rel. err 9.9e-06"
+  },
+  {
+   "suite": "kernels",
+   "workload": "histogram",
+   "description": "16,777,216 int32 values into 256 bins",
+   "backend": "cpu",
+   "device": null,
+   "variant": "1 thread",
+   "label": "numba cpu (1 thread)",
+   "first_s": null,
+   "samples_s": [
+    0.007481884211301804,
+    0.007780511863529682,
+    0.009327015839517117,
+    0.007992626167833805,
+    0.008705103769898415,
+    0.007474299520254135,
+    0.007583293132483959,
+    0.008313637226819992,
+    0.007741255685687065,
+    0.008030099794268608
+   ],
+   "check": "exact"
+  },
+  {
+   "suite": "kernels",
+   "workload": "matmul",
+   "description": "1024x1024 float32",
+   "backend": "cpu",
+   "device": null,
+   "variant": "parallel",
+   "label": "numba cpu (parallel)",
+   "first_s": null,
+   "samples_s": [
+    0.03530011046677828,
+    0.03830804210156202,
+    0.03413952048867941,
+    0.022250239737331867,
+    0.023534342646598816,
+    0.023646189831197262,
+    0.020149514079093933,
+    0.02087007649242878,
+    0.02062086481601,
+    0.022171649150550365
+   ],
+   "check": "max rel. err 1.9e-06"
+  },
+  {
+   "suite": "kernels",
+   "workload": "reduce",
+   "description": "16,777,216 float32 values",
+   "backend": "vulkan",
+   "device": "NVIDIA TITAN X (Pascal)",
+   "variant": "32-bit integers",
+   "label": "vulkan: NVIDIA TITAN X (Pascal)",
+   "first_s": null,
+   "samples_s": [
+    0.00039957184344530106,
+    0.0003298874944448471,
+    0.0003407550975680351,
+    0.00035683438181877136,
+    0.00036372430622577667,
+    0.0003865724429488182,
+    0.00040671415627002716,
+    0.00036103837192058563,
+    0.00036404747515916824,
+    0.00037884898483753204
+   ],
+   "check": "rel. err 1.1e-07"
+  },
+  {
+   "suite": "kernels",
+   "workload": "histogram",
+   "description": "16,777,216 int32 values into 256 bins",
+   "backend": "vulkan",
+   "device": "NVIDIA TITAN X (Pascal)",
+   "variant": "32-bit integers",
+   "label": "vulkan: NVIDIA TITAN X (Pascal)",
+   "first_s": null,
+   "samples_s": [
+    0.0003985045477747917,
+    0.00037513766437768936,
+    0.00036756694316864014,
+    0.00036934204399585724,
+    0.0003920365124940872,
+    0.00038451794534921646,
+    0.00036994460970163345,
+    0.0003701029345393181,
+    0.0003741420805454254,
+    0.00036143790930509567
+   ],
+   "check": "exact"
+  },
+  {
+   "suite": "kernels",
+   "workload": "matmul",
+   "description": "1024x1024 float32",
+   "backend": "vulkan",
+   "device": "NVIDIA TITAN X (Pascal)",
+   "variant": "32-bit integers",
+   "label": "vulkan: NVIDIA TITAN X (Pascal)",
+   "first_s": null,
+   "samples_s": [
+    0.0018810825422406197,
+    0.0018741758540272713,
+    0.0019486136734485626,
+    0.0019162539392709732,
+    0.0018719621002674103,
+    0.0019078552722930908,
+    0.0019090250134468079,
+    0.001847725361585617,
+    0.0019647683948278427,
+    0.0018720952793955803
+   ],
+   "check": "max rel. err 1.9e-06"
+  },
+  {
+   "suite": "kernels",
+   "workload": "reduce",
+   "description": "16,777,216 float32 values",
+   "backend": "vulkan",
+   "device": "NVIDIA TITAN X (Pascal)",
+   "variant": "64-bit integers",
+   "label": "vulkan: NVIDIA TITAN X (Pascal), 64-bit integers",
+   "first_s": null,
+   "samples_s": [
+    0.00039596669375896454,
+    0.00036774948239326477,
+    0.0003162818029522896,
+    0.00037537049502134323,
+    0.0003956994041800499,
+    0.00035093072801828384,
+    0.00038090813905000687,
+    0.00034681614488363266,
+    0.0003566611558198929,
+    0.0003525586798787117
+   ],
+   "check": "rel. err 2.9e-07"
+  },
+  {
+   "suite": "kernels",
+   "workload": "histogram",
+   "description": "16,777,216 int32 values into 256 bins",
+   "backend": "vulkan",
+   "device": "NVIDIA TITAN X (Pascal)",
+   "variant": "64-bit integers",
+   "label": "vulkan: NVIDIA TITAN X (Pascal), 64-bit integers",
+   "first_s": null,
+   "samples_s": [
+    0.0004267524927854538,
+    0.00038689933717250824,
+    0.0003648437559604645,
+    0.00037504173815250397,
+    0.0004045143723487854,
+    0.00037188176065683365,
+    0.00037632230669260025,
+    0.00041882507503032684,
+    0.0003706756979227066,
+    0.00038088951259851456
+   ],
+   "check": "exact"
+  },
+  {
+   "suite": "kernels",
+   "workload": "matmul",
+   "description": "1024x1024 float32",
+   "backend": "vulkan",
+   "device": "NVIDIA TITAN X (Pascal)",
+   "variant": "64-bit integers",
+   "label": "vulkan: NVIDIA TITAN X (Pascal), 64-bit integers",
+   "first_s": null,
+   "samples_s": [
+    0.0027777692303061485,
+    0.0027921637520194054,
+    0.0028086090460419655,
+    0.002774784341454506,
+    0.002767503261566162,
+    0.0027807923033833504,
+    0.002764277160167694,
+    0.0027723638340830803,
+    0.0027350373566150665,
+    0.0027532000094652176
+   ],
+   "check": "max rel. err 1.9e-06"
+  },
+  {
+   "suite": "kernels",
+   "workload": "reduce",
+   "description": "16,777,216 float32 values",
+   "backend": "vulkan",
+   "device": "Intel(R) UHD Graphics 630 (CFL GT2)",
+   "variant": "32-bit integers",
+   "label": "vulkan: Intel(R) UHD Graphics 630 (CFL GT2)",
+   "first_s": null,
+   "samples_s": [
+    0.0034324415028095245,
+    0.003515586256980896,
+    0.0040178680792450905,
+    0.003530680201947689,
+    0.0034414036199450493,
+    0.0034245848655700684,
+    0.003477710299193859,
+    0.0034178420901298523,
+    0.003466515801846981,
+    0.003404003567993641
+   ],
+   "check": "rel. err 5.2e-08"
+  },
+  {
+   "suite": "kernels",
+   "workload": "histogram",
+   "description": "16,777,216 int32 values into 256 bins",
+   "backend": "vulkan",
+   "device": "Intel(R) UHD Graphics 630 (CFL GT2)",
+   "variant": "32-bit integers",
+   "label": "vulkan: Intel(R) UHD Graphics 630 (CFL GT2)",
+   "first_s": null,
+   "samples_s": [
+    0.0039413804188370705,
+    0.0039459653198719025,
+    0.005944675765931606,
+    0.00427992083132267,
+    0.0038592228665947914,
+    0.0037736427038908005,
+    0.004011368378996849,
+    0.003756987862288952,
+    0.003721407614648342,
+    0.0044934628531336784
+   ],
+   "check": "exact"
+  },
+  {
+   "suite": "kernels",
+   "workload": "matmul",
+   "description": "1024x1024 float32",
+   "backend": "vulkan",
+   "device": "Intel(R) UHD Graphics 630 (CFL GT2)",
+   "variant": "32-bit integers",
+   "label": "vulkan: Intel(R) UHD Graphics 630 (CFL GT2)",
+   "first_s": null,
+   "samples_s": [
+    0.07634641416370869,
+    0.07537908479571342,
+    0.07258897740393877,
+    0.07249588239938021,
+    0.0730318808928132,
+    0.08220730815082788,
+    0.07718141097575426,
+    0.07507597841322422,
+    0.07427322957664728,
+    0.0757987117394805
+   ],
+   "check": "max rel. err 1.9e-06"
+  },
+  {
+   "suite": "kernels",
+   "workload": "reduce",
+   "description": "16,777,216 float32 values",
+   "backend": "vulkan",
+   "device": "Intel(R) UHD Graphics 630 (CFL GT2)",
+   "variant": "64-bit integers",
+   "label": "vulkan: Intel(R) UHD Graphics 630 (CFL GT2), 64-bit integers",
+   "first_s": null,
+   "samples_s": [
+    0.004539094865322113,
+    0.004398154094815254,
+    0.004512974061071873,
+    0.004516729153692722,
+    0.004384844563901424,
+    0.004331415519118309,
+    0.004283334128558636,
+    0.004427281208336353,
+    0.004529803059995174,
+    0.004524385556578636
+   ],
+   "check": "rel. err 5.2e-08"
+  },
+  {
+   "suite": "kernels",
+   "workload": "histogram",
+   "description": "16,777,216 int32 values into 256 bins",
+   "backend": "vulkan",
+   "device": "Intel(R) UHD Graphics 630 (CFL GT2)",
+   "variant": "64-bit integers",
+   "label": "vulkan: Intel(R) UHD Graphics 630 (CFL GT2), 64-bit integers",
+   "first_s": null,
+   "samples_s": [
+    0.005716544575989246,
+    0.005257495678961277,
+    0.0046182069927453995,
+    0.004493336193263531,
+    0.004494441673159599,
+    0.004440775141119957,
+    0.004534635692834854,
+    0.004451471380889416,
+    0.0043615614995360374,
+    0.004337245598435402
+   ],
+   "check": "exact"
+  },
+  {
+   "suite": "kernels",
+   "workload": "matmul",
+   "description": "1024x1024 float32",
+   "backend": "vulkan",
+   "device": "Intel(R) UHD Graphics 630 (CFL GT2)",
+   "variant": "64-bit integers",
+   "label": "vulkan: Intel(R) UHD Graphics 630 (CFL GT2), 64-bit integers",
+   "first_s": null,
+   "samples_s": [
+    0.09087356273084879,
+    0.09167932067066431,
+    0.09110949840396643,
+    0.09169677644968033,
+    0.09146805107593536,
+    0.09104487579315901,
+    0.09143622405827045,
+    0.09250194765627384,
+    0.09237701073288918,
+    0.09216057974845171
+   ],
+   "check": "max rel. err 1.9e-06"
+  },
+  {
+   "suite": "kernels",
+   "workload": "reduce",
+   "description": "16,777,216 float32 values",
+   "backend": "cuda",
+   "device": "NVIDIA TITAN X (Pascal)",
+   "variant": "device arrays",
+   "label": "numba-cuda: NVIDIA TITAN X (Pascal)",
+   "first_s": null,
+   "samples_s": [
+    0.0002495124936103821,
+    0.00023937784135341644,
+    0.00023750495165586472,
+    0.0002378476783633232,
+    0.0002355780452489853,
+    0.0002364153042435646,
+    0.00023630168288946152,
+    0.00023507513105869293,
+    0.00023546628654003143,
+    0.0002359570935368538
+   ],
+   "check": "rel. err 2.9e-07"
+  },
+  {
+   "suite": "kernels",
+   "workload": "histogram",
+   "description": "16,777,216 int32 values into 256 bins",
+   "backend": "cuda",
+   "device": "NVIDIA TITAN X (Pascal)",
+   "variant": "device arrays",
+   "label": "numba-cuda: NVIDIA TITAN X (Pascal)",
+   "first_s": null,
+   "samples_s": [
+    0.0002502407878637314,
+    0.00024430546909570694,
+    0.00024486053735017776,
+    0.0002444963902235031,
+    0.00024423934519290924,
+    0.00024249032139778137,
+    0.00024272222071886063,
+    0.00024213828146457672,
+    0.00024327915161848068,
+    0.0002421317622065544
+   ],
+   "check": "exact"
+  },
+  {
+   "suite": "kernels",
+   "workload": "matmul",
+   "description": "1024x1024 float32",
+   "backend": "cuda",
+   "device": "NVIDIA TITAN X (Pascal)",
+   "variant": "device arrays",
+   "label": "numba-cuda: NVIDIA TITAN X (Pascal)",
+   "first_s": null,
+   "samples_s": [
+    0.001767716370522976,
+    0.0017576664686203003,
+    0.0017506638541817665,
+    0.001767180860042572,
+    0.0017549805343151093,
+    0.0017564017325639725,
+    0.0017543118447065353,
+    0.001754574477672577,
+    0.001752563752233982,
+    0.0017520599067211151
+   ],
+   "check": "max rel. err 1.9e-06"
+  }
+ ]
+}

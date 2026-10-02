@@ -10,11 +10,10 @@ runtimes rather than different algorithms. Numba's CPU target (parallel)
 gives a reference point.
 
     uv run python benchmarks/kernels.py
-    uv run python benchmarks/kernels.py --markdown docs/source/_generated/kernel_benchmark_results.md
+    uv run python benchmarks/kernels.py --markdown kernels.md
 """
 
 import argparse
-import math
 import time
 
 import numpy as np
@@ -177,44 +176,94 @@ class Backend:
             nv.synchronize()
 
 
-def best_of(function, repeat, before=None):
-    """Best wall-clock time of `function` in seconds; `before` runs untimed."""
-    best = math.inf
+def timings(function, repeat, before=None):
+    """Wall-clock times of `repeat` calls of `function` in seconds.
+
+    `before` runs untimed before each call.
+    """
+    samples = []
     for _ in range(repeat):
         if before is not None:
             before()
         start = time.perf_counter()
         function()
-        best = min(best, time.perf_counter() - start)
-    return best
+        samples.append(time.perf_counter() - start)
+    return samples
 
 
-def run(opts):
+DESCRIPTIONS = {
+    "reduce": "{n:,} float32 values",
+    "histogram": "{n:,} int32 values into 256 bins",
+    "matmul": "{m}x{m} float32",
+}
+
+
+def run(size=1 << 24, matrix=1024, repeat=10, all_devices=False, verbose=True):
+    """Run the three kernels on every backend.
+
+    Parameters
+    ----------
+    size : int
+        Elements for the reduction and the histogram.
+    matrix : int
+        Edge of the square matrices.
+    repeat : int
+        Timed calls; every backend is called once before, untimed.
+    all_devices : bool
+        Include CPU Vulkan devices (llvmpipe).
+    verbose : bool
+        Print a line per measurement.
+
+    Returns
+    -------
+    list of dict
+        One record per workload and backend; see ``benchmarks/collect.py``
+        for the fields.
+    """
     rng = np.random.default_rng(0)
-    n = opts.size
+    n = size
     x = rng.random(n, dtype=np.float32)
     keys = rng.integers(0, 1 << 20, n, dtype=np.int32)
-    m = opts.matrix
+    m = matrix
     a = rng.random((m, m), dtype=np.float32)
     b = rng.random((m, m), dtype=np.float32)
     groups_1d = 1024
     records = []
 
-    def record(workload, backend, seconds, error):
-        records.append((workload, backend, seconds, error))
-        print(f"  {workload:<10} {backend:<52} {seconds * 1e3:9.3f} ms   {error}")
+    def record(workload, label, info, samples, error):
+        backend, device, variant = info
+        records.append(
+            dict(
+                suite="kernels",
+                workload=workload,
+                description=DESCRIPTIONS[workload].format(n=n, m=m),
+                backend=backend,
+                device=device,
+                variant=variant,
+                label=label,
+                first_s=None,
+                samples_s=samples,
+                check=error,
+            )
+        )
+        if verbose:
+            print(
+                f"  {workload:<10} {label:<52} {min(samples) * 1e3:9.3f} ms   {error}"
+            )
 
-    print(
-        f"reduce_sum: {n:,} float32 | histogram: {n:,} int32 into 256 bins | "
-        f"matmul: {m}x{m} float32"
-    )
+    if verbose:
+        print(
+            f"reduce_sum: {n:,} float32 | histogram: {n:,} int32 into 256 bins | "
+            f"matmul: {m}x{m} float32"
+        )
 
     # CPU
     total = cpu_sum(x)
     record(
         "reduce",
         "numba cpu (parallel)",
-        best_of(lambda: cpu_sum(x), opts.repeat),
+        ("cpu", None, "parallel"),
+        timings(lambda: cpu_sum(x), repeat),
         f"rel. err {abs(total - x.sum(dtype=np.float64)) / x.sum(dtype=np.float64):.1e}",
     )
     bins = np.zeros(256, dtype=np.int64)
@@ -223,7 +272,8 @@ def run(opts):
     record(
         "histogram",
         "numba cpu (1 thread)",
-        best_of(lambda: cpu_histogram(keys, bins), opts.repeat, lambda: bins.fill(0)),
+        ("cpu", None, "1 thread"),
+        timings(lambda: cpu_histogram(keys, bins), repeat, lambda: bins.fill(0)),
         "exact" if (bins == reference_bins).all() else "WRONG",
     )
     c = np.zeros((m, m), dtype=np.float32)
@@ -232,30 +282,46 @@ def run(opts):
     record(
         "matmul",
         "numba cpu (parallel)",
-        best_of(lambda: cpu_matmul(a, b, c), opts.repeat, lambda: c.fill(0)),
+        ("cpu", None, "parallel"),
+        timings(lambda: cpu_matmul(a, b, c), repeat, lambda: c.fill(0)),
         f"max rel. err {np.abs(c - reference_c).max() / np.abs(reference_c).max():.1e}",
     )
 
     backends = []
     for info in nv.list_devices():
-        if opts.all_devices or info.kind != "cpu":
+        if all_devices or info.kind != "cpu":
             nv.select_device(info.index)
-            backends.append((f"vulkan: {info.name}", Backend("vulkan"), info.index))
+            backends.append(
+                (
+                    f"vulkan: {info.name}",
+                    Backend("vulkan"),
+                    info.index,
+                    ("vulkan", info.name, "32-bit integers"),
+                )
+            )
             backends.append(
                 (
                     f"vulkan: {info.name}, 64-bit integers",
                     Backend("vulkan", narrow=False),
                     info.index,
+                    ("vulkan", info.name, "64-bit integers"),
                 )
             )
     if HAVE_CUDA:
         name = cuda.get_current_device().name
         name = name.decode() if isinstance(name, bytes) else name
-        backends.append((f"numba-cuda: {name}", Backend("cuda"), None))
+        backends.append(
+            (
+                f"numba-cuda: {name}",
+                Backend("cuda"),
+                None,
+                ("cuda", name, "device arrays"),
+            )
+        )
 
     zero1 = np.zeros(1, dtype=np.float32)
     zero256 = np.zeros(256, dtype=np.int32)
-    for label, backend, index in backends:
+    for label, backend, index, info in backends:
         if index is not None:
             nv.select_device(index)
         dx, dkeys, da, db = (backend.to_device(v) for v in (x, keys, a, b))
@@ -280,21 +346,21 @@ def run(opts):
         for function in (reduce, hist, mm):  # compile
             function()
 
-        seconds = best_of(
-            reduce, opts.repeat, lambda out=out: out.copy_to_device(zero1)
-        )
+        samples = timings(reduce, repeat, lambda out=out: out.copy_to_device(zero1))
         got = out.copy_to_host()[0]
         exact = x.sum(dtype=np.float64)
-        record("reduce", label, seconds, f"rel. err {abs(got - exact) / exact:.1e}")
+        record(
+            "reduce", label, info, samples, f"rel. err {abs(got - exact) / exact:.1e}"
+        )
 
-        seconds = best_of(hist, opts.repeat, lambda d=dbins: d.copy_to_device(zero256))
+        samples = timings(hist, repeat, lambda d=dbins: d.copy_to_device(zero256))
         ok = (dbins.copy_to_host() == reference_bins).all()
-        record("histogram", label, seconds, "exact" if ok else "WRONG")
+        record("histogram", label, info, samples, "exact" if ok else "WRONG")
 
-        seconds = best_of(mm, opts.repeat)
+        samples = timings(mm, repeat)
         got = dc.copy_to_host()
         err = np.abs(got - reference_c).max() / np.abs(reference_c).max()
-        record("matmul", label, seconds, f"max rel. err {err:.1e}")
+        record("matmul", label, info, samples, f"max rel. err {err:.1e}")
     return records
 
 
@@ -310,14 +376,17 @@ def to_markdown(records, opts):
     }
     lines = []
     for workload, title in titles.items():
-        rows = [r for r in records if r[0] == workload]
+        rows = [r for r in records if r["workload"] == workload]
         lines += [
             f"### {title}",
             "",
             "| Backend | Time (ms) | Check |",
             "| --- | ---: | --- |",
         ]
-        lines += [f"| {b} | {s * 1e3:.3f} | {e} |" for _, b, s, e in rows]
+        lines += [
+            f"| {r['label']} | {min(r['samples_s']) * 1e3:.3f} | {r['check']} |"
+            for r in rows
+        ]
         lines.append("")
     return "\n".join(lines)
 
@@ -334,7 +403,7 @@ def main():
     )
     parser.add_argument("--markdown", metavar="PATH")
     opts = parser.parse_args()
-    records = run(opts)
+    records = run(opts.size, opts.matrix, opts.repeat, opts.all_devices)
     if opts.markdown:
         with open(opts.markdown, "w") as fh:
             fh.write(to_markdown(records, opts) + "\n")

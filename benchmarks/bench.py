@@ -207,7 +207,11 @@ def make_workloads(size, maxiter):
 
 
 def measure(kernels, name, args, repeat, on_device=False):
-    """Time one workload; with `on_device`, without the transfers."""
+    """Time one workload; with `on_device`, without the transfers.
+
+    Returns the time of the first call (including compilation), the times
+    of the `repeat` calls after it, and the result.
+    """
     fn, sync = kernels[name], kernels.get("sync", lambda: None)
     if on_device:
         args = [
@@ -217,13 +221,13 @@ def measure(kernels, name, args, repeat, on_device=False):
     fn(*args)
     sync()
     first = time.perf_counter() - start
-    best = math.inf
+    samples = []
     for _ in range(repeat):
         start = time.perf_counter()
         fn(*args)
         sync()
-        best = min(best, time.perf_counter() - start)
-    return first, best, args[-1].copy_to_host() if on_device else args[-1].copy()
+        samples.append(time.perf_counter() - start)
+    return first, samples, args[-1].copy_to_host() if on_device else args[-1].copy()
 
 
 def agreement(name, result, reference):
@@ -271,6 +275,7 @@ def to_markdown(records, opts):
     workloads = dict.fromkeys(r["workload"] for r in records)
     for workload in workloads:
         rows = [r for r in records if r["workload"] == workload]
+        baseline = min(rows[0]["samples_s"])
         lines += [
             f"### {workload} ({rows[0]['description']})",
             "",
@@ -278,12 +283,116 @@ def to_markdown(records, opts):
             "| --- | ---: | ---: | ---: | --- |",
         ]
         lines += [
-            f"| {r['backend']} | {r['first_s'] * 1e3:.1f} | {r['best_s'] * 1e3:.2f} "
-            f"| {r['speedup']:.2f}x | {r['agreement']} |"
+            f"| {r['label']} | {r['first_s'] * 1e3:.1f} | {min(r['samples_s']) * 1e3:.2f} "
+            f"| {baseline / min(r['samples_s']):.2f}x | {r['check']} |"
             for r in rows
         ]
         lines.append("")
     return "\n".join(lines)
+
+
+def backends():
+    """Every backend this machine offers, with how to describe it.
+
+    Returns
+    -------
+    list of tuple
+        ``(label, kernels, on_device, info)`` where ``info`` has the
+        ``backend``, ``device`` and ``variant`` of a result record.
+    """
+    found = [
+        ("numba cpu (1 thread)", cpu_backend(False), False, ("cpu", None, "1 thread")),
+        ("numba cpu (parallel)", cpu_backend(True), False, ("cpu", None, "parallel")),
+    ]
+    gpus = [
+        (f"vulkan: {d.name}", vulkan_backend(d.index), ("vulkan", d.name))
+        for d in nv.list_devices()
+    ]
+    if HAVE_CUDA:
+        name = cuda.get_current_device().name
+        name = name.decode() if isinstance(name, bytes) else name
+        gpus.append((f"numba-cuda: {name}", cuda_backend(), ("cuda", name)))
+    # GPU backends run twice: with NumPy arrays, which are copied to and from
+    # the device on every call, and with arrays that stay on the device.
+    for label, kernels, (backend, device) in gpus:
+        found.append((label, kernels, False, (backend, device, "numpy arrays")))
+    for label, kernels, (backend, device) in gpus:
+        found.append(
+            (
+                f"{label}, device arrays",
+                kernels,
+                True,
+                (backend, device, "device arrays"),
+            )
+        )
+    return found
+
+
+def run(size=2048, maxiter=200, repeat=5, verbose=True):
+    """Run every workload on every backend.
+
+    Parameters
+    ----------
+    size : int
+        Grid edge; arrays have ``size**2`` elements.
+    maxiter : int
+        Mandelbrot iteration limit.
+    repeat : int
+        Timed calls after the first.
+    verbose : bool
+        Print a line per measurement.
+
+    Returns
+    -------
+    list of dict
+        One record per workload and backend; see ``benchmarks/collect.py``
+        for the fields.
+    """
+    warnings.filterwarnings("ignore", message=".*copy overhead.*")
+    warnings.filterwarnings("ignore", message=".*Grid size.*")
+    available = backends()
+    records = []
+    for name, (description, args) in make_workloads(size, maxiter).items():
+        if verbose:
+            print(f"\n{name} ({description})")
+            print(
+                f"  {'backend':<60}{'first call':>12}{'best':>12}{'speedup':>9}  agreement"
+            )
+        reference = baseline = None
+        for label, kernels, on_device, (backend, device, variant) in available:
+            try:
+                first, samples, result = measure(kernels, name, args, repeat, on_device)
+            except Exception as exc:
+                if verbose:
+                    print(
+                        f"  {label:<60}  failed: {type(exc).__name__}: "
+                        f"{str(exc).splitlines()[0][:60]}"
+                    )
+                continue
+            best = min(samples)
+            if reference is None:
+                reference, baseline = result, best
+            check = agreement(name, result, reference)
+            if verbose:
+                print(
+                    f"  {label:<60}{first * 1e3:>10.1f}ms{best * 1e3:>10.2f}ms"
+                    f"{baseline / best:>8.2f}x  {check}"
+                )
+            records.append(
+                dict(
+                    suite="apps",
+                    workload=name,
+                    description=description,
+                    backend=backend,
+                    device=device,
+                    variant=variant,
+                    label=label,
+                    first_s=first,
+                    samples_s=samples,
+                    check=check,
+                )
+            )
+    return records
 
 
 def main():
@@ -302,61 +411,7 @@ def main():
         "--markdown", metavar="PATH", help="also write the results as Markdown tables"
     )
     opts = parser.parse_args()
-    warnings.filterwarnings("ignore", message=".*copy overhead.*")
-    warnings.filterwarnings("ignore", message=".*Grid size.*")
-
-    backends = {
-        "numba cpu (1 thread)": cpu_backend(False),
-        "numba cpu (parallel)": cpu_backend(True),
-    }
-    # GPU backends run twice: with NumPy arrays, which are copied to and from
-    # the device on every call, and with arrays that stay on the device.
-    on_device = set()
-    for info in nv.list_devices():
-        backends[f"vulkan: {info.name}"] = vulkan_backend(info.index)
-    if HAVE_CUDA:
-        name = cuda.get_current_device().name
-        name = name.decode() if isinstance(name, bytes) else name
-        backends[f"numba-cuda: {name}"] = cuda_backend()
-    for label in [b for b in backends if "to_device" in backends[b]]:
-        backends[f"{label}, device arrays"] = backends[label]
-        on_device.add(f"{label}, device arrays")
-
-    records = []
-    for name, (description, args) in make_workloads(opts.size, opts.maxiter).items():
-        print(f"\n{name} ({description})")
-        print(
-            f"  {'backend':<60}{'first call':>12}{'best':>12}{'speedup':>9}  agreement"
-        )
-        reference = baseline = None
-        for label, kernels in backends.items():
-            try:
-                first, best, result = measure(
-                    kernels, name, args, opts.repeat, label in on_device
-                )
-            except Exception as exc:
-                print(
-                    f"  {label:<60}  failed: {type(exc).__name__}: {str(exc).splitlines()[0][:60]}"
-                )
-                continue
-            if reference is None:
-                reference, baseline = result, best
-            check = agreement(name, result, reference)
-            print(
-                f"  {label:<60}{first * 1e3:>10.1f}ms{best * 1e3:>10.2f}ms"
-                f"{baseline / best:>8.2f}x  {check}"
-            )
-            records.append(
-                dict(
-                    workload=name,
-                    description=description,
-                    backend=label,
-                    first_s=first,
-                    best_s=best,
-                    speedup=baseline / best,
-                    agreement=check,
-                )
-            )
+    records = run(opts.size, opts.maxiter, opts.repeat)
     if opts.markdown:
         with open(opts.markdown, "w") as fh:
             fh.write(to_markdown(records, opts))

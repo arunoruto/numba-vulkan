@@ -3,11 +3,12 @@
 # Reference clones used while developing (numba, numba-cuda, taichi)
 /refs/
 
-# Generated shaders and benchmark dumps (the Markdown tables under
-# docs/source/_generated/ are committed on purpose)
+# Generated shaders and ad-hoc benchmark dumps. Collected results under
+# benchmarks/results/ are committed; the charts drawn from them are not.
 *.spv
 *.spvasm
-benchmarks/results*.json
+/benchmarks/results.json
+/docs/source/_generated/benchmarks/
 
 # libclc bitcode, copied in by `bundle-libclc` for building distributions
 /src/numba_vulkan/data/*.bc
