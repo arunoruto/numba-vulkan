@@ -342,7 +342,7 @@ def emit_spirv(llvm_ir, exact=True, narrow_ints=False):
     spirv = half_storage(spirv)
     if narrow_ints:
         spirv = narrow_index_constants(spirv)
-    spirv = storage8_capability(strip_unused(spirv))
+    spirv = storage8_capability(null_int_constants(strip_unused(spirv)))
     if exact:
         spirv = mark_exact(spirv)
     check_spirv(spirv)
@@ -639,6 +639,43 @@ def half_storage(spirv):
         else inst
         for inst in instructions
     ]
+    return _assemble(header, out)
+
+
+_OP_CONSTANT_NULL = 46
+
+
+def null_int_constants(spirv):
+    """Write integer zeros as ``OpConstant`` instead of ``OpConstantNull``.
+
+    The backend emits ``OpConstantNull`` for an integer 0, also where it
+    indexes into a structure, for which the SPIR-V specification asks for
+    an ``OpConstant``. Recent validators accept both; older ones, such as
+    the one inside the validation layer of Ubuntu 24.04, reject the module.
+
+    Parameters
+    ----------
+    spirv : bytes
+        A SPIR-V module.
+
+    Returns
+    -------
+    bytes
+        The module with every integer ``OpConstantNull`` replaced by an
+        ``OpConstant`` of value 0 and the same id.
+    """
+    header, instructions = _instructions(spirv)
+    widths = {i[1]: i[2] for i in instructions if i[0] & 0xFFFF == _OP_TYPE_INT}
+    if not any(
+        i[0] & 0xFFFF == _OP_CONSTANT_NULL and i[1] in widths for i in instructions
+    ):
+        return spirv
+    out = []
+    for inst in instructions:
+        if inst[0] & 0xFFFF == _OP_CONSTANT_NULL and inst[1] in widths:
+            words = (0,) * (2 if widths[inst[1]] == 64 else 1)
+            inst = ((3 + len(words)) << 16 | _OP_CONSTANT, inst[1], inst[2], *words)
+        out.append(inst)
     return _assemble(header, out)
 
 

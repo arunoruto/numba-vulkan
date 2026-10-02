@@ -137,3 +137,23 @@ def test_8_bit_buffers_declare_their_storage_capability(run, dtype, storage8):
     compiled = list(kernel._kernels.values())[-1]
     assert ("storage8" in compiled.capabilities) == storage8
     assert codegen.storage8_capability(compiled.spirv) == compiled.spirv
+
+
+def test_integer_null_constants_become_constants(run):
+    @nv.jit
+    def count(bins, x):
+        i = nv.global_id(0)
+        if i < x.size:
+            nv.atomic.add(bins, x[i] % 4, 1)
+
+    x = np.arange(16, dtype=np.int32)
+    bins = np.zeros(4, np.int32)
+    run(count, x.size, bins, x)
+    np.testing.assert_array_equal(bins, np.full(4, 4))
+    compiled = list(count._kernels.values())[-1]
+    _, instructions = codegen._instructions(compiled.spirv)
+    ints = {i[1] for i in instructions if i[0] & 0xFFFF == codegen._OP_TYPE_INT}
+    assert not any(
+        i[0] & 0xFFFF == codegen._OP_CONSTANT_NULL and i[1] in ints
+        for i in instructions
+    )

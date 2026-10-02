@@ -148,11 +148,24 @@ def _store(key, result):
 def _measure(device):
     """Run the probe on a device.
 
+    The probe is compiled without workarounds even if the device already
+    uses them; it would otherwise measure the software versions.
+
     Returns
     -------
     dict
         ``soft_fma`` and ``soft_rounding``.
     """
+    mode = device.mode
+    device.mode = mode._replace(soft_fma=False, soft_rounding=False)
+    try:
+        return _run_probe(device)
+    finally:
+        device.mode = mode
+
+
+def _run_probe(device):
+    """Run the probe kernels; see `_measure`."""
     probe, probe32 = _probe_kernel()
     out32 = np.ones(_LANES, dtype=np.float32)
     probe32.forall(_LANES, device=device)(_INPUT32, out32)
