@@ -32,7 +32,8 @@ float64 support, workarounds applied by numba-vulkan), ``cuda``
     variant      e.g. "parallel", "numpy arrays", "device arrays",
                  "32-bit integers"
     label        the backend as the scripts print it
-    first_s      the first call in seconds, including compilation, or null
+    first_s      the first call in seconds, including compilation (the kernel
+                 cache is off during a run), or null
     samples_s    the timed calls after it, in seconds
     check        agreement with the CPU result, as text
 """
@@ -213,7 +214,12 @@ def hardware_info():
 
 
 def collect(user, machine, quick=False, verbose=True):
-    """Run both suites and return the content of a results file."""
+    """Run both suites and return the content of a results file.
+
+    The on-disk kernel cache is turned off, so that first calls include
+    compilation.
+    """
+    os.environ["NUMBA_VULKAN_CACHE"] = "0"
     apps = {"size": 512, "maxiter": 100, "repeat": 3} if quick else {
         "size": 2048, "maxiter": 200, "repeat": 5}  # fmt: skip
     kern = {"size": 1 << 20, "matrix": 256, "repeat": 3} if quick else {
@@ -229,7 +235,12 @@ def collect(user, machine, quick=False, verbose=True):
         "git": git_info(),
         "software": software_info(),
         "hardware": hardware_info(),
-        "settings": {"apps": apps, "kernels": kern, "quick": quick},
+        "settings": {
+            "apps": apps,
+            "kernels": kern,
+            "quick": quick,
+            "kernel_cache": False,
+        },
         "results": results,
     }
 

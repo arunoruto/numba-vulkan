@@ -151,17 +151,22 @@ def backends_chart(run, path):
         rows.sort(key=lambda r: (list(COLORS).index(r["backend"]), r["device"] or ""))
         labels = [f"{_device(r['device'])}, {r['variant']}" for r in rows]
         times = [best(r) for r in rows]
-        ax.barh(range(len(rows)), times, color=[COLORS[r["backend"]] for r in rows])
+        # Dots rather than bars: on a log axis, a bar's length depends on
+        # where the axis starts.
+        ax.scatter(times, range(len(rows)), color=[COLORS[r["backend"]] for r in rows],
+                   s=24, zorder=3)  # fmt: skip
         for y, t in enumerate(times):
-            ax.annotate(f" {t:.3g}", (t, y), va="center", fontsize=7)
+            ax.annotate(f"{t:.3g}", (t, y), xytext=(6, 0), textcoords="offset points",
+                        va="center", fontsize=7)  # fmt: skip
         ax.set_yticks(range(len(rows)), labels)
-        ax.invert_yaxis()
+        ax.set_ylim(len(rows) - 0.5, -0.5)
+        ax.grid(axis="y", color="#e5e5e5", zorder=0)
         ax.set_xscale("log")
-        ax.set_xlim(right=max(times) * 4)
+        ax.set_xlim(min(times) / 1.6, max(times) * 3)
         _plain_log(ax.xaxis)
         ax.set_title(f"{workload}: {rows[0]['description']} ({SUITES[suite].lower()})",
                      loc="left", fontsize=9)  # fmt: skip
-    axes[-1, 0].set_xlabel("best time (ms, log scale; shorter is faster)")
+    axes[-1, 0].set_xlabel("best time (ms, log scale; further left is faster)")
     axes[0, 0].legend(
         handles=[Patch(color=c, label=b) for b, c in COLORS.items()],
         loc="lower right",
@@ -190,27 +195,41 @@ def machines_chart(runs, path):
     workloads = list(
         dict.fromkeys(w for run in runs for w in _workloads(run["results"]))
     )
+    columns = 3
     fig, axes = plt.subplots(
-        1, len(workloads), figsize=(2.0 * len(workloads), 3.2), squeeze=False
+        -(-len(workloads) // columns),
+        columns,
+        figsize=(10, (0.9 + 0.3 * len(runs)) * -(-len(workloads) // columns)),
+        squeeze=False,
     )
-    width = 0.8 / len(COLORS)
-    for ax, (suite, workload) in zip(axes[0], workloads):
-        for k, backend in enumerate(COLORS):
-            xs, ys = [], []
+    for ax, (suite, workload) in zip(axes.flat, workloads):
+        times = []
+        for backend in COLORS:
             for i, run in enumerate(runs):
                 record = _fastest(run, suite, workload, backend)
                 if record is not None:
-                    xs.append(i + (k - 1) * width)
-                    ys.append(best(record))
-            ax.bar(xs, ys, width, color=COLORS[backend], label=backend)
-        ax.set_yscale("log")
-        _plain_log(ax.yaxis)
-        ax.set_xticks(range(len(runs)), [machine_key(r) for r in runs], rotation=30,
-                      ha="right")  # fmt: skip
+                    times.append(best(record))
+                    ax.scatter(best(record), i, color=COLORS[backend], s=28, zorder=3,
+                               label=backend if i == 0 else None)  # fmt: skip
+        ax.set_yticks(range(len(runs)), [machine_key(r) for r in runs])
+        ax.set_ylim(len(runs) - 0.5, -0.5)
+        ax.grid(axis="y", color="#e5e5e5", zorder=0)
+        ax.set_xscale("log")
+        ax.set_xlim(min(times) / 1.6, max(times) * 1.6)
+        _plain_log(ax.xaxis)
         ax.set_title(workload, fontsize=9)
-    axes[0, 0].set_ylabel("best time (ms, log scale)")
-    axes[0, -1].legend(frameon=False, fontsize=8)
-    fig.tight_layout()
+    for ax in list(axes.flat)[len(workloads) :]:
+        ax.axis("off")
+    for ax in axes[-1]:
+        ax.set_xlabel("best time (ms, log scale)")
+    fig.legend(
+        handles=[Patch(color=c, label=b) for b, c in COLORS.items()],
+        loc="upper right",
+        ncol=3,
+        frameon=False,
+        fontsize=8,
+    )
+    fig.tight_layout(rect=(0, 0, 1, 0.93))
     _save(fig, path)
 
 
@@ -247,7 +266,12 @@ def history_chart(runs, path):
         ax.set_yscale("log")
         _plain_log(ax.yaxis)
         ax.set_title(workload, fontsize=9)
-        locator = mdates.AutoDateLocator(maxticks=5)
+        dates = sorted({p[0] for points in series.values() for p in points})
+        if dates[0] == dates[-1]:
+            # A single date: show the day around it.
+            ax.set_xlim(dates[0] - datetime.timedelta(days=1),
+                        dates[0] + datetime.timedelta(days=1))  # fmt: skip
+        locator = mdates.AutoDateLocator(minticks=1, maxticks=5)
         ax.xaxis.set_major_locator(locator)
         ax.xaxis.set_major_formatter(mdates.ConciseDateFormatter(locator))
     for ax in list(axes.flat)[len(workloads) :]:

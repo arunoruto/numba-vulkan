@@ -270,61 +270,34 @@ Set `NUMBA_VULKAN_VALIDATE=1` to run every generated shader through
 
 ## Benchmarks
 
-`benchmarks/bench.py` compiles the same scalar function for Numba's CPU
-target, numba-vulkan and numba-cuda and times a full call: with NumPy arrays,
-so that GPU timings include data transfer, and with device arrays.
+Two suites compare numba-vulkan with Numba's CPU target and numba-cuda: the
+same scalar function compiled for every backend (`benchmarks/bench.py`), and
+the same CUDA-style kernels with shared memory, barriers and atomics
+(`benchmarks/kernels.py`). Results are collected in the repository, one file
+per run, and charted in the
+[documentation](https://arunoruto.github.io/numba-vulkan/benchmarks.html),
+including every backend, device and variant and how results change over
+time. The fastest result per backend, data on the device (log scale; further
+left is faster):
+
+<p align="center">
+  <img src="https://arunoruto.github.io/numba-vulkan/_images/machines.svg" alt="Best time per workload and backend" width="100%" />
+</p>
+
+In the first collected run (Intel i9-9900K, NVIDIA TITAN X, Intel UHD 630):
+
+- With data on the device, numba-vulkan is within 15 to 35 % of numba-cuda on
+  the same card, and faster than it on the tiled matrix product (1.7 against
+  1.9 ms).
+- With NumPy arrays as arguments, the copies dominate: the memory-bound
+  `saxpy` is slower on every GPU backend than on one CPU thread.
+- Compiling a Vulkan kernel takes about 0.1 s on its first call.
+
+Please add a run from your machine; it takes a few minutes:
 
 ```sh
-uv run python benchmarks/bench.py            # --size, --maxiter, --repeat, --json
+uv run python benchmarks/collect.py --user <your GitHub name> --machine <label>
 ```
-
-One run on an Intel i9-9900K (8 cores), NVIDIA TITAN X (Pascal) and Intel UHD
-630, best of 5, in milliseconds (lower is better):
-
-| Backend | Mandelbrot 2048², 200 iter. | Option pricing, 4.2M | saxpy, 4.2M |
-| --- | ---: | ---: | ---: |
-| Numba CPU, 1 thread | 469.7 | 114.8 | 2.3 |
-| Numba CPU, parallel | 93.0 | 24.3 | 5.0 |
-| **numba-vulkan**, NVIDIA TITAN X | 15.5 | 11.2 | 8.0 |
-| **numba-vulkan**, Intel UHD 630 | 47.7 | 13.5 | 11.1 |
-| **numba-vulkan**, llvmpipe (CPU) | 48.1 | 46.8 | 9.2 |
-| numba-cuda, NVIDIA TITAN X | 14.3 | 16.1 | 14.1 |
-| **numba-vulkan**, NVIDIA TITAN X, device arrays | 9.6 | 0.41 | 0.33 |
-| **numba-vulkan**, Intel UHD 630, device arrays | 45.1 | 6.0 | 4.6 |
-| **numba-vulkan**, llvmpipe (CPU), device arrays | 52.3 | 40.6 | 3.8 |
-| numba-cuda, NVIDIA TITAN X, device arrays | 8.5 | 0.26 | 0.20 |
-
-Reading the numbers:
-
-- On compute-heavy kernels (Mandelbrot) Vulkan beats the parallel CPU on both
-  GPUs and is within about 20 % of CUDA on the same card.
-- On memory-bound kernels (saxpy) with NumPy arguments, every GPU backend
-  loses to a single CPU thread, because the time goes into copying arrays.
-  With device arrays nothing is copied, and the discrete GPU is about ten
-  times faster than the CPU and within a factor of 1.3 of CUDA.
-- First-call (compile) time is 0.05 to 0.25 s for Vulkan (the higher figure
-  when the math library is linked in), about the same as for CUDA.
-- All backends agree with the CPU result to float32 rounding; saxpy is
-  bit-identical on Vulkan.
-- Repeated runs vary by around 25 %, so small differences are not meaningful.
-
-Those workloads let every backend compile a function its own way.
-`benchmarks/kernels.py` instead runs the same CUDA-style kernels (shared
-memory, barriers, atomics) on both GPU backends, with data on the device
-(milliseconds, NVIDIA TITAN X):
-
-| Kernel | numba-vulkan | numba-vulkan, 64-bit integers | numba-cuda |
-| --- | ---: | ---: | ---: |
-| Sum of 16M float32 | 0.26 | 0.34 | 0.21 |
-| Histogram of 16M int32, 256 bins | 0.36 | 0.30 | 0.22 |
-| 1024² matrix product, 16×16 tiles | 2.07 | 3.14 | 1.94 |
-
-Kernels compute with 32-bit integers by default, as CUDA C code does with
-`int`; `narrow=False` gives Numba's 64-bit integers. `float64` stays 64-bit
-where the device supports it, with a warning that it is slow.
-
-The [documentation](https://arunoruto.github.io/numba-vulkan/benchmarks.html) has the full tables, including
-compile times and the software versions used.
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
