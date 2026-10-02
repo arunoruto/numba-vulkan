@@ -239,6 +239,17 @@ A launch that binds the same buffers as the previous one of that kernel,
 which is the usual case in a loop, neither rewrites the descriptor set nor
 records the commands again; it only submits.
 
+Launches on device arrays of kernels that cannot raise do not wait. Each
+takes a *slot* of its kernel (descriptor set, recorded command buffer,
+fence and mapped buffers for shapes and scalars), which a later launch with
+the same arrays and grid reuses by copying the new argument values and
+submitting again. Every command buffer begins with a memory barrier, so a
+launch sees the writes of all earlier ones on the queue. At most 32
+launches are pending; buffers that are released meanwhile join the pool
+once the launches submitted before their release have finished. Grids
+beyond the device's workgroup limits are dispatched in parts with
+`vkCmdDispatchBase`.
+
 ## Workarounds for toolchain and driver behaviour
 
 | Observation | Workaround |

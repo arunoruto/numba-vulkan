@@ -30,9 +30,9 @@ rows, which reuse the kernels compiled for the rows above.
   Vulkan copies somewhat faster than CUDA here, because it maps buffers
   that are kept from call to call.
 - With device arrays nothing is copied. `saxpy` over 4 million elements
-  then takes about 0.3 ms on the discrete GPU, ten times faster than the
-  CPU, and within a factor of 1.3 of CUDA, which does not have to wait for
-  each kernel as a Vulkan launch does (KI-28 in {doc}`known_issues`).
+  then takes about 0.3 ms on the discrete GPU, eight times faster than the
+  CPU, and within a factor of 1.3 of CUDA, mostly in waiting for the
+  kernel to finish.
 - The integrated GPU and llvmpipe share memory with the CPU and gain less
   from device arrays; `saxpy` is limited by memory bandwidth there.
 - Compiling a Vulkan kernel takes 0.05 to 0.25 s, about as long as for
@@ -65,12 +65,16 @@ compare the code generators and runtimes on equal terms.
 ```{include} _generated/kernel_benchmark_results.md
 ```
 
-- On the same card, Vulkan is within 20 to 30 % of CUDA on the
-  reduction and the histogram. Most of the difference is the launch: a
-  Vulkan launch waits for the kernel and costs about 0.1 ms.
+- On the same card, Vulkan is within 25 to 40 % of CUDA on the
+  reduction and the histogram, which take about 0.25 ms; the difference
+  is mostly the fixed cost of submitting and waiting for a dispatch.
 - The tiled matrix product is about 1.5× slower with Numba's default 64-bit
-  integers; with `narrow="ints"` it matches CUDA. NVIDIA's CUDA compiler
-  narrows such index arithmetic itself, the Vulkan driver does not.
+  integers; with `narrow="ints"` it is within 6 % of CUDA. NVIDIA's CUDA
+  compiler narrows such index arithmetic itself, the Vulkan driver does
+  not.
+- Launching is cheaper than in numba-cuda: 1000 launches of a small kernel
+  on device arrays take about 55 µs each on Vulkan and 70 µs on CUDA, both
+  dominated by Python.
 - The reduction uses a float atomic addition per workgroup. The Titan X
   supports native float atomics; on the integrated GPU, which does not,
   numba-vulkan falls back to a compare-and-swap loop.

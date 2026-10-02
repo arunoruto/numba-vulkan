@@ -164,24 +164,23 @@ def scaled(factor, a, out):
         out[i] = factor * a[i]
 
 
-def test_repeated_launches_follow_changes_of_buffers_kernels_and_grids(run, device):
-    # Launches reuse the descriptor set and the recorded commands while
-    # nothing changes; every kind of change must be noticed.
-    dev = nv.get_device(device)
+@pytest.mark.parametrize("asynchronous", [True, False], ids=["async", "sync"])
+def test_repeated_launches_follow_changes_of_buffers_kernels_and_grids(
+    run, device, asynchronous, monkeypatch
+):
+    # Synchronous launches reuse the descriptor set and the recorded commands
+    # while nothing changes, asynchronous ones recycle theirs; every kind of
+    # change must be noticed.
+    monkeypatch.setattr("numba_vulkan.dispatcher._ASYNC", asynchronous)
     a = nv.to_device(np.arange(100, dtype=f32), device)
     b = nv.to_device(np.arange(100, dtype=f32) + 1000, device)
     out1, out2 = nv.device_array_like(a), nv.device_array_like(a)
 
     run(scaled, 100, f32(2), a, out1)
-    kernel = next(k for k in scaled._kernels.values() if k.mode == dev.mode)
-    state = dev._pipelines[id(kernel)]
-    bound = state.bound
     run(scaled, 100, f32(3), a, out1)  # same buffers, other scalar value
-    assert state.bound == bound
     np.testing.assert_array_equal(out1.copy_to_host(), 3 * np.arange(100))
 
     run(scaled, 100, f32(2), b, out2)  # other buffers
-    assert state.bound != bound
     np.testing.assert_array_equal(out2.copy_to_host(), 2 * (np.arange(100) + 1000))
     np.testing.assert_array_equal(out1.copy_to_host(), 3 * np.arange(100))
 
@@ -195,3 +194,59 @@ def test_repeated_launches_follow_changes_of_buffers_kernels_and_grids(run, devi
     run(scaled, 100, f32(5), a, out2)
     np.testing.assert_array_equal(out1.copy_to_host(), 3 * np.arange(100) + 1)
     np.testing.assert_array_equal(out2.copy_to_host(), 5 * np.arange(100))
+
+
+@nv.jit
+def accumulate(total, step):
+    i = nv.global_id(0)
+    if i < total.shape[0]:
+        total[i] += step[i]
+
+
+def test_launches_on_device_arrays_do_not_wait(device):
+    from numba_vulkan import dispatcher
+
+    if not dispatcher._ASYNC:
+        pytest.skip("NUMBA_VULKAN_SYNC=1")
+    dev = nv.get_device(device)
+    total = nv.to_device(np.zeros(1000, dtype=f32), device)
+    step = nv.to_device(np.arange(1000, dtype=f32), device)
+    accumulate.forall(1000, device=device)(total, step)
+    assert dev._pending  # still running, or at least not waited for
+    for _ in range(3 * runtime.Device.MAX_PENDING):  # more than may be pending
+        accumulate.forall(1000, device=device)(total, step)
+    assert len(dev._pending) <= runtime.Device.MAX_PENDING
+    # reading waits, and sees every launch in order
+    want = np.arange(1000) * (1 + 3 * runtime.Device.MAX_PENDING)
+    np.testing.assert_array_equal(total.copy_to_host(), want)
+    assert not dev._pending
+
+
+def test_buffers_in_use_are_not_reused(device):
+    dev = nv.get_device(device)
+    total = nv.to_device(np.zeros(1000, dtype=f32), device)
+    step = nv.to_device(np.ones(1000, dtype=f32), device)
+    accumulate.forall(1000, device=device)(total, step)
+    handle = step._buffer.handle
+    del step
+    gc.collect()
+    replacement = nv.device_array(1000, f32, device)
+    if dev._pending:
+        assert replacement._buffer.handle is not handle
+    nv.synchronize(device)
+    assert not dev._pending and not dev._deferred
+    np.testing.assert_array_equal(total.copy_to_host(), np.ones(1000))
+
+
+def test_kernels_that_can_raise_still_report_at_once(device):
+    @nv.jit
+    def checked(a):
+        i = nv.global_id(0)
+        if i < a.shape[0]:
+            if a[i] < 0:
+                raise ValueError("negative")
+            a[i] += 1
+
+    a = nv.to_device(np.array([1, -1], dtype=f32), device)
+    with pytest.raises(ValueError, match="negative"):
+        checked.forall(2, device=device)(a)

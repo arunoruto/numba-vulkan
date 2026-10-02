@@ -283,16 +283,16 @@ One run on an Intel i9-9900K (8 cores), NVIDIA TITAN X (Pascal) and Intel UHD
 
 | Backend | Mandelbrot 2048², 200 iter. | Option pricing, 4.2M | saxpy, 4.2M |
 | --- | ---: | ---: | ---: |
-| Numba CPU, 1 thread | 489.0 | 107.9 | 2.6 |
-| Numba CPU, parallel | 95.7 | 19.9 | 6.0 |
-| **numba-vulkan**, NVIDIA TITAN X | 14.3 | 10.1 | 8.4 |
-| **numba-vulkan**, Intel UHD 630 | 58.0 | 13.0 | 11.6 |
-| **numba-vulkan**, llvmpipe (CPU) | 75.5 | 42.6 | 12.3 |
-| numba-cuda, NVIDIA TITAN X | 12.9 | 15.3 | 16.6 |
-| **numba-vulkan**, NVIDIA TITAN X, device arrays | 9.3 | 0.37 | 0.28 |
-| **numba-vulkan**, Intel UHD 630, device arrays | 52.9 | 5.9 | 4.8 |
-| **numba-vulkan**, llvmpipe (CPU), device arrays | 62.4 | 35.1 | 3.9 |
-| numba-cuda, NVIDIA TITAN X, device arrays | 8.2 | 0.28 | 0.22 |
+| Numba CPU, 1 thread | 474.4 | 105.2 | 2.4 |
+| Numba CPU, parallel | 92.7 | 19.4 | 4.4 |
+| **numba-vulkan**, NVIDIA TITAN X | 14.4 | 10.1 | 8.9 |
+| **numba-vulkan**, Intel UHD 630 | 56.7 | 13.0 | 8.3 |
+| **numba-vulkan**, llvmpipe (CPU) | 82.0 | 37.9 | 9.8 |
+| numba-cuda, NVIDIA TITAN X | 13.4 | 13.4 | 15.9 |
+| **numba-vulkan**, NVIDIA TITAN X, device arrays | 9.5 | 0.40 | 0.28 |
+| **numba-vulkan**, Intel UHD 630, device arrays | 53.6 | 6.2 | 5.3 |
+| **numba-vulkan**, llvmpipe (CPU), device arrays | 70.9 | 31.8 | 3.7 |
+| numba-cuda, NVIDIA TITAN X, device arrays | 8.3 | 0.29 | 0.22 |
 
 Reading the numbers:
 
@@ -315,9 +315,9 @@ memory, barriers, atomics) on both GPU backends, with data on the device
 
 | Kernel | numba-vulkan | numba-vulkan, `narrow="ints"` | numba-cuda |
 | --- | ---: | ---: | ---: |
-| Sum of 16M float32 | 0.28 | 0.29 | 0.24 |
-| Histogram of 16M int32, 256 bins | 0.31 | 0.33 | 0.25 |
-| 1024² matrix product, 16×16 tiles | 3.09 | 2.06 | 1.98 |
+| Sum of 16M float32 | 0.29 | 0.30 | 0.24 |
+| Histogram of 16M int32, 256 bins | 0.34 | 0.30 | 0.24 |
+| 1024² matrix product, 16×16 tiles | 2.45 | 1.70 | 1.61 |
 
 The [documentation](docs/source/benchmarks.md) has the full tables, including
 compile times and the software versions used.
@@ -411,8 +411,8 @@ To continue the work, start with the
 - [x] Early returns and short-circuit conditions (control-flow restructuring)
 - [x] Loops with `break`/`return` anywhere, `while` loops (fuzz-tested)
 - [x] Device arrays and buffer reuse, to avoid copying on every call
-- [x] Launch overhead of about 0.1 ms for repeated launches
-- [ ] Asynchronous launches; scalars as push constants
+- [x] Asynchronous launches on device arrays (`nv.synchronize()`)
+- [ ] Scalars as push constants
 - [x] Slices, array views, iteration and reductions
 - [x] Array expressions and local arrays
 - [x] Kernels narrowed to 32-bit types on devices without float64/int64

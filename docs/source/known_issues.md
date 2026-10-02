@@ -133,18 +133,19 @@ generated module would be worth having.
 
 ## Performance
 
-### KI-28: launches are synchronous
+### KI-28: launch overhead and synchronous launches with NumPy arrays
 
-Every launch waits for the kernel to finish. A repeated launch on the same
-arrays costs about 0.1 ms on top of the kernel itself; a launch with other
-buffers than the previous one costs about 0.3 ms, because the descriptor
-set is rewritten and the commands are recorded again. Scalars and array
-shapes travel as small buffers.
+Launches whose arrays are all device arrays return at once, and a repeated
+launch costs about 50 µs of Python time. Launches with NumPy arrays, and
+of kernels that can raise, still wait for the kernel, because results and
+the error status have to be read back. Scalars and array shapes travel as
+small buffers rather than push constants. If a grid needs more workgroups
+than the device allows, it is dispatched in parts, and `num_groups` then
+reports the workgroups of the part, which breaks grid-stride loops over
+`num_groups`.
 
-**Fix:** an asynchronous launch that returns a handle to wait on, which
-needs a command buffer, descriptor set and status buffer per launch in
-flight; descriptor sets kept per argument combination; scalars and shapes
-as push constants.
+**Fix:** push constants for scalars and shapes; reporting errors of
+asynchronous launches at the next synchronisation, as CUDA does.
 
 ### KI-29: device arrays are bare buffers
 

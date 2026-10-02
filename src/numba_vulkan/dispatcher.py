@@ -465,6 +465,7 @@ class VulkanDispatcher:
             )
             mode = mode._replace(floats=floats, ints=ints)
         argtypes, hosts, shapes, staged = [], [], [], []
+        on_host = False
         for arg in args:
             if isinstance(arg, runtime.DeviceArray):
                 if arg._stored != narrowing.stored_dtype(arg.dtype, mode):
@@ -477,6 +478,7 @@ class VulkanDispatcher:
                 shapes.extend(arg.shape)
                 hosts.append(arg)
             elif isinstance(arg, np.ndarray):
+                on_host = True
                 argtypes.append(typeof(arg).copy(layout="C", readonly=False))
                 shapes.extend(arg.shape)
                 stored = narrowing.stored_dtype(arg.dtype, mode)
@@ -507,15 +509,14 @@ class VulkanDispatcher:
                 -(-int(n) // kernel.local_size[axis]) for axis, n in enumerate(extent)
             ]
         groups = _shape3(groups)
-        limit = target.info.max_groups
-        if any(n > m for n, m in zip(groups, limit)):
-            raise ValueError(
-                f"{groups} workgroups exceed the limit of {limit} of {target.info.name}"
-            )
         if 0 in groups:
             return
         # Element 0 receives the status of the kernel, the shapes follow.
         meta = np.array([0, *shapes], dtype=np.int32)
+        if not on_host and STATUS_BINDING not in kernel.written_bindings and _ASYNC:
+            # Nothing to copy back and no exception to report: do not wait.
+            target.launch(kernel, tuple(groups), [meta, *hosts])
+            return
         target.run(kernel, tuple(groups), [meta, *hosts])
         for index, original in staged:
             if arg_binding(index) in kernel.written_bindings:
@@ -547,6 +548,12 @@ class VulkanDispatcher:
             where += f", in {location[0]} at {location[1]}:{location[2]}"
         error.add_note(where)
         raise error
+
+
+# Launches on device arrays return before the kernel has finished, unless
+# NUMBA_VULKAN_SYNC=1.
+_ASYNC = os.environ.get("NUMBA_VULKAN_SYNC", "0") == "0"
+STATUS_BINDING = 0
 
 
 def _shape3(shape):

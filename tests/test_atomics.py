@@ -320,3 +320,17 @@ def test_narrow_ints_only(run):
     assert compiled.mode.ints and not compiled.mode.floats
     with pytest.raises(ValueError, match="narrow must be"):
         nv.jit(narrow="yes")(scale.py_func)
+
+
+def test_grids_beyond_the_device_limit_are_split(device, monkeypatch):
+    @nv.jit
+    def mark(out):
+        i = nv.global_id(0)
+        if i < out.shape[0]:
+            out[i] = i + 1
+
+    out = np.zeros(1000, dtype=np.int32)
+    dev = nv.get_device(device)
+    monkeypatch.setattr(dev.info, "max_groups", (3, 65535, 65535))
+    mark.forall(1000, device=device)(out)  # 16 workgroups, dispatched 3 at a time
+    np.testing.assert_array_equal(out, np.arange(1, 1001))
