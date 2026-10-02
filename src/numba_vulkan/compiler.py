@@ -215,6 +215,7 @@ def _load_argument(context, builder, index, ty, shape_offset):
         proxy.itemsize = intp(itemsize)
         proxy.shape = cgutils.pack_array(builder, shape, ty=intp)
         proxy.strides = cgutils.pack_array(builder, strides, ty=intp)
+        proxy.offset = intp(0)
         return proxy._getvalue()
     elem = buffer_element_type(context, ty)
     val = load_element(builder, arg_binding(index), elem, i32(0))

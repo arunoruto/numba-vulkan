@@ -41,23 +41,24 @@ that is not kept in the repository.
 `clspv--.bc`, keep the computation in `float32`, or use
 `@nv.jit(narrow_math=True)`.
 
-### KI-04: slices, array methods and iteration
+### KI-04: array expressions and fancy indexing
 
 ```python
-x[1:][i]          # VulkanUnsupportedError: indexing ... with slice<a:b>
-x.sum()           # TypingError: Unknown attribute 'sum'
-for v in x: ...   # KeyError: VulkanArrayModel does not have a field named 'data'
+(x * 2)[i]        # VulkanUnsupportedError: ... needs direct access to memory
+x[x > 0]          # the same
+x.sum(axis=0)     # TypingError
+x[1:] = x[:-1]    # VulkanUnsupportedError: the slices could overlap
 ```
 
-**Cause:** {py:class}`~numba_vulkan.vktypes.VulkanArray` has no data pointer,
-so every Numba array operation that needs one has to be reimplemented. Only
-full integer indexing, `.shape`, `.size`, `.ndim` and `len()` exist.
+Indexing with integers and slices, views, iteration and whole-array
+reductions work (see {doc}`limitations`). What does not is everything that
+has to create a new array, because there is nowhere to put it (KI-05), and
+Numba's own implementations of other array functions, which walk the data
+pointer that arrays on this target do not have.
 
-**Fix:** views need an element offset and strides in the data model
-(`models.py`) and in `_linear_index` (`vkimpl.py`). The strides member
-already exists but is ignored. Iteration and reductions can then be written
-as `@overload`s for the `vulkan` target on top of indexing. The `KeyError`
-for iteration should become a `VulkanUnsupportedError`.
+**Fix:** further functions can be added as `@overload`s for the `vulkan`
+target on top of indexing, as `arrayfuncs.py` does for the reductions.
+Array expressions need local arrays first.
 
 ### KI-05: allocating arrays inside a kernel
 
@@ -104,11 +105,12 @@ it, as Taichi does. Low priority.
 | Kind | Symptom |
 | --- | --- |
 | `float16` arrays | `NotImplementedError: float16` |
-| Fortran-ordered and non-contiguous arrays | `ValueError: only C-contiguous arrays are supported` |
 | structured (record) arrays | `VulkanUnsupportedError: arrays of Record(...)` |
 
 Supported element types are `bool`, signed and unsigned integers of 8 to 64
-bits, `float32` and `float64`.
+bits, `float32` and `float64`. NumPy arrays that are not C-contiguous
+(strided, Fortran-ordered) work, but are copied to a contiguous array on the
+host for every call; device arrays are always contiguous.
 
 ## Behaviour that differs from Numba on the CPU
 

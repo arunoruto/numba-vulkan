@@ -205,7 +205,7 @@ class VulkanTargetContext(BaseContext):
 
         from numba.np import npyimpl
 
-        from numba_vulkan import mathfuncs, mathimpl, vkimpl  # noqa: F401
+        from numba_vulkan import arrayfuncs, mathfuncs, mathimpl, vkimpl  # noqa: F401
 
         self.install_registry(npyimpl.registry)
         self.install_registry(vkimpl.registry)

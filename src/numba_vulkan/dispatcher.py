@@ -15,6 +15,7 @@ from numba.core.target_extension import (
 from numba_vulkan import runtime
 from numba_vulkan.buffers import STATUS_INDEX, arg_binding
 from numba_vulkan.compiler import compile_kernel, compile_vulkan
+from numba_vulkan.errors import VulkanUnsupportedError
 from numba_vulkan.target import TARGET_NAME, exception_table, vulkan_target
 from numba_vulkan.vktypes import VulkanArray, VulkanDispatcherType
 
@@ -141,6 +142,17 @@ class VulkanDispatcher:
                     self.fastmath,
                     self.boundscheck,
                 )
+            except KeyError as exc:
+                # Numba's own array code asks for the data pointer, which
+                # arrays on this target do not have.
+                if "field named 'data'" not in str(exc):
+                    raise
+                raise VulkanUnsupportedError(
+                    f"'{self.py_func.__name__}' uses an array operation that needs "
+                    "direct access to memory, which Vulkan shaders do not have. "
+                    "Indexing, slicing, iteration and the reductions listed in "
+                    "the documentation are supported."
+                ) from None
             finally:
                 self._compiling -= 1
             self.overloads[args] = cres
@@ -326,14 +338,12 @@ class VulkanDispatcher:
         device : int, str or None
             Device to run on.
         args : tuple
-            Kernel arguments: C-contiguous NumPy arrays, device arrays and
-            scalars.
+            Kernel arguments: NumPy arrays, device arrays and scalars.
 
         Raises
         ------
         ValueError
-            If an array is not C-contiguous, or if a device array is on
-            another device.
+            If a device array is on another device.
         Exception
             Whatever an invocation of the kernel raised; see `_raise`.
         VulkanSupportError
@@ -342,7 +352,8 @@ class VulkanDispatcher:
         Notes
         -----
         Scalars are passed as one-element buffers. Boolean arrays are
-        converted to and from int32 on the host.
+        converted to and from int32 on the host, and arrays that are not
+        C-contiguous are passed as contiguous copies.
         """
         argtypes, hosts, shapes, staged = [], [], [], []
         for arg in args:
@@ -352,15 +363,18 @@ class VulkanDispatcher:
                 shapes.extend(arg.shape)
                 hosts.append(arg)
             elif isinstance(arg, np.ndarray):
-                if not arg.flags.c_contiguous:
-                    raise ValueError("only C-contiguous arrays are supported")
-                argtypes.append(typeof(arg).copy(readonly=False))
+                argtypes.append(typeof(arg).copy(layout="C", readonly=False))
                 shapes.extend(arg.shape)
                 if arg.dtype == np.bool_:
                     # Booleans are int32 on the device (SPIR-V has no
                     # storable bool), so they are converted on the host.
                     staged.append((len(hosts), arg))
                     arg = arg.astype(np.int32)
+                elif not arg.flags.c_contiguous:
+                    # Strided and Fortran-ordered arrays travel as
+                    # contiguous copies.
+                    staged.append((len(hosts), arg))
+                    arg = np.ascontiguousarray(arg)
                 hosts.append(arg)
             else:
                 ty = typeof(arg)
@@ -378,7 +392,8 @@ class VulkanDispatcher:
         runtime.get_device(device).run(kernel, tuple(groups), [meta, *hosts])
         for index, original in staged:
             if arg_binding(index) in kernel.written_bindings:
-                original[...] = hosts[index] != 0
+                copy = hosts[index]
+                original[...] = copy != 0 if original.dtype == np.bool_ else copy
         if meta[STATUS_INDEX]:
             self._raise(int(meta[STATUS_INDEX]))
 
