@@ -17,7 +17,17 @@ from numba_vulkan.runtime import (
     select_device,
     to_device,
 )
-from numba_vulkan.stubs import global_id
+from numba_vulkan.stubs import (
+    atomic,
+    barrier,
+    global_id,
+    group_id,
+    local_id,
+    local_size,
+    num_groups,
+    shared,
+    syncthreads,
+)
 
 __all__ = [
     "CompiledKernel",
@@ -27,13 +37,21 @@ __all__ = [
     "VulkanPrecisionWarning",
     "VulkanSupportError",
     "VulkanUnsupportedError",
+    "atomic",
+    "barrier",
     "device_array",
     "device_array_like",
     "get_device",
     "global_id",
+    "group_id",
     "jit",
     "list_devices",
+    "local_id",
+    "local_size",
+    "num_groups",
     "select_device",
+    "shared",
+    "syncthreads",
     "to_device",
 ]
 

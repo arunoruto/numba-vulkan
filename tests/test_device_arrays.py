@@ -173,7 +173,8 @@ def test_repeated_launches_follow_changes_of_buffers_kernels_and_grids(run, devi
     out1, out2 = nv.device_array_like(a), nv.device_array_like(a)
 
     run(scaled, 100, f32(2), a, out1)
-    state = dev._pipelines[id(next(iter(scaled._kernels.values())))]
+    kernel = next(k for k in scaled._kernels.values() if k.mode == dev.mode)
+    state = dev._pipelines[id(kernel)]
     bound = state.bound
     run(scaled, 100, f32(3), a, out1)  # same buffers, other scalar value
     assert state.bound == bound

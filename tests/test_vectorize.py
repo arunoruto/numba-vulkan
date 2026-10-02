@@ -130,8 +130,8 @@ def test_jit_options_are_passed_on(device):
 
     x = np.linspace(-3, 3, 64, dtype=f32)
     np.testing.assert_allclose(fast_sin(x, device=device), np.sin(x), atol=2e-3)
-    (kernel,) = fast_sin._kernels.values()
-    (compiled,) = kernel._kernels.values()
+    kernel = list(fast_sin._kernels.values())[-1]
+    compiled = list(kernel._kernels.values())[-1]
     assert "@llvm.sin.f32" in compiled.llvm_ir
 
 

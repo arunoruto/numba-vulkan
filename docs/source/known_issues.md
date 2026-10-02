@@ -178,11 +178,17 @@ The binding is part of the array type, so a function that takes arrays is
 compiled again for every combination of bindings it is called with. This is
 invisible for kernels but multiplies work for shared helper functions.
 
-### KI-16: fixed workgroup sizes
+### KI-16: 64-bit integer atomics and float64 atomics
 
-The workgroup size is fixed at 64, 8×8 or 4×4×4 depending on the grid
-dimensionality (`compiler.LOCAL_SIZES`). There is no shared memory, no
-atomics and no barriers.
+LLVM's SPIR-V backend does not offer the `Int64Atomics` capability for
+Vulkan, so atomics on `int64` and `uint64` arrays are rejected unless the
+kernel is narrowed (`narrow="ints"`). `float64` atomics would need a 64-bit
+compare-and-swap, which the backend cannot emit either. Its 32-bit
+compare-and-swap needs a repair of the generated SPIR-V
+(`codegen.fix_compare_exchange`), as do barriers
+(`codegen.fix_barrier_semantics`).
+
+**Fix:** in LLVM's SPIR-V backend.
 
 ## Portability
 

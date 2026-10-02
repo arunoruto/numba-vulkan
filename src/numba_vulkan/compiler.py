@@ -1,9 +1,11 @@
 """Compilation pipeline of the Vulkan target."""
 
 import re
+import zlib
 
 from llvmlite import ir
 from numba.core import cgutils, compiler, types, typing
+from numba.core import ir as numba_ir
 from numba.core.compiler import (
     CompilerBase,
     CompileResult,
@@ -12,9 +14,16 @@ from numba.core.compiler import (
     sanitize_compile_result_entries,
 )
 from numba.core.compiler_lock import global_compiler_lock
-from numba.core.compiler_machinery import LoweringPass, PassManager, register_pass
+from numba.core.compiler_machinery import (
+    FunctionPass,
+    LoweringPass,
+    PassManager,
+    register_pass,
+)
+from numba.core.ir_utils import find_callname, guard, mk_unique_var
 from numba.core.target_extension import target_override
 from numba.core.typed_passes import AnnotateTypes, IRLegalization, NativeLowering
+from numba.core.untyped_passes import IRProcessing
 
 from numba_vulkan import narrowing
 from numba_vulkan.buffers import (
@@ -99,6 +108,68 @@ class VulkanBackend(LoweringPass):
         return True
 
 
+@register_pass(mutates_CFG=False, analysis_only=False)
+class NumberSharedArrays(FunctionPass):
+    """Give every ``shared.array(...)`` call site an identity.
+
+    A shared array becomes a workgroup variable, which must be the same for
+    every execution of the call and different from that of any other call.
+    The pass passes a literal derived from the function and the position of
+    the call as a hidden argument, which typing turns into the array's
+    "binding" (see `numba_vulkan.vkdecl.SharedArray`). Being derived from
+    the source, it is the same in every process, as the kernel cache needs.
+    """
+
+    _name = "vulkan_number_shared_arrays"
+
+    def __init__(self):
+        FunctionPass.__init__(self)
+
+    def run_pass(self, state):
+        """Add the hidden argument to the calls.
+
+        Parameters
+        ----------
+        state : numba.core.compiler.StateDict
+            Compiler state.
+
+        Returns
+        -------
+        bool
+            Whether the IR changed.
+        """
+        func_ir = state.func_ir
+        changed, seen = False, 0
+        for block in func_ir.blocks.values():
+            body = []
+            for stmt in block.body:
+                expr = getattr(stmt, "value", None)
+                if (
+                    isinstance(stmt, numba_ir.Assign)
+                    and isinstance(expr, numba_ir.Expr)
+                    and expr.op == "call"
+                    and guard(find_callname, func_ir, expr)
+                    == ("array", "numba_vulkan.shared")
+                ):
+                    seen += 1
+                    site = (
+                        f"{func_ir.func_id.modname}.{func_ir.func_id.func_qualname}:"
+                        f"{stmt.loc.line}:{stmt.loc.col}:{seen}"
+                    )
+                    value = zlib.crc32(site.encode()) % (1 << 22)
+                    var = numba_ir.Var(
+                        block.scope, mk_unique_var("$shared_site"), stmt.loc
+                    )
+                    body.append(
+                        numba_ir.Assign(numba_ir.Const(value, stmt.loc), var, stmt.loc)
+                    )
+                    expr.kws = list(expr.kws) + [("_vulkan_site", var)]
+                    changed = True
+                body.append(stmt)
+            block.body = body
+        return changed
+
+
 class VulkanCompiler(CompilerBase):
     """Numba compiler pipeline of the Vulkan target.
 
@@ -116,6 +187,7 @@ class VulkanCompiler(CompilerBase):
         dpb = DefaultPassBuilder
         pm = PassManager(TARGET_NAME)
         pm.passes.extend(dpb.define_untyped_pipeline(self.state).passes)
+        pm.add_pass_after(NumberSharedArrays, IRProcessing)
         pm.passes.extend(dpb.define_typed_pipeline(self.state).passes)
         pm.add_pass(IRLegalization, "ensure IR is legal prior to lowering")
         pm.add_pass(AnnotateTypes, "annotate types")
@@ -231,8 +303,17 @@ def _load_argument(context, builder, index, ty, shape_offset):
     return val
 
 
+_SHARED_GLOBAL = re.compile(r"addrspace\(3\) global \[(\d+) x (\w+)\]")
+_TYPE_BYTES = {"i8": 1, "i16": 2, "i32": 4, "i64": 8, "float": 4, "double": 8}
+
+
+def _shared_bytes(text):
+    """Bytes of workgroup-shared memory that LLVM IR declares."""
+    return sum(int(n) * _TYPE_BYTES[t] for n, t in _SHARED_GLOBAL.findall(text))
+
+
 @global_compiler_lock
-def compile_kernel(cres, ndim, exact=True):
+def compile_kernel(cres, ndim, exact=True, local_size=None):
     """Wrap a compiled function in a shader entry point and emit SPIR-V.
 
     Parameters
@@ -240,10 +321,13 @@ def compile_kernel(cres, ndim, exact=True):
     cres : VulkanCompileResult
         The compiled kernel body; it must return ``None``.
     ndim : int
-        Dimensionality of the dispatch grid (selects the workgroup size).
+        Dimensionality of the dispatch grid (selects the default workgroup
+        size).
     exact : bool
         Whether drivers must keep float arithmetic as written; see
         `numba_vulkan.codegen.mark_exact`.
+    local_size : tuple of int, optional
+        Workgroup size; by default 64 invocations, shaped by `ndim`.
 
     Returns
     -------
@@ -278,7 +362,8 @@ def compile_kernel(cres, ndim, exact=True):
         store_element(builder, META_BINDING, i32, i32(STATUS_INDEX), status.code)
     builder.ret_void()
 
-    local = LOCAL_SIZES[ndim]
+    local = tuple(local_size) if local_size else LOCAL_SIZES[ndim]
+    local = local + (1,) * (3 - len(local))
     text, count = re.subn(
         rf'(define void @"?{ENTRY_POINT}"?\(\))', r"\1 #0", str(module), count=1
     )
@@ -288,6 +373,7 @@ def compile_kernel(cres, ndim, exact=True):
     library.add_ir_module(text)
     library.first_constant_binding = 1 + len(argtypes)
     library.mode = narrowing.current
+    library.local_size = local
     library.finalize()
 
     spirv = library.get_spirv(exact)
@@ -300,6 +386,7 @@ def compile_kernel(cres, ndim, exact=True):
         local_size=local,
         capabilities=spirv_capabilities(spirv),
         written_bindings=set(library.written_bindings),
+        shared_bytes=_shared_bytes(library.get_optimized_llvm_str()),
         constants=dict(library.constants),
         mode=library.mode,
         narrowed=library.narrowed,

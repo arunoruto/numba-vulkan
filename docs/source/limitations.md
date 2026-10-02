@@ -14,6 +14,9 @@ are tracked in {doc}`known_issues`.
   written through; `a[1:3] = x` fills a slice from a scalar or an array
 - iteration over arrays (`for v in a`, `enumerate`, `zip`)
 - NumPy arrays from the enclosing scope as read-only tables
+- workgroup-shared arrays, barriers, atomics (`add`, `sub`, `max`, `min`,
+  `exch`, `and_`, `or_`, `xor`, `cas`) on 32-bit elements, and launches
+  with an explicit workgroup size (`kernel[groups, local_size]`)
 - `numba.vectorize` and `numba.guvectorize` with `target="vulkan"`, with
   broadcasting, device arrays and `out=`; no `reduce` or other ufunc
   methods

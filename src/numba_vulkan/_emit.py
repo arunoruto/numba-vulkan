@@ -52,6 +52,9 @@ def main():
     exits.
     """
     triple = sys.argv[1]
+    # Lets the backend use float atomics; they are emitted only for devices
+    # that support them (see numba_vulkan.narrowing.Mode).
+    llvm.set_option("", "--spirv-ext=+SPV_EXT_shader_atomic_float_add")
     llvm.initialize_all_targets()
     llvm.initialize_all_asmprinters()
     target = llvm.Target.from_triple(triple)

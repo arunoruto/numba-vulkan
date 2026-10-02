@@ -53,6 +53,28 @@ rows, which reuse the kernels compiled for the rows above.
 These are results of a single run on one machine. Repeated runs vary by
 around 25 %, so small differences between rows are not meaningful.
 
+## The same kernels on Vulkan and CUDA
+
+The workloads above let every backend compile a function its own way.
+`benchmarks/kernels.py` instead writes kernels once, in the style of
+numba.cuda, with shared memory, barriers and atomics, and substitutes the
+API names to produce a numba-cuda kernel and a numba-vulkan kernel with the
+same workgroup and grid sizes. Data stays on the device, so these numbers
+compare the code generators and runtimes on equal terms.
+
+```{include} _generated/kernel_benchmark_results.md
+```
+
+- On the same card, Vulkan is within 20 to 30 % of CUDA on the
+  reduction and the histogram. Most of the difference is the launch: a
+  Vulkan launch waits for the kernel and costs about 0.1 ms.
+- The tiled matrix product is about 1.5× slower with Numba's default 64-bit
+  integers; with `narrow="ints"` it matches CUDA. NVIDIA's CUDA compiler
+  narrows such index arithmetic itself, the Vulkan driver does not.
+- The reduction uses a float atomic addition per workgroup. The Titan X
+  supports native float atomics; on the integrated GPU, which does not,
+  numba-vulkan falls back to a compare-and-swap loop.
+
 ## Reproducing
 
 ```sh
@@ -65,6 +87,13 @@ NUMBA_VULKAN_CACHE=0 uv run python benchmarks/bench.py \
     --markdown docs/source/_generated/benchmark_results.md
 ```
 
-Options: `--size` (grid edge; arrays have `size**2` elements), `--maxiter`,
+For the kernel comparison:
+
+```sh
+uv run python benchmarks/kernels.py \
+    --markdown docs/source/_generated/kernel_benchmark_results.md
+```
+
+Options of `bench.py`: `--size` (grid edge; arrays have `size**2` elements), `--maxiter`,
 `--repeat`, `--json PATH`, `--markdown PATH`. Backends that are unavailable
 are skipped.

@@ -1,6 +1,7 @@
 """Minimal Vulkan compute runtime: devices, device arrays and kernel launch."""
 
 import itertools
+import math
 import os
 import weakref
 from dataclasses import dataclass, field
@@ -37,6 +38,19 @@ class DeviceInfo:
         Whether shaders may use the respective type.
     handle : object
         The ``VkPhysicalDevice`` handle.
+    int64_atomics : bool
+        Whether shaders may apply atomic operations to 64-bit integers.
+    float32_atomic_add : bool
+        Whether shaders may add to ``float32`` values atomically, in
+        buffers and in shared memory (``VK_EXT_shader_atomic_float``).
+    max_local_size : tuple of int
+        Largest workgroup extent along each axis.
+    max_local_invocations : int
+        Largest number of invocations in one workgroup.
+    max_groups : tuple of int
+        Largest number of workgroups along each axis of a dispatch.
+    max_shared_memory : int
+        Bytes of workgroup-shared memory available to a kernel.
     """
 
     index: int
@@ -47,6 +61,12 @@ class DeviceInfo:
     int16: bool
     int8: bool
     handle: object
+    int64_atomics: bool = False
+    float32_atomic_add: bool = False
+    max_local_size: tuple = (128, 128, 64)
+    max_local_invocations: int = 128
+    max_groups: tuple = (65535, 65535, 65535)
+    max_shared_memory: int = 16384
 
     def __repr__(self):
         return f"<{self.index}: {self.name} ({self.kind})>"
@@ -83,8 +103,8 @@ def _get_instance():
     return _instance
 
 
-def _int8_feature(handle):
-    """Whether a device supports 8-bit integers in shaders.
+def _vulkan12_features(handle):
+    """The Vulkan 1.2 features of a device.
 
     Parameters
     ----------
@@ -93,7 +113,8 @@ def _int8_feature(handle):
 
     Returns
     -------
-    bool
+    object
+        The filled ``VkPhysicalDeviceVulkan12Features`` structure.
     """
     feats = vk.VkPhysicalDeviceVulkan12Features(
         sType=vk.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES
@@ -102,7 +123,39 @@ def _int8_feature(handle):
         sType=vk.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, pNext=feats
     )
     vk.vkGetPhysicalDeviceFeatures2(handle, feats2)
-    return bool(feats.shaderInt8)
+    return feats
+
+
+_FLOAT_ATOMICS = "VK_EXT_shader_atomic_float"
+
+
+def _float_atomic_features(handle):
+    """The float atomic features of a device, if it has the extension.
+
+    Parameters
+    ----------
+    handle : object
+        A ``VkPhysicalDevice`` handle.
+
+    Returns
+    -------
+    object or None
+        The filled ``VkPhysicalDeviceShaderAtomicFloatFeaturesEXT``
+        structure, or ``None`` without ``VK_EXT_shader_atomic_float``.
+    """
+    names = {
+        e.extensionName for e in vk.vkEnumerateDeviceExtensionProperties(handle, None)
+    }
+    if _FLOAT_ATOMICS not in names:
+        return None
+    feats = vk.VkPhysicalDeviceShaderAtomicFloatFeaturesEXT(
+        sType=vk.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_ATOMIC_FLOAT_FEATURES_EXT
+    )
+    feats2 = vk.VkPhysicalDeviceFeatures2(
+        sType=vk.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, pNext=feats
+    )
+    vk.vkGetPhysicalDeviceFeatures2(handle, feats2)
+    return feats
 
 
 def list_devices(refresh=False):
@@ -127,6 +180,9 @@ def list_devices(refresh=False):
         if props.apiVersion < _API_VERSION:
             continue
         feats = vk.vkGetPhysicalDeviceFeatures(handle)
+        feats12 = _vulkan12_features(handle)
+        float_atomics = _float_atomic_features(handle)
+        limits = props.limits
         found.append(
             DeviceInfo(
                 index=len(found),
@@ -135,8 +191,21 @@ def list_devices(refresh=False):
                 float64=bool(feats.shaderFloat64),
                 int64=bool(feats.shaderInt64),
                 int16=bool(feats.shaderInt16),
-                int8=_int8_feature(handle),
+                int8=bool(feats12.shaderInt8),
                 handle=handle,
+                int64_atomics=bool(
+                    feats12.shaderBufferInt64Atomics
+                    and feats12.shaderSharedInt64Atomics
+                ),
+                float32_atomic_add=bool(
+                    float_atomics is not None
+                    and float_atomics.shaderBufferFloat32AtomicAdd
+                    and float_atomics.shaderSharedFloat32AtomicAdd
+                ),
+                max_local_size=tuple(limits.maxComputeWorkGroupSize),
+                max_local_invocations=limits.maxComputeWorkGroupInvocations,
+                max_groups=tuple(limits.maxComputeWorkGroupCount),
+                max_shared_memory=limits.maxComputeSharedMemorySize,
             )
         )
     _infos = found
@@ -190,9 +259,20 @@ class Device:
             shaderInt64=info.int64,
             shaderInt16=info.int16,
         )
+        extensions, chain = [], {}
+        if info.float32_atomic_add:
+            chain["pNext"] = vk.VkPhysicalDeviceShaderAtomicFloatFeaturesEXT(
+                sType=vk.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_ATOMIC_FLOAT_FEATURES_EXT,
+                shaderBufferFloat32AtomicAdd=True,
+                shaderSharedFloat32AtomicAdd=True,
+            )
+            extensions.append(_FLOAT_ATOMICS)
         features12 = vk.VkPhysicalDeviceVulkan12Features(
             sType=vk.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
             shaderInt8=info.int8,
+            shaderBufferInt64Atomics=info.int64_atomics,
+            shaderSharedInt64Atomics=info.int64_atomics,
+            **chain,
         )
         create = vk.VkDeviceCreateInfo(
             sType=vk.VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
@@ -200,6 +280,8 @@ class Device:
             queueCreateInfoCount=1,
             pQueueCreateInfos=[queue_info],
             pEnabledFeatures=features,
+            enabledExtensionCount=len(extensions),
+            ppEnabledExtensionNames=extensions or None,
         )
         self.handle = vk.vkCreateDevice(phys, create, None)
         self.queue = vk.vkGetDeviceQueue(self.handle, self.family, 0)
@@ -238,7 +320,11 @@ class Device:
         self._recorded = None
         self._pipelines = {}
         # 64-bit types this device cannot use and kernels must do without.
-        self.mode = narrowing.Mode(floats=not info.float64, ints=not info.int64)
+        self.mode = narrowing.Mode(
+            floats=not info.float64,
+            ints=not info.int64,
+            float_atomics=info.float32_atomic_add,
+        )
         # Released buffers by (size, mappable), kept for reuse.
         self._free = {}
         self._pooled = 0
@@ -266,6 +352,20 @@ class Device:
             raise VulkanSupportError(
                 f"kernel '{kernel.name}' needs {', '.join(missing)} support, which "
                 f"{self.info.name} does not provide"
+            )
+        info, local = self.info, kernel.local_size
+        if math.prod(local) > info.max_local_invocations or any(
+            n > limit for n, limit in zip(local, info.max_local_size)
+        ):
+            raise VulkanSupportError(
+                f"kernel '{kernel.name}' has workgroups of {local}, but {info.name} "
+                f"allows at most {info.max_local_invocations} invocations and "
+                f"{info.max_local_size} per axis"
+            )
+        if kernel.shared_bytes > info.max_shared_memory:
+            raise VulkanSupportError(
+                f"kernel '{kernel.name}' uses {kernel.shared_bytes} bytes of shared "
+                f"memory, but {info.name} provides {info.max_shared_memory}"
             )
 
     def _pipeline(self, kernel):

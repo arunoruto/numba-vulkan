@@ -245,3 +245,14 @@ after:
     out = structurize(text)
     assert_structured(out)
     assert_same_results(text, out)
+
+
+def test_barriers_are_not_copied():
+    text = BYPASSED_JOIN.replace(
+        "  %w = add i32 %v, 10\n",
+        "  %w = add i32 %v, 10\n  call void @numba_vulkan.barrier()\n",
+    ).replace("define i32 @f(", "declare void @numba_vulkan.barrier()\ndefine i32 @f(")
+    out = structurize(text)
+    assert_structured(out)
+    assert out.count("call void @numba_vulkan.barrier()") == 1
+    assert "join.guard:" in out

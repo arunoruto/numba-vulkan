@@ -244,6 +244,78 @@ devices. `@nv.jit(fastmath=True)` trades that for speed: `float32` math
 uses the device's built-in functions and the driver may reorder
 arithmetic.
 
+## Workgroups, shared memory and atomics
+
+Kernels can be written exactly like `numba.cuda` kernels that cooperate
+within a block. The names map as follows:
+
+| numba.cuda | numba-vulkan |
+| --- | --- |
+| `cuda.grid(1)` | `nv.global_id(0)` |
+| `cuda.threadIdx.x`, `cuda.blockIdx.x` | `nv.local_id(0)`, `nv.group_id(0)` |
+| `cuda.blockDim.x`, `cuda.gridDim.x` | `nv.local_size(0)`, `nv.num_groups(0)` |
+| `cuda.shared.array(shape, dtype)` | `nv.shared.array(shape, dtype)` |
+| `cuda.syncthreads()` | `nv.barrier()` (or `nv.syncthreads()`) |
+| `cuda.atomic.add(a, i, v)` ... | `nv.atomic.add(a, i, v)` ... |
+| `kernel[blocks, threads](...)` | `kernel[groups, local_size](...)` |
+
+```python
+@nv.jit
+def block_sums(x, out):
+    partial = nv.shared.array(256, np.float32)
+    t = nv.local_id(0)
+    i = nv.global_id(0)
+    partial[t] = x[i] if i < x.shape[0] else np.float32(0)
+    nv.barrier()
+    step = 128
+    while step > 0:
+        if t < step:
+            partial[t] += partial[t + step]
+        nv.barrier()
+        step //= 2
+    if t == 0:
+        nv.atomic.add(out, 0, partial[0])
+
+block_sums[n_groups, 256](x, out)           # 256 invocations per workgroup
+block_sums.forall(n, local_size=256)(x, out)  # or: n rounded up to workgroups
+```
+
+`kernel[groups, local_size]` launches exactly `groups × local_size`
+invocations, like CUDA; `forall(n, local_size=...)` rounds `n` up. Without
+a `local_size`, workgroups have 64 invocations. Sizes beyond the device's
+limits, and shared arrays larger than its shared memory, raise
+{py:class}`~numba_vulkan.errors.VulkanSupportError`.
+
+Shared arrays need a constant shape and type; each workgroup has its own,
+uninitialised copy. `nv.barrier()` must be reached by all invocations of a
+workgroup, so it must not sit under a condition that differs between them.
+
+The atomics `add`, `sub`, `max`, `min`, `exch`, `and_`, `or_`, `xor` and
+`cas` work on elements of array arguments and shared arrays, return the
+previous value, and use relaxed ordering, as in CUDA. Integer atomics need
+`int32` or `uint32` elements: LLVM's SPIR-V backend does not offer 64-bit
+integer atomics for Vulkan, so `int64` arrays are rejected unless the
+kernel is narrowed. `float32` additions use the device's native
+instruction where it has one (`VK_EXT_shader_atomic_float`) and a
+compare-and-swap loop otherwise; float `max` and `min` always use the loop.
+`float64` atomics are not available.
+
+### 32-bit integers for speed
+
+Numba computes with `int64` wherever it can, including every
+`local_id(0) * 16 + j`. GPUs execute 64-bit integer arithmetic as several
+32-bit instructions, so index-heavy kernels such as tiled matrix products
+run up to 1.5× slower than they need to. `@nv.jit(narrow="ints")` compiles
+all integers as 32-bit, which is what CUDA C programmers would write:
+
+```python
+@nv.jit(narrow="ints")
+def matmul(a, b, c):
+    ...
+```
+
+Integers then wrap at 2³¹, and `int64` arrays are converted on the host.
+
 ## Ufuncs: `vectorize` and `guvectorize`
 
 Numba's own decorators accept `target="vulkan"` once `numba_vulkan` is

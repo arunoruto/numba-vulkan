@@ -214,6 +214,29 @@ hypot(x, y)               # element-wise, with broadcasting
 dot(matrix, vector)       # one dot product per row
 ```
 
+Cooperating kernels use the same building blocks as in `numba.cuda`:
+workgroup-shared arrays, barriers, atomics and an explicit launch
+configuration:
+
+```python
+@nv.jit
+def block_sums(x, out):
+    partial = nv.shared.array(256, np.float32)
+    t, i = nv.local_id(0), nv.global_id(0)
+    partial[t] = x[i] if i < x.shape[0] else np.float32(0)
+    nv.barrier()
+    step = 128
+    while step > 0:
+        if t < step:
+            partial[t] += partial[t + step]
+        nv.barrier()
+        step //= 2
+    if t == 0:
+        nv.atomic.add(out, 0, partial[0])
+
+block_sums[groups, 256](x, out)    # like kernel[blocks, threads] in CUDA
+```
+
 Because it is a real Numba target, `@overload` works with it:
 
 ```python
@@ -284,6 +307,17 @@ Reading the numbers:
 - All backends agree with the CPU result to float32 rounding; saxpy is
   bit-identical on Vulkan.
 - Repeated runs vary by around 25 %, so small differences are not meaningful.
+
+Those workloads let every backend compile a function its own way.
+`benchmarks/kernels.py` instead runs the same CUDA-style kernels (shared
+memory, barriers, atomics) on both GPU backends, with data on the device
+(milliseconds, NVIDIA TITAN X):
+
+| Kernel | numba-vulkan | numba-vulkan, `narrow="ints"` | numba-cuda |
+| --- | ---: | ---: | ---: |
+| Sum of 16M float32 | 0.28 | 0.29 | 0.24 |
+| Histogram of 16M int32, 256 bins | 0.31 | 0.33 | 0.25 |
+| 1024² matrix product, 16×16 tiles | 3.09 | 2.06 | 1.98 |
 
 The [documentation](docs/source/benchmarks.md) has the full tables, including
 compile times and the software versions used.
@@ -386,7 +420,7 @@ To continue the work, start with the
 - [ ] Publish to PyPI
 - [x] `numba.vectorize` / `numba.guvectorize` with `target="vulkan"`
 - [ ] Ufunc methods (`reduce`, `accumulate`, `outer`)
-- [ ] Shared memory, atomics and barriers
+- [x] Shared memory, atomics, barriers and CUDA-style launch configuration
 - [x] On-disk caching of compiled kernels
 - [ ] Testing on AMD, Apple (MoltenVK) and mobile GPUs
 

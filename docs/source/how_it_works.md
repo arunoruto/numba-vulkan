@@ -147,6 +147,25 @@ decorated `NoContraction`, because shader compilers otherwise reassociate
 arithmetic freely, which Numba code does not expect. And the module is
 checked for constructs known to crash drivers before it is handed to one.
 
+## Shared memory, atomics and barriers
+
+A shared array is typed like an array argument whose "binding" lies above
+`buffers.SHARED_BASE`; an untyped pass gives each `shared.array` call a
+number derived from its function and position, so that the type, and with
+it the kernel cache key, is the same in every process. Element accesses
+use the same placeholders as buffers and become accesses to a Workgroup
+variable when they are expanded. Atomics are placeholders as well, which
+become `atomicrmw` with relaxed ordering and device or workgroup scope.
+
+The backend crashes on LLVM's `cmpxchg`, so compare-and-swap uses its
+`llvm.spv.cmpxchg` intrinsic, whose mistyped result is repaired in the
+SPIR-V binary. Barriers are a `convergent` placeholder with unknown memory
+effects, so that LLVM neither moves memory accesses across them nor
+duplicates them; the control-flow restructuring guards joins instead of
+copying them when they contain one, and the barrier's memory semantics are
+changed to acquire-release in the binary, because Vulkan forbids the
+sequentially consistent ones the backend emits.
+
 ## Ufuncs
 
 Numba's `vectorize` and `guvectorize` look up a builder class per target;

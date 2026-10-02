@@ -214,9 +214,7 @@ class VulkanTargetContext(BaseContext):
             slicing,
             tupleobj,
         )
-        from numba.np import arrayobj  # noqa: F401
-
-        from numba.np import npyimpl
+        from numba.np import arrayobj, npyimpl  # noqa: F401
 
         from numba_vulkan import arrayfuncs, mathfuncs, mathimpl, vkimpl  # noqa: F401
 
@@ -397,8 +395,6 @@ class VulkanTargetContext(BaseContext):
 
 class VulkanTargetOptions(TargetOptions):
     """Options accepted by the target; none beyond Numba's defaults."""
-
-    pass
 
 
 class VulkanTarget(TargetDescriptor):
