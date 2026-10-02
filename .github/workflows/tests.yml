@@ -1,0 +1,51 @@
+name: "Tests"
+
+# The test suite on lavapipe (Mesa's CPU Vulkan driver), with every shader
+# checked by spirv-val and the runtime's use of Vulkan by Khronos'
+# validation layer, including synchronization (NUMBA_VULKAN_DEBUG=2).
+# libclc comes from conda-forge (make libclc without Nix).
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - "src/**"
+      - "tests/**"
+      - "pyproject.toml"
+      - "uv.lock"
+      - "Makefile"
+      - "scripts/**"
+      - ".github/workflows/tests.yml"
+
+concurrency:
+  group: ${{ github.ref }}-${{ github.workflow }}
+  cancel-in-progress: true
+
+jobs:
+  lavapipe:
+    runs-on: ubuntu-latest
+    env:
+      NUMBA_VULKAN_DEBUG: "2"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.2.0
+
+      - name: Install lavapipe, the validation layer and SPIRV-Tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libvulkan1 mesa-vulkan-drivers vulkan-validationlayers spirv-tools vulkan-tools
+          vulkaninfo --summary | grep -E "deviceName|driverInfo|apiVersion"
+
+      - name: Get libclc
+        run: make libclc
+
+      - name: Run the tests
+        run: >
+          uv run pytest -q -rxXs
+          -W "ignore::numba_vulkan.VulkanValidationWarning"

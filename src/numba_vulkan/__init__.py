@@ -8,6 +8,7 @@ from numba_vulkan.errors import (
     VulkanPrecisionWarning,
     VulkanSupportError,
     VulkanUnsupportedError,
+    VulkanValidationWarning,
 )
 from numba_vulkan.runtime import (
     DeviceArray,
@@ -41,6 +42,7 @@ __all__ = [
     "VulkanPrecisionWarning",
     "VulkanSupportError",
     "VulkanUnsupportedError",
+    "VulkanValidationWarning",
     "atomic",
     "barrier",
     "device_array",

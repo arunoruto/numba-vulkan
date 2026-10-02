@@ -39,6 +39,7 @@ _SPV_CAPABILITIES = {
     9: "float16",
     12: "int64_atomics",
     4433: "storage16",
+    4448: "storage8",
     22: "int16",
     39: "int8",
     6033: "float32_atomic_add",
@@ -341,7 +342,7 @@ def emit_spirv(llvm_ir, exact=True, narrow_ints=False):
     spirv = half_storage(spirv)
     if narrow_ints:
         spirv = narrow_index_constants(spirv)
-    spirv = strip_unused(spirv)
+    spirv = storage8_capability(strip_unused(spirv))
     if exact:
         spirv = mark_exact(spirv)
     check_spirv(spirv)
@@ -638,6 +639,67 @@ def half_storage(spirv):
         else inst
         for inst in instructions
     ]
+    return _assemble(header, out)
+
+
+_CAP_STORAGE8 = 4448
+_STORAGE_BUFFER = 12
+# OpTypeVector, OpTypeArray, OpTypeRuntimeArray, OpTypeStruct
+_OP_TYPE_VECTOR, _OP_TYPE_ARRAY, _OP_TYPE_RUNTIME_ARRAY, _OP_TYPE_STRUCT = (
+    23,
+    28,
+    29,
+    30,
+)
+
+
+def storage8_capability(spirv):
+    """Declare ``StorageBuffer8BitAccess`` where buffers hold 8-bit integers.
+
+    Vulkan needs that capability, and the device feature of the same name,
+    for 8-bit integers in storage buffers (``int8`` and ``uint8`` arrays).
+    The backend declares only ``Int8``. Eight-bit values in other memory,
+    such as the byte tables of libclc in private memory, do not need it.
+
+    Parameters
+    ----------
+    spirv : bytes
+        A SPIR-V module.
+
+    Returns
+    -------
+    bytes
+        The module, with the capability added if a storage buffer contains
+        an 8-bit integer.
+    """
+    header, instructions = _instructions(spirv)
+    with8 = {i[1] for i in instructions if i[0] & 0xFFFF == _OP_TYPE_INT and i[2] == 8}
+    if not with8:
+        return spirv
+    if any(
+        i[0] & 0xFFFF == _OP_CAPABILITY and i[1] == _CAP_STORAGE8 for i in instructions
+    ):
+        return spirv
+    # Types are defined before use, so one pass finds every aggregate that
+    # contains an 8-bit integer.
+    buffer8 = False
+    for inst in instructions:
+        opcode = inst[0] & 0xFFFF
+        if opcode in (_OP_TYPE_VECTOR, _OP_TYPE_ARRAY, _OP_TYPE_RUNTIME_ARRAY):
+            if inst[2] in with8:
+                with8.add(inst[1])
+        elif opcode == _OP_TYPE_STRUCT:
+            if with8.intersection(inst[2:]):
+                with8.add(inst[1])
+        elif opcode == _OP_TYPE_POINTER and inst[2] == _STORAGE_BUFFER:
+            buffer8 = buffer8 or inst[3] in with8
+    if not buffer8:
+        return spirv
+    first = next(
+        k for k, i in enumerate(instructions) if i[0] & 0xFFFF == _OP_CAPABILITY
+    )
+    out = list(instructions)
+    out.insert(first + 1, ((2 << 16) | _OP_CAPABILITY, _CAP_STORAGE8))
     return _assemble(header, out)
 
 

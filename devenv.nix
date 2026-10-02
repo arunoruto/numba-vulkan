@@ -12,6 +12,8 @@
     pkgs.spirv-tools
     # vulkaninfo
     pkgs.vulkan-tools
+    # VK_LAYER_KHRONOS_validation, used with NUMBA_VULKAN_DEBUG=1
+    pkgs.vulkan-validation-layers
   ];
 
   env = lib.mkMerge [
