@@ -1,7 +1,11 @@
 name: "Build and publish"
 
 # Builds the sdist and wheel (with libclc bundled) and checks that the wheel
-# runs a kernel on lavapipe, Mesa's CPU Vulkan driver. Publishing to PyPI
+# runs a kernel on lavapipe, Mesa's CPU Vulkan driver. The released wheel
+# bundles libclc from the nixpkgs revision that devenv.lock pins; the check
+# installs it into a plain uv-managed Python, outside Nix. A second build
+# takes libclc from conda-forge, so that building without Nix keeps working.
+# Publishing to PyPI
 # happens only for a published GitHub release, through PyPI's trusted
 # publishing (no token), from the `pypi` environment.
 
@@ -19,6 +23,10 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        libclc: [nix, conda]
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -26,13 +34,17 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v10.2.0
 
+      - name: Install Nix
+        if: matrix.libclc == 'nix'
+        uses: cachix/install-nix-action@v31.11.1
+
       - name: Install the Vulkan loader and lavapipe
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends libvulkan1 mesa-vulkan-drivers
 
       - name: Check that the release tag matches the version
-        if: github.event_name == 'release'
+        if: github.event_name == 'release' && matrix.libclc == 'nix'
         run: |
           version=$(uv run --no-project python -c "import tomllib; print(tomllib.load(open('pyproject.toml', 'rb'))['project']['version'])")
           if [ "v$version" != "$GITHUB_REF_NAME" ]; then
@@ -41,12 +53,13 @@ jobs:
           fi
 
       - name: Build
-        run: make dist
+        run: make dist LIBCLC_SOURCE=${{ matrix.libclc }}
 
       - name: Run a kernel with the wheel
         run: make check
 
       - name: Keep the distributions
+        if: matrix.libclc == 'nix'
         uses: actions/upload-artifact@v7
         with:
           name: dist

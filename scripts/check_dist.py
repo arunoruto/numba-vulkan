@@ -1,6 +1,6 @@
 """Check that built distributions carry libclc and its licence.
 
-    python scripts/check_dist.py dist
+python scripts/check_dist.py dist
 """
 
 import pathlib
@@ -8,7 +8,11 @@ import sys
 import tarfile
 import zipfile
 
-REQUIRED = ("numba_vulkan/data/clspv--.bc", "numba_vulkan/data/LICENSE-libclc.txt")
+REQUIRED = (
+    "numba_vulkan/data/clspv--.bc",
+    "numba_vulkan/data/libclc-version.txt",
+    "numba_vulkan/data/LICENSE-libclc.txt",
+)
 
 
 def main(folder):
@@ -18,9 +22,11 @@ def main(folder):
         sys.exit(f"no wheel in {folder}")
     for path in found:
         if path.suffix == ".whl":
-            names = zipfile.ZipFile(path).namelist()
+            with zipfile.ZipFile(path) as archive:
+                names = archive.namelist()
         elif path.name.endswith(".tar.gz"):
-            names = tarfile.open(path).getnames()
+            with tarfile.open(path) as archive:
+                names = archive.getnames()
         else:
             continue
         for required in REQUIRED:

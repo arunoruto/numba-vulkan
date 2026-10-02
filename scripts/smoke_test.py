@@ -13,7 +13,8 @@ from numba_vulkan import libclc
 
 path = libclc.find_bitcode()
 assert path is not None and "site-packages" in path, f"libclc not bundled: {path}"
-print("libclc:", path)
+print("libclc:", libclc.version(), "at", path)
+assert libclc.version() is not None, "no libclc version recorded"
 print("devices:", nv.list_devices())
 
 

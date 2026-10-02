@@ -11,6 +11,7 @@ benchmarks/results*.json
 
 # libclc bitcode, copied in by `bundle-libclc` for building distributions
 /src/numba_vulkan/data/*.bc
+/src/numba_vulkan/data/libclc-version.txt
 
 # --- Python -----------------------------------------------------------------
 
