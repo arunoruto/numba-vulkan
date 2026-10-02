@@ -1,14 +1,14 @@
 """Behaviour of a device that its reported features do not reveal.
 
-Two kinds of ``float64`` behaviour make libclc and kernels go wrong on some
-drivers, and both are found out by running a small kernel on each device:
+Two kinds of float behaviour make libclc and kernels go wrong on some
+drivers, and both are found out by running small kernels on each device:
 
 * Vulkan lets a driver compute ``Fma`` as a multiplication followed by an
   addition, rounding twice. libclc assumes a fused operation; without it,
   its ``sin``, ``cos`` and ``tan`` lose all accuracy beyond small
-  arguments. llvmpipe does not fuse. Kernels for such a device are
-  compiled with a software version
-  (`numba_vulkan.legalize.emulate_fma64`).
+  arguments. llvmpipe does not fuse, in either precision. Kernels for such
+  a device are compiled with a software version
+  (`numba_vulkan.legalize.emulate_fma`).
 * llvmpipe (Mesa 26.1) gets ``Trunc`` and ``RoundEven`` of ``double``
   values wrong in its vectorised code (values that differ between
   invocations); the scalar path is correct. Kernels for such a device
@@ -39,7 +39,7 @@ from numba_vulkan import kernelcache, libclc
 FMA_ENV_VAR = "NUMBA_VULKAN_SOFT_FMA"
 ROUNDING_ENV_VAR = "NUMBA_VULKAN_SOFT_ROUNDING"
 # Part of the key of stored results; changes whenever the probe does.
-_VERSION = "1"
+_VERSION = "2"
 _RESULTS = "probes.json"
 # Rows: a, b and c, a value to truncate and one to round, one column per
 # invocation.
@@ -59,6 +59,10 @@ _INPUT = np.stack(
         _k + 0.5,
     ]
 )
+# For float32: a * a - fl(a * a) with a = 1 + m * 2**-12 for odd m is
+# m**2 * 2**-24 when fused (the product needs 25 bits), and 0 when not.
+_A32 = (1 + (2 * _k + 1) * 2.0**-12).astype(np.float32)
+_INPUT32 = np.stack([_A32, _A32, -(_A32 * _A32)])
 
 
 @intrinsic(target="vulkan")
@@ -75,13 +79,13 @@ def _fma(typingctx, a, b, c):
     return a(a, b, c), codegen
 
 
-_kernel = None
+_kernels = None
 
 
 def _probe_kernel():
-    """The probe kernel, compiled on first use."""
-    global _kernel
-    if _kernel is None:
+    """The probe kernels, for float64 and float32, compiled on first use."""
+    global _kernels
+    if _kernels is None:
         from numba_vulkan.dispatcher import jit
         from numba_vulkan.stubs import global_id
 
@@ -92,8 +96,13 @@ def _probe_kernel():
                 out[1, i] = np.trunc(x[3, i])
                 out[2, i] = round(x[4, i])
 
-        _kernel = jit(probe)
-    return _kernel
+        def probe32(x, out):
+            i = global_id(0)
+            if i < x.shape[1]:
+                out[i] = _fma(x[0, i], x[1, i], x[2, i])
+
+        _kernels = (jit(probe), jit(probe32))
+    return _kernels
 
 
 def _forced(name):
@@ -144,19 +153,23 @@ def _measure(device):
     dict
         ``soft_fma`` and ``soft_rounding``.
     """
-    out = np.zeros((3, _LANES))
-    with warnings.catch_warnings():
-        # The probe computes with float64 on purpose.
-        warnings.simplefilter("ignore")
-        _probe_kernel().forall(_LANES, device=device)(_INPUT, out)
-    exact = _INPUT[0] * _INPUT[1] + _INPUT[2]  # rounded, as on the CPU
-    return {
-        "soft_fma": bool((out[0] == exact).any()),
-        "soft_rounding": bool(
+    probe, probe32 = _probe_kernel()
+    out32 = np.ones(_LANES, dtype=np.float32)
+    probe32.forall(_LANES, device=device)(_INPUT32, out32)
+    result = {"soft_fma": bool((out32 == 0).any()), "soft_rounding": False}
+    if device.info.float64:
+        out = np.zeros((3, _LANES))
+        with warnings.catch_warnings():
+            # The probe computes with float64 on purpose.
+            warnings.simplefilter("ignore")
+            probe.forall(_LANES, device=device)(_INPUT, out)
+        exact = _INPUT[0] * _INPUT[1] + _INPUT[2]  # rounded, as on the CPU
+        result["soft_fma"] |= bool((out[0] == exact).any())
+        result["soft_rounding"] = bool(
             (out[1] != np.trunc(_INPUT[3])).any()
             or (out[2] != np.round(_INPUT[4])).any()
-        ),
-    }
+        )
+    return result
 
 
 def workarounds(device):
@@ -177,7 +190,7 @@ def workarounds(device):
         "soft_fma": _forced(FMA_ENV_VAR),
         "soft_rounding": _forced(ROUNDING_ENV_VAR),
     }
-    if None not in forced.values() or not device.info.float64:
+    if None not in forced.values():
         return {name: bool(value) for name, value in forced.items()}
     measured = None
     if kernelcache.enabled():

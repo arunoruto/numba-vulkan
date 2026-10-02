@@ -41,11 +41,12 @@ def _trig_arguments():
 def _check_trig(run, x):
     s, c, t = (np.zeros_like(x) for _ in range(3))
     run(_trig, x.size, x, s, c, t)
+    # libclc's results are within 1 to 3 ulp; llvmpipe's were off by up to
+    # 1e19 ulp (float64) and 4e9 ulp (float32) before the workarounds.
+    rtol = 1e-15 if x.dtype == np.float64 else 5e-7
     for got, fn in ((s, math.sin), (c, math.cos), (t, math.tan)):
-        # math's functions are within an ulp, so are libclc's: 4.5 ulp apart
-        # at most. llvmpipe was off by up to 1e19 ulp before the workarounds.
-        want = np.vectorize(fn)(x)
-        np.testing.assert_allclose(got, want, rtol=1e-15, atol=0)
+        want = np.vectorize(fn)(x.astype(np.float64)).astype(x.dtype)
+        np.testing.assert_allclose(got, want, rtol=rtol, atol=0)
 
 
 # Doubles of at least 2**24, which llvmpipe's vectorised Trunc returned
@@ -75,6 +76,11 @@ def test_float64_trig_over_the_whole_range(run):
     _check_trig(run, _trig_arguments())
 
 
+def test_float32_trig_over_the_whole_range(run):
+    x = _trig_arguments().astype(np.float32)
+    _check_trig(run, x[np.isfinite(x)])
+
+
 def test_float64_trunc_and_round_of_large_values(run):
     _check_rounding(run)
 
@@ -87,6 +93,11 @@ def forced(device, monkeypatch):
         dev, "mode", dev.mode._replace(soft_fma=True, soft_rounding=True)
     )
     return dev
+
+
+def test_float32_trig_is_correct_with_the_workarounds_forced(run, forced):
+    x = _trig_arguments()[:500].astype(np.float32)
+    _check_trig(run, x[np.isfinite(x)])
 
 
 @needs_libclc
@@ -119,9 +130,13 @@ def test_fma_rewrite_replaces_every_call():
         "  %r = tail call nnan double @llvm.fma.f64(double %a, double %b, double %c)\n"
         "  ret double %r\n}\n"
     )
-    out = legalize.emulate_fma64(text)
+    out = legalize.emulate_fma(text)
     assert "call" not in out.split("define")[1].split("ret")[0]
     assert "%r = select i1" in out
+    # float works the same way, and can be left alone.
+    single = text.replace("double", "float").replace(".f64", ".f32")
+    assert "fmul float %a, 4097.0" in legalize.emulate_fma(single)
+    assert legalize.emulate_fma(single, ("double",)) == single
 
 
 def test_rounding_rewrite_declares_what_it_uses():

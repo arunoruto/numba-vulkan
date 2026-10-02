@@ -136,13 +136,13 @@ time it is used, and stores the result per device and driver version in
 
 | Behaviour | Seen on | Workaround |
 | --- | --- | --- |
-| `Fma` rounds the product before adding (Vulkan allows this) | llvmpipe | `llvm.fma.f64` computed in software, exactly (`legalize.emulate_fma64`) |
+| `Fma` rounds the product before adding (Vulkan allows this), in both precisions | llvmpipe | `llvm.fma` computed in software, exactly (`legalize.emulate_fma`) |
 | `Trunc` returns values of at least 2**24 unchanged; `RoundEven` rounds halves towards zero (vectorised code only) | llvmpipe (Mesa 26.1) | both computed from `Floor` (`legalize.emulate_rounding64`) |
 
 libclc relies on a fused `Fma` and on `Trunc` for the argument reduction
 of `sin`, `cos` and `tan`, which on llvmpipe were off by up to 1e19 ulp
-beyond small arguments; with the workarounds they are within 1 ulp there,
-as on the other devices. The rounding bug also affected `math.trunc`,
+(`float64`) and 4e9 ulp (`float32`) beyond small arguments; with the
+workarounds they are within 1 to 3 ulp there, as on the other devices. The rounding bug also affected `math.trunc`,
 `np.trunc`, `round` and `np.rint` in kernels. Kernels for devices that do
 not need the workarounds are compiled as before.
 `NUMBA_VULKAN_SOFT_FMA` and `NUMBA_VULKAN_SOFT_ROUNDING` (`1` or `0`)
@@ -204,6 +204,3 @@ kernels are currently narrowed to `float32` (KI-17).
 - **Compile time.** The whole library is parsed and linked for every
   kernel that uses it. Caching a reduced copy would remove most of the
   0.4 s this costs.
-- **llvmpipe.** For arguments beyond about 1e3, `sin` and `cos` lose
-  accuracy on llvmpipe (to 1e-3 in `float32`), probably because its fused
-  multiply-add is not fused. Hardware drivers are unaffected.

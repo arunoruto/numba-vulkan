@@ -97,8 +97,8 @@ class Mode(NamedTuple):
         instruction (``VK_EXT_shader_atomic_float``) instead of a
         compare-and-swap loop.
     soft_fma : bool
-        Whether ``float64`` fused multiply-add is computed in software,
-        because the device does not fuse it (see `numba_vulkan.probes`).
+        Whether fused multiply-add is computed in software, because the
+        device does not fuse it (see `numba_vulkan.probes`).
     soft_rounding : bool
         Whether ``float64`` truncation and rounding to even are computed
         from ``floor``, because the device gets them wrong (llvmpipe).

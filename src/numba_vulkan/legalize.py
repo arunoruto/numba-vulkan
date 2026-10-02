@@ -35,9 +35,10 @@ _FMULADD = re.compile(
     rf"(?:float|double) {_ATTRS}([^)]+)\).*$",
     re.MULTILINE,
 )
-_FMA64 = re.compile(
-    rf"^(\s*)(%\S+) = (?:tail )?call {_ATTRS}double @llvm\.fma\.f64"
-    rf"\(double {_ATTRS}([^,]+), double {_ATTRS}([^,]+), double {_ATTRS}([^)]+)\).*$",
+_FMA = re.compile(
+    rf"^(\s*)(%\S+) = (?:tail )?call {_ATTRS}(float|double) @llvm\.fma\.f(?:32|64)"
+    rf"\((?:float|double) {_ATTRS}([^,]+), (?:float|double) {_ATTRS}([^,]+), "
+    rf"(?:float|double) {_ATTRS}([^)]+)\).*$",
     re.MULTILINE,
 )
 _ROUNDING64 = re.compile(
@@ -227,22 +228,29 @@ def expand_fmuladd(text):
     return _FMULADD.sub(repl, text)
 
 
-def emulate_fma64(text):
-    """Rewrite ``llvm.fma.f64`` as a fused multiply-add in software.
+# Veltkamp's splitting constant, 2**ceil(p / 2) + 1 for p significant bits.
+_SPLIT = {"float": "4097.0", "double": "134217729.0"}
+
+
+def emulate_fma(text, types=("float", "double")):
+    """Rewrite ``llvm.fma`` as a fused multiply-add in software.
 
     Vulkan allows ``Fma`` to round the product before adding, and llvmpipe
-    does so for ``double``. libclc's argument reductions, ``sin`` and
-    ``cos`` among them, rely on fusion and lose all accuracy without it.
-    The product is computed exactly as the sum of two doubles (Dekker's
-    method, with Veltkamp's splitting), added to the third operand with
-    Knuth's two-sum, and rounded once more. That differs from a true fused
-    operation only in rare double-rounding cases. The splitting overflows
-    for operands near the largest doubles; there, ``a * b + c`` is used.
+    does so in its vectorised code, in both precisions. libclc's argument
+    reductions, ``sin`` and ``cos`` among them, rely on fusion and lose all
+    accuracy without it. The product is computed exactly as the sum of two
+    values (Dekker's method, with Veltkamp's splitting), added to the third
+    operand with Knuth's two-sum, and rounded once more. That differs from
+    a true fused operation only in rare double-rounding cases. The
+    splitting overflows for operands near the largest values; there,
+    ``a * b + c`` is used.
 
     Parameters
     ----------
     text : str
         Textual LLVM IR.
+    types : tuple of str, optional
+        The LLVM float types whose ``fma`` is rewritten.
 
     Returns
     -------
@@ -258,42 +266,44 @@ def emulate_fma64(text):
 
     def repl(match):
         """Replacement text for one match."""
-        indent, res, a, b, c = match.groups()
+        indent, res, ty, a, b, c = match.groups()
+        if ty not in types:
+            return match.group(0)
         v = f"%sfma{next(_COUNTER)}"
         lines = []
         for name, x in (("a", a), ("b", b)):
             lines += [
-                f"{v}.{name}c = fmul double {x}, 134217729.0",
-                f"{v}.{name}t = fsub double {v}.{name}c, {x}",
-                f"{v}.{name}h = fsub double {v}.{name}c, {v}.{name}t",
-                f"{v}.{name}l = fsub double {x}, {v}.{name}h",
+                f"{v}.{name}c = fmul {ty} {x}, {_SPLIT[ty]}",
+                f"{v}.{name}t = fsub {ty} {v}.{name}c, {x}",
+                f"{v}.{name}h = fsub {ty} {v}.{name}c, {v}.{name}t",
+                f"{v}.{name}l = fsub {ty} {x}, {v}.{name}h",
             ]
         lines += [
-            f"{v}.p = fmul double {a}, {b}",
-            f"{v}.e0 = fmul double {v}.ah, {v}.bh",
-            f"{v}.e1 = fsub double {v}.e0, {v}.p",
-            f"{v}.e2 = fmul double {v}.ah, {v}.bl",
-            f"{v}.e3 = fadd double {v}.e1, {v}.e2",
-            f"{v}.e4 = fmul double {v}.al, {v}.bh",
-            f"{v}.e5 = fadd double {v}.e3, {v}.e4",
-            f"{v}.e6 = fmul double {v}.al, {v}.bl",
-            f"{v}.e = fadd double {v}.e5, {v}.e6",
-            f"{v}.s = fadd double {v}.p, {c}",
-            f"{v}.v = fsub double {v}.s, {v}.p",
-            f"{v}.w = fsub double {v}.s, {v}.v",
-            f"{v}.x = fsub double {v}.p, {v}.w",
-            f"{v}.y = fsub double {c}, {v}.v",
-            f"{v}.z = fadd double {v}.x, {v}.y",
-            f"{v}.lo = fadd double {v}.z, {v}.e",
-            f"{v}.r = fadd double {v}.s, {v}.lo",
+            f"{v}.p = fmul {ty} {a}, {b}",
+            f"{v}.e0 = fmul {ty} {v}.ah, {v}.bh",
+            f"{v}.e1 = fsub {ty} {v}.e0, {v}.p",
+            f"{v}.e2 = fmul {ty} {v}.ah, {v}.bl",
+            f"{v}.e3 = fadd {ty} {v}.e1, {v}.e2",
+            f"{v}.e4 = fmul {ty} {v}.al, {v}.bh",
+            f"{v}.e5 = fadd {ty} {v}.e3, {v}.e4",
+            f"{v}.e6 = fmul {ty} {v}.al, {v}.bl",
+            f"{v}.e = fadd {ty} {v}.e5, {v}.e6",
+            f"{v}.s = fadd {ty} {v}.p, {c}",
+            f"{v}.v = fsub {ty} {v}.s, {v}.p",
+            f"{v}.w = fsub {ty} {v}.s, {v}.v",
+            f"{v}.x = fsub {ty} {v}.p, {v}.w",
+            f"{v}.y = fsub {ty} {c}, {v}.v",
+            f"{v}.z = fadd {ty} {v}.x, {v}.y",
+            f"{v}.lo = fadd {ty} {v}.z, {v}.e",
+            f"{v}.r = fadd {ty} {v}.s, {v}.lo",
             # r - r is 0 exactly when r is finite.
-            f"{v}.d = fsub double {v}.r, {v}.r",
-            f"{v}.ok = fcmp oeq double {v}.d, 0.0",
-            f"{res} = select i1 {v}.ok, double {v}.r, double {v}.s",
+            f"{v}.d = fsub {ty} {v}.r, {v}.r",
+            f"{v}.ok = fcmp oeq {ty} {v}.d, 0.0",
+            f"{res} = select i1 {v}.ok, {ty} {v}.r, {ty} {v}.s",
         ]
         return "\n".join(indent + line for line in lines)
 
-    return _FMA64.sub(repl, text)
+    return _FMA.sub(repl, text)
 
 
 def emulate_rounding64(text):
