@@ -14,10 +14,11 @@ uv run pytest tests/test_known_issues.py -rxX
 ```
 
 Numbers are not reused: KI-02, KI-03, KI-05, KI-06, KI-07, KI-08, KI-13,
-KI-24 and KI-25 (NumPy functions on scalars, missing `math` functions,
-allocating arrays in kernels, global constant arrays, complex numbers,
-`print`, all data copied on every call, nested loop exits that failed to
-compile, libclc linked in full for every kernel) have been fixed.
+KI-24, KI-25 and KI-30 (NumPy functions on scalars, missing `math`
+functions, allocating arrays in kernels, global constant arrays, complex
+numbers, `print`, all data copied on every call, nested loop exits that
+failed to compile, libclc linked in full for every kernel, `gamma` losing
+precision for large arguments) have been fixed.
 
 ## Language and library coverage
 
@@ -103,37 +104,12 @@ entry point. SPIR-V forbids recursion, so this will not change.
 ### KI-23: less accurate math without libclc or with `fastmath`
 
 With libclc, math functions are accurate to the last digit or two in both
-precisions, except `gamma` (KI-30). Without it, and for `float32` with `fastmath=True`, the
-drivers' and this package's own versions are used: `gamma` and `lgamma`
-are then accurate to about 1e-5, `erf` and `erfc` have an absolute error
+precisions (but see KI-31 for `float64` `exp` on some devices). Without it, and for `float32` with `fastmath=True`, the
+drivers' and this package's own versions are used: `lgamma` is then
+accurate to about 1e-5, as is `gamma` without libclc (with libclc,
+`gamma` ignores `fastmath`), `erf` and `erfc` have an absolute error
 of about 1.5e-7, and the trigonometric functions are only as good as the
 driver's.
-
-### KI-30: `gamma` loses precision for large arguments
-
-libclc 22 computes `tgamma(x)` as `exp(lgamma(|x|))`, with the reflection
-formula for negative `x`. The error of `lgamma` is a few ulp of a value
-that reaches about 700, and `exp` turns it into a relative error of the
-result, so the error grows with the argument:
-
-| `math.gamma` | 2 < x < 10 | 10 < x < 50 | 50 < x < 171.6 |
-| --- | ---: | ---: | ---: |
-| numba-vulkan, `float64` | 38 ulp | 420 ulp | 1800 ulp (4e-13) |
-| numba-vulkan, `float32` | 33 ulp | 220 ulp (x < 35) | |
-| numba-cuda, Numba CPU | ≤ 3 ulp | ≤ 3 ulp | ≤ 3 ulp |
-
-These are maxima over 4000 random arguments per range, the same on the
-Titan X, the UHD 630 and llvmpipe. Below about −171 (`float64`) and −34
-(`float32`), where the result is tiny, the reflection overflows and
-`gamma` returns `+inf`; `fastmath` (this package's own version) returns 0
-there instead. `lgamma` itself is accurate to 3 ulp, except near its zeros
-between −2 and −4, where its absolute error is what remains bounded, as in
-most implementations.
-
-**Fix:** upstream libclc (LLVM 23) has a new `tgamma`, which Mesa's fork
-of libclc takes over with a further fix for devices without fused
-multiply-add. It could be ported to `mathfuncs.py` until the bundled libclc
-has it.
 
 ### KI-27: very large functions are not restructured
 
@@ -262,6 +238,28 @@ than the one inside llvmlite, so the bundled copy (LLVM 22) relies on the
 **Fix:** if 26.11 drops it, keep the input on 26.05 or build libclc's
 Vulkan target from the LLVM sources in a small Nix derivation of this
 project's own, pinned to llvmlite's LLVM version.
+
+### KI-31: libclc's `float64` `exp` loses precision on some devices
+
+libclc's `exp` in `float64` is accurate to 1 ulp on the Titan X, but on the
+UHD 630 and llvmpipe its error grows with the argument:
+
+| `math.exp`, `float64` | \|x\| < 1 | 1 < \|x\| < 20 | 20 < \|x\| < 170 | 170 < \|x\| < 700 |
+| --- | ---: | ---: | ---: | ---: |
+| NVIDIA Titan X | 1 ulp | 1 ulp | 1 ulp | 1 ulp |
+| Intel UHD 630 | 1 ulp | 6 ulp | 50 ulp | 208 ulp |
+| llvmpipe | 1 ulp | 20 ulp | 167 ulp | 673 ulp |
+
+(maxima over 1500 random arguments per range, against mpmath). `pow` stays
+within 2 ulp on all three. The growth with the argument suggests an
+argument reduction that is exact only with fused multiply-add; llvmpipe
+does not fuse `float64`. That is not confirmed, and the UHD 630 does fuse
+`llvm.fma`. `gamma` inherits the error for arguments beyond 16 (up to 166
+ulp on llvmpipe). Other functions built on `exp` have not been measured.
+
+**Fix:** a Cody-Waite reduction in this package, `x = k ln 2 + r` with a
+split `ln 2` whose products with `k` are exact, then libclc's `exp(r)`,
+which is accurate for small `r` on every device, scaled by `2**k`.
 
 ### KI-22: lint warnings
 

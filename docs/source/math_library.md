@@ -45,8 +45,15 @@ operator.
 `sqrt`, `fabs`, `floor`, `ceil` and `trunc` use the built-in versions, which
 are exact in both precisions.
 
-`gamma` and `lgamma` come from libclc as well (`tgamma` and `lgamma`
-there).
+`lgamma` comes from libclc as well. `gamma` does not: libclc 22 computes it
+as `exp(lgamma(x))`, which loses precision as the argument grows (1800 ulp
+near 170 in `float64`) and returns infinity instead of tiny values for
+large negative arguments. This package uses a port of the newer upstream
+`tgamma` (from AMD's OCML) instead, in both precisions and also with
+`fastmath`. It is within 7 ulp in `float32` on all tested devices and in
+`float64` on the Titan X; on the UHD 630 and llvmpipe, libclc's `exp`
+limits it to about 50 and 170 ulp for arguments beyond 16 (KI-31).
+numba-cuda and Numba's CPU target are within 3 ulp.
 
 ### Choosing speed over accuracy
 
@@ -159,8 +166,10 @@ kernels are currently narrowed to `float32` (KI-17).
   libclc from conda-forge, or package it in this repository. LLVM 23 also
   renames the `clspv` target to the `spirv-unknown-vulkan` triple, built as
   part of LLVM's runtimes build, which will change the file name once
-  llvmlite moves to LLVM 23. The Mesa fork carries a precision fix for
-  `tgamma` without FMA that may be worth taking over.
+  llvmlite moves to LLVM 23. Once the bundled libclc has the new `tgamma`,
+  this package's port can be dropped, provided the libclc version is as
+  accurate without fused multiply-add (the port avoids it; Mesa's fork
+  fuses).
 - **Compile time.** The whole library is parsed and linked for every
   kernel that uses it. Caching a reduced copy would remove most of the
   0.4 s this costs.

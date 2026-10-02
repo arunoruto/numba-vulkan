@@ -66,7 +66,8 @@ _LIBCLC = {
     math.erf: "erf",
     math.erfc: "erfc",
     math.lgamma: "lgamma",
-    math.gamma: "tgamma",
+    # math.gamma is not taken from libclc 22, whose tgamma loses precision
+    # for large arguments; mathfuncs has a port of the newer upstream one.
 }
 # Functions libclc has, but whose code does not survive the SPIR-V backend
 # yet, by (name, bit width); they fall back to this package's own versions.
@@ -110,8 +111,8 @@ def libclc_name(context, pyfn, ty):
     """Decide whether a ``math`` function is taken from libclc.
 
     libclc is preferred: its functions are accurate to the last digit or
-    two (``gamma`` excepted, see KI-30), give the same results on every
-    device, and exist in double precision. With ``fastmath``, float32 functions use the device's
+    two (but see KI-31), give the same results on every device, and exist
+    in double precision. With ``fastmath``, float32 functions use the device's
     built-in versions instead, which are faster but less accurate and
     differ between drivers. float64 has no built-in alternative.
 
