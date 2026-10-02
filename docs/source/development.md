@@ -79,6 +79,9 @@ Useful environment variables:
 | `NUMBA_VULKAN_VALIDATE=1` | run every shader through `spirv-val`; the test suite sets this |
 | `NUMBA_VULKAN_DEVICE=llvmpipe` | default device, by name substring or index |
 | `NUMBA_VULKAN_LIBCLC=/path/clspv--.bc` | where to find libclc; the devenv shell sets it |
+| `NUMBA_VULKAN_CACHE_DIR=/path` | where the prepared copy of libclc is kept (default `~/.cache/numba-vulkan`) |
+| `NUMBA_VULKAN_POOL_MB=1024` | size of the per-device pool of released buffers |
+| `NUMBA_BOUNDSCHECK=1` | check array indices in all kernels |
 | `NUMBA_DUMP_IR=1`, `NUMBA_DUMP_LLVM=1` | Numba's own dumps of its IR and of unoptimised LLVM IR |
 
 Where a failure comes from tells you where to look:
@@ -145,9 +148,11 @@ Never hand unchecked SPIR-V to a driver
   Python process with it. Everything goes through `codegen.check_spirv`;
   keep `NUMBA_VULKAN_VALIDATE=1` on while developing.
 
-Never run LLVM's SPIR-V backend in-process
-: It aborts on input it cannot handle. `codegen.emit_spirv` runs it in a
-  child process for that reason.
+Never run LLVM's SPIR-V backend in-process, or twice in one process
+: It aborts on input it cannot handle, and the second module translated by
+  a process comes out invalid ("Id 1 is defined more than once").
+  `codegen.Emitter` therefore keeps a helper process that forks once per
+  module.
 
 Do not create pointers into buffers before optimisation
 : LLVM merges loads from different elements into a load through a selected

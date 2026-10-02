@@ -24,7 +24,12 @@ from numba_vulkan.buffers import (
     load_element,
     store_element,
 )
-from numba_vulkan.codegen import ENTRY_POINT, CompiledKernel, spirv_capabilities
+from numba_vulkan.codegen import (
+    ENTRY_POINT,
+    CompiledKernel,
+    emitter,
+    spirv_capabilities,
+)
 from numba_vulkan.target import TARGET_NAME, vulkan_target
 from numba_vulkan.vkimpl import buffer_element_type
 from numba_vulkan.vktypes import VulkanArray
@@ -145,6 +150,7 @@ def compile_vulkan(
     -------
     VulkanCompileResult
     """
+    emitter.warm_up()
     flags = Flags()
     flags.boundscheck = boundscheck
     flags.no_compile = True

@@ -13,10 +13,11 @@ the entry is removed from this page.
 uv run pytest tests/test_known_issues.py -rxX
 ```
 
-Numbers are not reused: KI-02, KI-03, KI-07, KI-13 and KI-24 (NumPy
+Numbers are not reused: KI-02, KI-03, KI-07, KI-13, KI-24 and KI-25 (NumPy
 functions on scalars, missing `math` functions, complex numbers, all data
-copied on every call, nested loop exits that failed to compile) have been
-fixed, and KI-01 no longer applies when libclc is installed.
+copied on every call, nested loop exits that failed to compile, libclc
+linked in full for every kernel) have been fixed, and KI-01 no longer
+applies when libclc is installed.
 
 ## Language and library coverage
 
@@ -176,23 +177,15 @@ A `DeviceArray` can be created, passed to kernels and copied; it has no
 indexing, slicing, views or arithmetic, and no `__cuda_array_interface__`
 equivalent for sharing memory with other libraries.
 
-### KI-14: compilation is slow and not cached
+### KI-14: compiled kernels are not cached on disk
 
-A kernel takes about half a second to compile. A large part is starting a
-Python child process for LLVM's SPIR-V backend (`codegen.emit_spirv`).
-Nothing is cached on disk, and pipelines are cached only in memory.
+A kernel compiles in 0.05 to 0.25 s, but every process compiles its kernels
+again: SPIR-V and pipelines are cached in memory only. Kernels that call
+math functions spend about 0.1 s of that parsing libclc.
 
-**Fix:** cache SPIR-V on disk keyed by the optimised LLVM IR; keep one
-long-lived worker process instead of starting one per kernel.
-
-### KI-25: libclc is linked in full for every kernel
-
-Each kernel that calls a math function parses and links the whole of libclc
-(13,000 functions) before discarding what it does not need. That roughly
-doubles the compile time, from 0.4 s to 0.8 s.
-
-**Fix:** cache a reduced copy of the library holding only the functions
-this target uses.
+**Fix:** cache SPIR-V on disk keyed by the LLVM IR, as Numba's
+`cache=True` does for the CPU target, and pass a `VkPipelineCache` to
+pipeline creation.
 
 ### KI-15: one specialisation per buffer binding
 
