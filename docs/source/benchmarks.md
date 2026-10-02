@@ -68,10 +68,10 @@ compare the code generators and runtimes on equal terms.
 - On the same card, Vulkan is within 25 to 40 % of CUDA on the
   reduction and the histogram, which take about 0.25 ms; the difference
   is mostly the fixed cost of submitting and waiting for a dispatch.
-- The tiled matrix product is about 1.5× slower with Numba's default 64-bit
-  integers; with `narrow="ints"` it is within 6 % of CUDA. NVIDIA's CUDA
+- The tiled matrix product is within 7 % of CUDA. With 64-bit integers
+  (`narrow=False`, the extra rows) it is about 1.6× slower: NVIDIA's CUDA
   compiler narrows such index arithmetic itself, the Vulkan driver does
-  not.
+  not, which is why kernels compute with 32-bit integers by default.
 - Launching is cheaper than in numba-cuda: 1000 launches of a small kernel
   on device arrays take about 55 µs each on Vulkan and 70 µs on CUDA, both
   dominated by Python.

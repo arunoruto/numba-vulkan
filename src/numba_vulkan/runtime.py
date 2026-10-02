@@ -263,7 +263,8 @@ class Device:
     queue : object
         The compute queue.
     mode : numba_vulkan.narrowing.Mode
-        The 64-bit types the device lacks.
+        How kernels are compiled for the device by default: with 32-bit
+        integers, and with 32-bit floats if it lacks ``float64``.
     pool_limit : int
         Number of bytes of released buffers kept for reuse; set initially
         from the environment variable ``NUMBA_VULKAN_POOL_MB`` (default
@@ -365,9 +366,10 @@ class Device:
         self._submitted = self._retired = 0
         self._pipelines = {}
         # 64-bit types this device cannot use and kernels must do without.
+        # How kernels are compiled for this device unless they say otherwise.
         self.mode = narrowing.Mode(
             floats=not info.float64,
-            ints=not info.int64,
+            ints=narrowing.NARROW_INTS or not info.int64,
             float_atomics=info.float32_atomic_add,
         )
         # Released buffers by (size, mappable), kept for reuse.
@@ -1385,7 +1387,7 @@ class DeviceArray:
             If the shapes differ.
         """
         self.device.synchronize()
-        array = np.asarray(array, dtype=self._stored, order="C")
+        array = narrowing.convert(np.asarray(array), self._stored)
         if array.shape != self.shape:
             raise ValueError(f"cannot copy shape {array.shape} into {self.shape}")
         self.device._upload(self._buffer, array.reshape(-1).view(np.uint8))

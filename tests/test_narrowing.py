@@ -246,3 +246,80 @@ def test_stored_dtype():
     assert narrowing.stored_dtype(np.uint64, both) == np.uint32
     assert narrowing.stored_dtype(np.int64, Mode(floats=True)) == np.int64
     assert narrowing.stored_dtype(np.int16, both) == np.int16
+
+
+# -- 32-bit integers by default, float64 kept ---------------------------------------
+
+
+@pytest.mark.skipif(not narrowing.NARROW_INTS, reason="NUMBA_VULKAN_INT64=1")
+def test_integers_are_32_bit_by_default_and_floats_64_bit(run):
+    @nv.jit
+    def mix(ints, floats, out):
+        i = nv.global_id(0)
+        if i < ints.shape[0]:
+            out[i] = floats[i] * 3.0 + ints[i]
+
+    ints = np.arange(8, dtype=np.int64)
+    floats = np.linspace(0, 1, 8) + 1e-12  # needs float64 to survive
+    out = np.zeros(8)
+    with pytest.warns(nv.VulkanPerformanceWarning, match="computes with float64"):
+        run(mix, 8, ints, floats, out)
+    np.testing.assert_array_equal(out, floats * 3.0 + ints)
+    compiled = list(mix._kernels.values())[-1]
+    assert compiled.mode.ints and not compiled.mode.floats
+    assert compiled.narrowed.ints and not compiled.narrowed.floats
+
+
+@pytest.mark.skipif(not narrowing.NARROW_INTS, reason="NUMBA_VULKAN_INT64=1")
+def test_large_int64_inputs_raise_instead_of_wrapping(run):
+    @nv.jit
+    def copy(values, out):
+        i = nv.global_id(0)
+        if i < values.shape[0]:
+            out[i] = values[i]
+
+    big = np.array([1, 2, 3 << 40], dtype=np.int64)
+    out = np.empty(3, dtype=np.int64)  # garbage, but only written: no check
+    with pytest.raises(OverflowError, match="does not fit into int32"):
+        run(copy, 3, big, out)
+    run(nv.jit(narrow=False)(copy.py_func), 3, big, out)
+    np.testing.assert_array_equal(out, big)
+    run(copy, 2, big[:2].copy(), out[:2])
+    with pytest.raises(OverflowError):
+        nv.to_device(big)
+
+
+def test_float_literal_hint(run):
+    @nv.jit
+    def scale(x, out):
+        i = nv.global_id(0)
+        if i < x.shape[0]:
+            out[i] = x[i] * 0.1  # 0.5 would be folded into float32
+
+    x = np.ones(4, dtype=np.float32)
+    with pytest.warns(nv.VulkanPerformanceWarning, match="np.float32"):
+        run(scale, 4, x, np.zeros_like(x))
+
+    @nv.jit
+    def scale32(x, out):
+        i = nv.global_id(0)
+        if i < x.shape[0]:
+            out[i] = x[i] * np.float32(0.1)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        run(scale32, 4, x, np.zeros_like(x))
+
+
+def test_warnings_can_be_silenced(run, monkeypatch):
+    monkeypatch.setattr(narrowing, "WARNINGS", False)
+
+    @nv.jit
+    def double(x, out):
+        i = nv.global_id(0)
+        if i < x.shape[0]:
+            out[i] = x[i] * 2.0
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        run(double, 4, np.ones(4), np.zeros(4))

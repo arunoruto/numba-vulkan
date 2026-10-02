@@ -256,6 +256,32 @@ def _single(builder, value):
     return narrowing.to_single(builder, value) if narrowing.current.floats else value
 
 
+def double_words(builder, value):
+    """The low and high 32-bit words of a ``double``.
+
+    Working on words instead of a 64-bit integer keeps bit manipulation of
+    ``float64`` values intact when a kernel computes with 32-bit integers
+    (see `numba_vulkan.narrowing`).
+
+    Returns
+    -------
+    low, high : llvmlite.ir.Value
+        ``i32`` values.
+    """
+    i32 = ir.IntType(32)
+    pair = builder.bitcast(value, ir.VectorType(i32, 2))
+    return builder.extract_element(pair, i32(0)), builder.extract_element(pair, i32(1))
+
+
+def words_double(builder, low, high):
+    """The ``double`` with the given low and high words."""
+    i32 = ir.IntType(32)
+    pair = ir.Constant(ir.VectorType(i32, 2), None)
+    pair = builder.insert_element(pair, low, i32(0))
+    pair = builder.insert_element(pair, high, i32(1))
+    return builder.bitcast(pair, ir.DoubleType())
+
+
 def _classify(builder, value, kind):
     """Test a float for NaN, infinity or finiteness.
 
@@ -277,11 +303,23 @@ def _classify(builder, value, kind):
     # but LLVM turns them into OpUnordered, which shaders may not use, and
     # drivers with fast-math enabled are free to fold them away.
     value = _single(builder, value)
-    bits = ir.IntType(64 if isinstance(value.type, ir.DoubleType) else 32)
-    exponent = bits((0x7FF << 52) if bits.width == 64 else (0xFF << 23))
-    magnitude = builder.and_(
-        builder.bitcast(value, bits), bits((1 << (bits.width - 1)) - 1)
-    )
+    i32 = ir.IntType(32)
+    if isinstance(value.type, ir.DoubleType):
+        # Two 32-bit words, so that the test survives narrowing integers.
+        low, high = double_words(builder, value)
+        top = builder.and_(high, i32(0x7FFFFFFF))
+        exponent = i32(0x7FF00000)
+        fraction = builder.icmp_unsigned("!=", low, i32(0))
+        at_top = builder.icmp_unsigned("==", top, exponent)
+        if kind == "nan":
+            above = builder.icmp_unsigned(">", top, exponent)
+            return builder.or_(above, builder.and_(at_top, fraction))
+        if kind == "inf":
+            return builder.and_(at_top, builder.not_(fraction))
+        return builder.icmp_unsigned("<", top, exponent)
+    bits = i32
+    exponent = bits(0xFF << 23)
+    magnitude = builder.and_(builder.bitcast(value, bits), bits(0x7FFFFFFF))
     if kind == "nan":
         return builder.icmp_unsigned(">", magnitude, exponent)
     if kind == "inf":
@@ -341,7 +379,17 @@ def lower_copysign(context, builder, sig, args):
     magnitude, sign = (context.cast(builder, a, t, ty) for a, t in zip(args, sig.args))
     wide = magnitude.type
     magnitude, sign = _single(builder, magnitude), _single(builder, sign)
-    bits = ir.IntType(64 if isinstance(magnitude.type, ir.DoubleType) else 32)
+    if isinstance(magnitude.type, ir.DoubleType):
+        # Only the high words differ; see `double_words`.
+        i32 = ir.IntType(32)
+        low, high = double_words(builder, magnitude)
+        sign_high = double_words(builder, sign)[1]
+        high = builder.or_(
+            builder.and_(high, i32(0x7FFFFFFF)),
+            builder.and_(sign_high, i32(0x80000000)),
+        )
+        return words_double(builder, low, high)
+    bits = ir.IntType(32)
     sign_bit = bits(1 << (bits.width - 1))
     combined = builder.or_(
         builder.and_(

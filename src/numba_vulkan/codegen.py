@@ -76,6 +76,17 @@ PASSES = (
     "register_to_memory",
 )
 
+# Before 32-bit integers are introduced into a kernel that keeps 64-bit
+# floats: inline and clean up, but keep the control flow as it is.
+EARLY_PASSES = (
+    "always_inliner",
+    "global_dead_code_eliminate",
+    "sroa",
+    "instruction_combine",
+    "simplify_cfg",
+    "dead_code_elimination",
+)
+
 # Seconds after which the SPIR-V backend is assumed to hang.
 EMIT_TIMEOUT = 120
 
@@ -312,6 +323,7 @@ class CompiledKernel:
     local_size: tuple
     capabilities: set = field(default_factory=set)
     written_bindings: set = field(default_factory=set)
+    read_bindings: set = field(default_factory=set)
     shared_bytes: int = 0
     print_binding: int = None
     constants: dict = field(default_factory=dict)
@@ -968,6 +980,7 @@ class VulkanCodeLibrary(CodeLibrary):
         self._linked = None
         self._spirv = {}
         self.written_bindings = set()
+        self.read_bindings = set()
         self.constants = {}
         self.print_binding = None
         self._placeholders = {}
@@ -1046,6 +1059,41 @@ class VulkanCodeLibrary(CodeLibrary):
                 library._all_libraries(seen)
         return seen
 
+    @staticmethod
+    def _optimize(linked, builder, passes):
+        """Inline everything into the entry point and run `passes`.
+
+        Parameters
+        ----------
+        linked : llvmlite.binding.ModuleRef
+            The module.
+        builder : llvmlite.binding.PassBuilder
+            Pass builder for the target.
+        passes : tuple of str
+            Names of llvmlite's ``add_<name>_pass`` methods.
+
+        Returns
+        -------
+        llvmlite.binding.ModuleRef
+            The module, changed in place.
+        """
+        linked.triple = TRIPLE
+        # Shaders cannot keep Numba's calling convention (return pointers,
+        # status codes), so everything is inlined into the entry point.
+        for fn in linked.functions:
+            if not fn.is_declaration and fn.name != ENTRY_POINT:
+                fn.linkage = "internal"
+                fn.add_function_attribute("alwaysinline")
+        # Numba's environment globals are never used by shader code.
+        for gv in linked.global_variables:
+            gv.linkage = "internal"
+        linked.verify()
+        manager = llvm.create_new_module_pass_manager()
+        for name in passes:
+            getattr(manager, f"add_{name}_pass")()
+        manager.run(linked, builder)
+        return linked
+
     def get_llvm_str(self):
         """Unoptimised LLVM IR of this library alone.
 
@@ -1100,22 +1148,19 @@ class VulkanCodeLibrary(CodeLibrary):
         machine = target_machine()
         pto = llvm.create_pipeline_tuning_options(speed_level=0)
         builder = llvm.create_pass_builder(machine, pto)
+        # With 64-bit floats, only the kernel's own integers are narrowed,
+        # before libclc is linked: its float64 functions need 64-bit integers.
+        early = self.mode.ints and not self.mode.floats
+        user_i64 = False
+        if early:
+            linked = self._optimize(linked, builder, EARLY_PASSES)
+            text = str(linked)
+            user_i64 = re.search(r"\bi64\b", text) is not None
+            ints = narrowing.Mode(ints=True)
+            linked = llvm.parse_assembly(narrowing.narrow_ir(text, ints))
         linked = _link_libclc(linked, builder)
         linked.triple = TRIPLE
-        # Shaders cannot keep Numba's calling convention (return pointers,
-        # status codes), so everything is inlined into the entry point.
-        for fn in linked.functions:
-            if not fn.is_declaration and fn.name != ENTRY_POINT:
-                fn.linkage = "internal"
-                fn.add_function_attribute("alwaysinline")
-        # Numba's environment globals are never used by shader code.
-        for gv in linked.global_variables:
-            gv.linkage = "internal"
-        linked.verify()
-        passes = llvm.create_new_module_pass_manager()
-        for name in PASSES:
-            getattr(passes, f"add_{name}_pass")()
-        passes.run(linked, builder)
+        linked = self._optimize(linked, builder, PASSES)
         leftover = [
             fn.name
             for fn in linked.functions
@@ -1128,13 +1173,17 @@ class VulkanCodeLibrary(CodeLibrary):
                 f"(could not inline {', '.join(leftover)})"
             )
         text = str(linked)
-        self.narrowed = narrowing.Mode(
-            self.mode.floats and re.search(r"\bdouble\b", text) is not None,
-            self.mode.ints and re.search(r"\bi64\b", text) is not None,
-        )  # only the narrowing of types is recorded
-        text = legalize(narrowing.narrow_ir(text, self.mode), self.mode.ints)
-        # Once more: some of the rewrites above introduce 64-bit indices.
-        text = narrowing.narrow_ir(text, self.mode)
+        if early:
+            self.narrowed = narrowing.Mode(ints=user_i64)
+            text = legalize(text)
+        else:
+            self.narrowed = narrowing.Mode(
+                self.mode.floats and re.search(r"\bdouble\b", text) is not None,
+                self.mode.ints and re.search(r"\bi64\b", text) is not None,
+            )  # only the narrowing of types is recorded
+            text = legalize(narrowing.narrow_ir(text, self.mode), self.mode.ints)
+            # Once more: some of the rewrites above introduce 64-bit indices.
+            text = narrowing.narrow_ir(text, self.mode)
         missing = _UNDEFINED_LIBCLC.findall(text)
         if missing:
             raise VulkanUnsupportedError(
@@ -1152,7 +1201,7 @@ class VulkanCodeLibrary(CodeLibrary):
         if constant_order(text):
             # A placeholder binding in a shader crashes drivers.
             raise SpirvCodegenError("a constant array was not given a binding")
-        text, self.written_bindings = expand_buffer_access(text)
+        text, self.written_bindings, self.read_bindings = expand_buffer_access(text)
         linked = llvm.parse_assembly(text)
         linked.verify()
         self._linked = linked
@@ -1217,6 +1266,7 @@ class VulkanCodeLibrary(CodeLibrary):
                 check_spirv(entry["spirv"])
                 self._text = entry["llvm_ir"]
                 self.written_bindings = set(entry["written"])
+                self.read_bindings = set(entry["read"])
                 self.narrowed = narrowing.Mode(*entry["narrowed"])
                 self._placeholders = {
                     int(binding): order[slot]
@@ -1236,6 +1286,7 @@ class VulkanCodeLibrary(CodeLibrary):
                     "spirv": spirv,
                     "llvm_ir": self._text,
                     "written": sorted(self.written_bindings),
+                    "read": sorted(self.read_bindings),
                     "narrowed": list(self.narrowed),
                     "constants": {
                         binding: order.index(placeholder)

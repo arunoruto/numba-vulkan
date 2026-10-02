@@ -14,43 +14,43 @@
 
 | Backend | First call (ms) | Best (ms) | Speed-up | Agreement with CPU |
 | --- | ---: | ---: | ---: | --- |
-| numba cpu (1 thread) | 857.6 | 474.36 | 1.00x | 100.00% equal |
-| numba cpu (parallel) | 513.8 | 92.66 | 5.12x | 100.00% equal |
-| vulkan: NVIDIA TITAN X (Pascal) | 152.8 | 14.36 | 33.02x | 100.00% equal |
-| vulkan: Intel(R) UHD Graphics 630 (CFL GT2) | 157.2 | 56.65 | 8.37x | 100.00% equal |
-| vulkan: llvmpipe (LLVM 21.1.8, 256 bits) | 164.6 | 82.03 | 5.78x | 100.00% equal |
-| numba-cuda: NVIDIA TITAN X (Pascal) | 280.6 | 13.36 | 35.51x | 100.00% equal |
-| vulkan: NVIDIA TITAN X (Pascal), device arrays | 11.1 | 9.50 | 49.92x | 100.00% equal |
-| vulkan: Intel(R) UHD Graphics 630 (CFL GT2), device arrays | 57.4 | 53.62 | 8.85x | 100.00% equal |
-| vulkan: llvmpipe (LLVM 21.1.8, 256 bits), device arrays | 78.0 | 70.89 | 6.69x | 100.00% equal |
-| numba-cuda: NVIDIA TITAN X (Pascal), device arrays | 8.8 | 8.25 | 57.47x | 100.00% equal |
+| numba cpu (1 thread) | 792.6 | 469.69 | 1.00x | 100.00% equal |
+| numba cpu (parallel) | 527.1 | 93.02 | 5.05x | 100.00% equal |
+| vulkan: NVIDIA TITAN X (Pascal) | 168.9 | 15.50 | 30.31x | 100.00% equal |
+| vulkan: Intel(R) UHD Graphics 630 (CFL GT2) | 144.1 | 47.66 | 9.86x | 100.00% equal |
+| vulkan: llvmpipe (LLVM 21.1.8, 256 bits) | 174.7 | 48.05 | 9.78x | 100.00% equal |
+| numba-cuda: NVIDIA TITAN X (Pascal) | 294.6 | 14.32 | 32.81x | 100.00% equal |
+| vulkan: NVIDIA TITAN X (Pascal), device arrays | 12.2 | 9.61 | 48.86x | 100.00% equal |
+| vulkan: Intel(R) UHD Graphics 630 (CFL GT2), device arrays | 48.2 | 45.11 | 10.41x | 100.00% equal |
+| vulkan: llvmpipe (LLVM 21.1.8, 256 bits), device arrays | 50.7 | 52.30 | 8.98x | 100.00% equal |
+| numba-cuda: NVIDIA TITAN X (Pascal), device arrays | 9.3 | 8.46 | 55.49x | 100.00% equal |
 
 ### option (4,194,304 options)
 
 | Backend | First call (ms) | Best (ms) | Speed-up | Agreement with CPU |
 | --- | ---: | ---: | ---: | --- |
-| numba cpu (1 thread) | 255.5 | 105.15 | 1.00x | max err 0.0e+00 |
-| numba cpu (parallel) | 348.0 | 19.41 | 5.42x | max err 0.0e+00 |
-| vulkan: NVIDIA TITAN X (Pascal) | 227.3 | 10.14 | 10.37x | max err 3.4e-07 |
-| vulkan: Intel(R) UHD Graphics 630 (CFL GT2) | 215.2 | 12.98 | 8.10x | max err 3.4e-07 |
-| vulkan: llvmpipe (LLVM 21.1.8, 256 bits) | 256.5 | 37.90 | 2.77x | max err 2.5e-07 |
-| numba-cuda: NVIDIA TITAN X (Pascal) | 92.6 | 13.42 | 7.84x | max err 2.9e-07 |
-| vulkan: NVIDIA TITAN X (Pascal), device arrays | 1.1 | 0.40 | 260.24x | max err 3.4e-07 |
-| vulkan: Intel(R) UHD Graphics 630 (CFL GT2), device arrays | 9.4 | 6.16 | 17.08x | max err 3.4e-07 |
-| vulkan: llvmpipe (LLVM 21.1.8, 256 bits), device arrays | 35.2 | 31.84 | 3.30x | max err 2.5e-07 |
-| numba-cuda: NVIDIA TITAN X (Pascal), device arrays | 1.3 | 0.29 | 358.69x | max err 2.9e-07 |
+| numba cpu (1 thread) | 274.7 | 114.75 | 1.00x | max err 0.0e+00 |
+| numba cpu (parallel) | 397.0 | 24.31 | 4.72x | max err 0.0e+00 |
+| vulkan: NVIDIA TITAN X (Pascal) | 249.7 | 11.19 | 10.26x | max err 3.4e-07 |
+| vulkan: Intel(R) UHD Graphics 630 (CFL GT2) | 246.5 | 13.50 | 8.50x | max err 3.4e-07 |
+| vulkan: llvmpipe (LLVM 21.1.8, 256 bits) | 467.3 | 46.83 | 2.45x | max err 2.5e-07 |
+| numba-cuda: NVIDIA TITAN X (Pascal) | 107.5 | 16.05 | 7.15x | max err 2.9e-07 |
+| vulkan: NVIDIA TITAN X (Pascal), device arrays | 1.2 | 0.41 | 279.96x | max err 3.4e-07 |
+| vulkan: Intel(R) UHD Graphics 630 (CFL GT2), device arrays | 8.6 | 6.03 | 19.03x | max err 3.4e-07 |
+| vulkan: llvmpipe (LLVM 21.1.8, 256 bits), device arrays | 38.6 | 40.59 | 2.83x | max err 2.5e-07 |
+| numba-cuda: NVIDIA TITAN X (Pascal), device arrays | 0.8 | 0.26 | 447.18x | max err 2.9e-07 |
 
 ### saxpy (4,194,304 elements)
 
 | Backend | First call (ms) | Best (ms) | Speed-up | Agreement with CPU |
 | --- | ---: | ---: | ---: | --- |
-| numba cpu (1 thread) | 116.2 | 2.39 | 1.00x | max err 0.0e+00 |
-| numba cpu (parallel) | 292.7 | 4.35 | 0.55x | max err 0.0e+00 |
-| vulkan: NVIDIA TITAN X (Pascal) | 48.4 | 8.89 | 0.27x | max err 0.0e+00 |
-| vulkan: Intel(R) UHD Graphics 630 (CFL GT2) | 49.5 | 8.32 | 0.29x | max err 0.0e+00 |
-| vulkan: llvmpipe (LLVM 21.1.8, 256 bits) | 64.8 | 9.81 | 0.24x | max err 0.0e+00 |
-| numba-cuda: NVIDIA TITAN X (Pascal) | 58.0 | 15.94 | 0.15x | max err 6.8e-08 |
-| vulkan: NVIDIA TITAN X (Pascal), device arrays | 0.9 | 0.28 | 8.49x | max err 0.0e+00 |
-| vulkan: Intel(R) UHD Graphics 630 (CFL GT2), device arrays | 5.5 | 5.28 | 0.45x | max err 0.0e+00 |
-| vulkan: llvmpipe (LLVM 21.1.8, 256 bits), device arrays | 4.4 | 3.71 | 0.65x | max err 0.0e+00 |
-| numba-cuda: NVIDIA TITAN X (Pascal), device arrays | 0.4 | 0.22 | 10.91x | max err 6.8e-08 |
+| numba cpu (1 thread) | 116.0 | 2.27 | 1.00x | max err 0.0e+00 |
+| numba cpu (parallel) | 281.4 | 4.99 | 0.45x | max err 0.0e+00 |
+| vulkan: NVIDIA TITAN X (Pascal) | 53.4 | 8.01 | 0.28x | max err 0.0e+00 |
+| vulkan: Intel(R) UHD Graphics 630 (CFL GT2) | 52.3 | 11.05 | 0.21x | max err 0.0e+00 |
+| vulkan: llvmpipe (LLVM 21.1.8, 256 bits) | 61.8 | 9.21 | 0.25x | max err 0.0e+00 |
+| numba-cuda: NVIDIA TITAN X (Pascal) | 58.4 | 14.12 | 0.16x | max err 6.8e-08 |
+| vulkan: NVIDIA TITAN X (Pascal), device arrays | 1.0 | 0.33 | 6.87x | max err 0.0e+00 |
+| vulkan: Intel(R) UHD Graphics 630 (CFL GT2), device arrays | 7.2 | 4.62 | 0.49x | max err 0.0e+00 |
+| vulkan: llvmpipe (LLVM 21.1.8, 256 bits), device arrays | 4.3 | 3.82 | 0.59x | max err 0.0e+00 |
+| numba-cuda: NVIDIA TITAN X (Pascal), device arrays | 0.4 | 0.20 | 11.46x | max err 6.8e-08 |

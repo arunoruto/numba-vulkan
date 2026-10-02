@@ -2,6 +2,7 @@
 
 import functools
 import os
+import re
 import warnings
 
 import numpy as np
@@ -17,7 +18,11 @@ from numba.np import numpy_support
 from numba_vulkan import narrowing, runtime
 from numba_vulkan.buffers import STATUS_INDEX, arg_binding
 from numba_vulkan.compiler import compile_kernel, compile_vulkan
-from numba_vulkan.errors import VulkanPrecisionWarning, VulkanUnsupportedError
+from numba_vulkan.errors import (
+    VulkanPerformanceWarning,
+    VulkanPrecisionWarning,
+    VulkanUnsupportedError,
+)
 from numba_vulkan.target import TARGET_NAME, exception_table, vulkan_target
 from numba_vulkan.vktypes import HalfArray, VulkanArray, VulkanDispatcherType
 
@@ -340,16 +345,47 @@ class VulkanDispatcher:
                 kernel = compile_kernel(
                     cres, ndim, exact=not self.fastmath, local_size=local_size
                 )
-            if kernel.narrowed.floats and self.narrow not in (True, "floats"):
-                warnings.warn(
-                    f"kernel '{self.py_func.__name__}' uses float64, which the "
-                    "device does not support; it is computed in float32 instead. "
-                    "Pass narrow=True to @jit to accept this silently.",
-                    VulkanPrecisionWarning,
-                    stacklevel=4,
-                )
+            self._warn(kernel, bound)
             self._kernels[key] = kernel
         return self._kernels[key]
+
+    def _warn(self, kernel, argtypes):
+        """Point out float64 that costs precision or speed, once per kernel.
+
+        Parameters
+        ----------
+        kernel : CompiledKernel
+            The kernel just compiled.
+        argtypes : list of numba.types.Type
+            Its argument types.
+        """
+        if not narrowing.WARNINGS:
+            return
+        name = self.py_func.__name__
+        silence = "Set NUMBA_VULKAN_WARNINGS=0 to silence this."
+        if kernel.narrowed.floats and self.narrow not in (True, "floats"):
+            warnings.warn(
+                f"kernel '{name}' uses float64, which the device does not support; "
+                "it is computed in float32 instead. Pass narrow=True to @jit to "
+                f"accept this. {silence}",
+                VulkanPrecisionWarning,
+                stacklevel=5,
+            )
+        elif not kernel.mode.floats and _FLOAT64_ARITHMETIC.search(kernel.llvm_ir):
+            explicit = any((getattr(t, "dtype", t) == types.float64) for t in argtypes)
+            hint = (
+                ""
+                if explicit
+                else " None of its arguments is float64, so the cause is probably "
+                "a Python float such as 0.5, which Numba types as float64; write "
+                "np.float32(0.5) to stay in float32."
+            )
+            warnings.warn(
+                f"kernel '{name}' computes with float64, which most GPUs run at a "
+                f"small fraction of the float32 speed.{hint} {silence}",
+                VulkanPerformanceWarning,
+                stacklevel=5,
+            )
 
     def forall(self, extent, device=None, local_size=None):
         """Bind a dispatch grid, like ``numba.cuda``'s ``kernel.forall``.
@@ -471,7 +507,7 @@ class VulkanDispatcher:
                 self.narrow == "floats" and mode.ints
             )
             mode = mode._replace(floats=floats, ints=ints)
-        argtypes, hosts, shapes, staged = [], [], [], []
+        argtypes, hosts, shapes, staged, convert = [], [], [], [], []
         on_host = False
         for arg in args:
             if isinstance(arg, runtime.DeviceArray):
@@ -497,14 +533,16 @@ class VulkanDispatcher:
                     # (SPIR-V has no storable bool), 64-bit types are 32-bit
                     # where the kernel is narrowed, and strided or
                     # Fortran-ordered arrays travel as contiguous copies.
+                    # Conversion waits for the kernel, which tells whether
+                    # the array is read at all.
                     staged.append((len(hosts), arg))
-                    arg = np.ascontiguousarray(arg, dtype=stored)
+                    convert.append((len(hosts), arg, stored))
                 hosts.append(arg)
             else:
                 ty = typeof(arg)
                 argtypes.append(ty)
                 stored = narrowing.stored_dtype(np.dtype(str(ty)), mode)
-                hosts.append(np.array([arg], dtype=stored))
+                hosts.append(narrowing.convert(np.array([arg]), stored))
         ndim = len(extent if extent is not None else groups)
         if local_size is not None:
             local_size = (local_size,) if np.isscalar(local_size) else tuple(local_size)
@@ -519,6 +557,9 @@ class VulkanDispatcher:
                 -(-int(n) // kernel.local_size[axis]) for axis, n in enumerate(extent)
             ]
         groups = _shape3(groups)
+        for index, arg, stored in convert:
+            check = arg_binding(index) in kernel.read_bindings
+            hosts[index] = narrowing.convert(arg, stored, check)
         if 0 in groups:
             return
         # Element 0 receives the status of the kernel, the shapes follow.
@@ -569,6 +610,12 @@ class VulkanDispatcher:
 # NUMBA_VULKAN_SYNC=1.
 _ASYNC = os.environ.get("NUMBA_VULKAN_SYNC", "0") == "0"
 STATUS_BINDING = 0
+
+
+_FLOAT64_ARITHMETIC = re.compile(
+    r"= (?:fadd|fsub|fmul|fdiv|frem|fneg)\b[^\n]*\bdouble\b|"
+    r"call [^\n]*double @(?:_Z\d+\w+d\b|llvm\.\w+\.f64)"
+)
 
 
 def _shape3(shape):
@@ -623,16 +670,18 @@ def jit(
         ``ZeroDivisionError`` from the launch, as Numba does on the CPU.
         The check costs a comparison per division.
     narrow : bool, {'ints', 'floats'} or None
-        Whether a kernel computes with 32-bit floats and integers where its
-        code says ``float64`` and ``int64``, which Numba uses for Python
+        Whether a kernel computes with 32-bit integers and floats where its
+        code says ``int64`` and ``float64``, which Numba uses for Python
         literals and all index arithmetic. ``None``, the default, narrows
-        on devices without 64-bit types and warns when that affects
-        floats; ``True`` always narrows, without a warning; ``False`` never
-        does, so the kernel fails on such devices. ``"ints"`` narrows only
-        the integers, which makes loops and index arithmetic considerably
-        faster on GPUs, and ``"floats"`` only the floats. Arrays of 64-bit
-        elements are converted on the host. Only the setting of the kernel
-        matters, not that of the functions it calls.
+        integers always, because 64-bit integer arithmetic is slow on GPUs
+        (unless ``NUMBA_VULKAN_INT64=1``), and floats only on devices
+        without ``float64``, with a warning. ``"ints"`` narrows only the
+        integers, also on such devices; ``"floats"`` narrows only the
+        floats; ``True`` narrows both, without a warning; ``False`` neither,
+        so the kernel fails on devices without 64-bit types. Arrays of
+        64-bit elements are converted on the host, and integers that do not
+        fit raise ``OverflowError``. Only the setting of the kernel matters,
+        not that of the functions it calls.
     **options
         Accepted for compatibility with Numba's generic ``jit`` and ignored.
 

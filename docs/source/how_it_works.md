@@ -221,6 +221,14 @@ narrow mode ({py:mod}`numba_vulkan.narrowing`), in three places:
 Buffers then hold 32-bit elements for 64-bit array types; the host converts
 NumPy arguments, and device arrays on such a device store the narrow type.
 
+Integers are narrowed by default on every device, for speed. A kernel that
+keeps `float64` cannot be narrowed as a whole, because libclc's `float64`
+functions work on the bits of doubles with 64-bit integers. Its integers
+are narrowed before libclc is linked, in the kernel's own code only, which
+gets a first round of inlining and clean-up for that purpose. The
+target's own bit manipulations of doubles (`isnan`, `copysign`, printing)
+use two 32-bit words instead of a 64-bit integer, so that they survive.
+
 ## Runtime
 
 {py:mod}`numba_vulkan.runtime` is a small Vulkan compute runtime on top of

@@ -20,6 +20,7 @@ and rejected rather than miscompiled.
 """
 
 import contextlib
+import os
 import re
 import struct
 from typing import NamedTuple
@@ -29,6 +30,57 @@ from llvmlite import ir
 from numba.core import cgutils
 
 from numba_vulkan.errors import VulkanUnsupportedError
+
+
+# Kernels compute with 32-bit integers unless NUMBA_VULKAN_INT64=1: 64-bit
+# integer arithmetic is emulated on GPUs and slows index-heavy kernels down.
+NARROW_INTS = os.environ.get("NUMBA_VULKAN_INT64", "0") == "0"
+# Whether to warn about float64; NUMBA_VULKAN_WARNINGS=0 silences it.
+WARNINGS = os.environ.get("NUMBA_VULKAN_WARNINGS", "1") != "0"
+
+
+def convert(values, dtype, check=True):
+    """Convert host data to the element type a buffer holds.
+
+    Parameters
+    ----------
+    values : numpy.ndarray
+        The data.
+    dtype : numpy.dtype
+        The type to convert to, from `stored_dtype`.
+    check : bool
+        Whether to check that integers fit. Arrays that a kernel only
+        writes to may hold anything, as from ``np.empty``.
+
+    Returns
+    -------
+    numpy.ndarray
+        A C-contiguous array of `dtype`; `values` itself if it is one.
+
+    Raises
+    ------
+    OverflowError
+        If integers do not fit into the narrower type. Wrapping them around
+        would silently change the data.
+    """
+    dtype = np.dtype(dtype)
+    if (
+        values.dtype.kind in "iu"
+        and dtype.kind in "iu"
+        and dtype.itemsize < values.dtype.itemsize
+        and values.size
+        and check
+    ):
+        info = np.iinfo(dtype)
+        low, high = values.min(), values.max()
+        if low < info.min or high > info.max:
+            bad = low if low < info.min else high
+            raise OverflowError(
+                f"the {values.dtype} value {bad} does not fit into {dtype}: kernels "
+                "compute with 32-bit integers by default. Pass narrow=False to "
+                "@nv.jit, or set NUMBA_VULKAN_INT64=1, for 64-bit integers"
+            )
+    return np.asarray(values, dtype=dtype, order="C")
 
 
 class Mode(NamedTuple):

@@ -4,6 +4,7 @@ from numba_vulkan.codegen import CompiledKernel
 from numba_vulkan.dispatcher import VulkanDispatcher, jit
 from numba_vulkan.errors import (
     SpirvCodegenError,
+    VulkanPerformanceWarning,
     VulkanPrecisionWarning,
     VulkanSupportError,
     VulkanUnsupportedError,
@@ -36,6 +37,7 @@ __all__ = [
     "DeviceArray",
     "SpirvCodegenError",
     "VulkanDispatcher",
+    "VulkanPerformanceWarning",
     "VulkanPrecisionWarning",
     "VulkanSupportError",
     "VulkanUnsupportedError",

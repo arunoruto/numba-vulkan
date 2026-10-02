@@ -27,7 +27,7 @@ from numba_vulkan import libclc
 
 ENV_VAR = "NUMBA_VULKAN_CACHE"
 # Changes whenever the layout of an entry does.
-_FORMAT = "2"
+_FORMAT = "3"
 # Parts of the IR that differ between processes without changing its
 # meaning: the counter Numba appends to function names, and module names.
 _UID = re.compile(r"B(\d+)v(\d+)(?=B)")

@@ -30,6 +30,15 @@ class VulkanPrecisionWarning(UserWarning):
     """
 
 
+class VulkanPerformanceWarning(UserWarning):
+    """A kernel computes with float64, which is slow on most GPUs.
+
+    Issued once per kernel when it is compiled. ``NUMBA_VULKAN_WARNINGS=0``
+    silences it, as does ``warnings.filterwarnings("ignore",
+    category=nv.VulkanPerformanceWarning)``.
+    """
+
+
 class VulkanSupportError(RuntimeError):
     """A device lacks a capability that a kernel needs.
 
