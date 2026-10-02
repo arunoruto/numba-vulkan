@@ -35,6 +35,16 @@ _FMULADD = re.compile(
     rf"(?:float|double) {_ATTRS}([^)]+)\).*$",
     re.MULTILINE,
 )
+_FMA64 = re.compile(
+    rf"^(\s*)(%\S+) = (?:tail )?call {_ATTRS}double @llvm\.fma\.f64"
+    rf"\(double {_ATTRS}([^,]+), double {_ATTRS}([^,]+), double {_ATTRS}([^)]+)\).*$",
+    re.MULTILINE,
+)
+_ROUNDING64 = re.compile(
+    rf"^(\s*)(%\S+) = (?:tail )?call {_ATTRS}double "
+    rf"@llvm\.(trunc|rint|nearbyint|roundeven)\.f64\(double {_ATTRS}([^)]+)\).*$",
+    re.MULTILINE,
+)
 _CTLZ = re.compile(
     rf"^(\s*)(%\S+) = (?:tail )?call {_ATTRS}i(32|64) @llvm\.ctlz\.i(?:32|64)"
     rf"\(i(?:32|64) {_ATTRS}([^,]+), i1 (?:true|false)\).*$",
@@ -215,6 +225,144 @@ def expand_fmuladd(text):
         return f"{indent}%fma.m{n} = fmul {ty} {a}, {b}\n{indent}{res} = fadd {ty} %fma.m{n}, {c}"
 
     return _FMULADD.sub(repl, text)
+
+
+def emulate_fma64(text):
+    """Rewrite ``llvm.fma.f64`` as a fused multiply-add in software.
+
+    Vulkan allows ``Fma`` to round the product before adding, and llvmpipe
+    does so for ``double``. libclc's argument reductions, ``sin`` and
+    ``cos`` among them, rely on fusion and lose all accuracy without it.
+    The product is computed exactly as the sum of two doubles (Dekker's
+    method, with Veltkamp's splitting), added to the third operand with
+    Knuth's two-sum, and rounded once more. That differs from a true fused
+    operation only in rare double-rounding cases. The splitting overflows
+    for operands near the largest doubles; there, ``a * b + c`` is used.
+
+    Parameters
+    ----------
+    text : str
+        Textual LLVM IR.
+
+    Returns
+    -------
+    str
+        The rewritten LLVM IR.
+
+    Notes
+    -----
+    Correct only while every operation is rounded on its own, which the
+    ``NoContraction`` decoration of all float arithmetic guarantees outside
+    ``fastmath`` kernels.
+    """
+
+    def repl(match):
+        """Replacement text for one match."""
+        indent, res, a, b, c = match.groups()
+        v = f"%sfma{next(_COUNTER)}"
+        lines = []
+        for name, x in (("a", a), ("b", b)):
+            lines += [
+                f"{v}.{name}c = fmul double {x}, 134217729.0",
+                f"{v}.{name}t = fsub double {v}.{name}c, {x}",
+                f"{v}.{name}h = fsub double {v}.{name}c, {v}.{name}t",
+                f"{v}.{name}l = fsub double {x}, {v}.{name}h",
+            ]
+        lines += [
+            f"{v}.p = fmul double {a}, {b}",
+            f"{v}.e0 = fmul double {v}.ah, {v}.bh",
+            f"{v}.e1 = fsub double {v}.e0, {v}.p",
+            f"{v}.e2 = fmul double {v}.ah, {v}.bl",
+            f"{v}.e3 = fadd double {v}.e1, {v}.e2",
+            f"{v}.e4 = fmul double {v}.al, {v}.bh",
+            f"{v}.e5 = fadd double {v}.e3, {v}.e4",
+            f"{v}.e6 = fmul double {v}.al, {v}.bl",
+            f"{v}.e = fadd double {v}.e5, {v}.e6",
+            f"{v}.s = fadd double {v}.p, {c}",
+            f"{v}.v = fsub double {v}.s, {v}.p",
+            f"{v}.w = fsub double {v}.s, {v}.v",
+            f"{v}.x = fsub double {v}.p, {v}.w",
+            f"{v}.y = fsub double {c}, {v}.v",
+            f"{v}.z = fadd double {v}.x, {v}.y",
+            f"{v}.lo = fadd double {v}.z, {v}.e",
+            f"{v}.r = fadd double {v}.s, {v}.lo",
+            # r - r is 0 exactly when r is finite.
+            f"{v}.d = fsub double {v}.r, {v}.r",
+            f"{v}.ok = fcmp oeq double {v}.d, 0.0",
+            f"{res} = select i1 {v}.ok, double {v}.r, double {v}.s",
+        ]
+        return "\n".join(indent + line for line in lines)
+
+    return _FMA64.sub(repl, text)
+
+
+def emulate_rounding64(text):
+    """Compute ``float64`` truncation and rounding to even from ``floor``.
+
+    llvmpipe (Mesa 26.1) gets both wrong in its vectorised code, that is
+    for values that differ between invocations: ``Trunc`` returns values of
+    at least 2**24 unchanged, fraction included, and ``RoundEven`` rounds
+    halves towards zero and loses the sign of negative zeros. ``Floor`` is
+    correct. This matters beyond ``math.trunc`` and ``round``: libclc's
+    ``sin``, ``cos`` and ``tan`` truncate the quadrant number, and go wrong
+    from about 2**24 * pi / 2 on.
+
+    With ``a = |x|`` and ``f = floor(a)``, ``trunc(x)`` is ``copysign(f, x)``
+    and ``roundeven(x)`` is ``copysign(f + 1, x)`` where ``a - f`` exceeds a
+    half or equals it with ``f`` odd, else ``copysign(f, x)``. Every step is
+    exact, and infinities and NaN come out unchanged.
+
+    Parameters
+    ----------
+    text : str
+        Textual LLVM IR.
+
+    Returns
+    -------
+    str
+        The rewritten LLVM IR, with the intrinsics it uses declared.
+    """
+
+    def repl(match):
+        """Replacement text for one match."""
+        indent, res, kind, x = match.groups()
+        v = f"%sround{next(_COUNTER)}"
+        lines = [
+            f"{v}.a = call double @llvm.fabs.f64(double {x})",
+            f"{v}.f = call double @llvm.floor.f64(double {v}.a)",
+        ]
+        if kind == "trunc":
+            lines.append(
+                f"{res} = call double @llvm.copysign.f64(double {v}.f, double {x})"
+            )
+        else:
+            lines += [
+                f"{v}.d = fsub double {v}.a, {v}.f",
+                f"{v}.h = fmul double {v}.f, 0.5",
+                f"{v}.hf = call double @llvm.floor.f64(double {v}.h)",
+                f"{v}.e = fsub double {v}.h, {v}.hf",
+                # f is odd exactly when f / 2 has a fraction.
+                f"{v}.odd = fcmp one double {v}.e, 0.0",
+                f"{v}.above = fcmp ogt double {v}.d, 0.5",
+                f"{v}.half = fcmp oeq double {v}.d, 0.5",
+                f"{v}.tie = and i1 {v}.half, {v}.odd",
+                f"{v}.up = or i1 {v}.above, {v}.tie",
+                f"{v}.f1 = fadd double {v}.f, 1.0",
+                f"{v}.r = select i1 {v}.up, double {v}.f1, double {v}.f",
+                f"{res} = call double @llvm.copysign.f64(double {v}.r, double {x})",
+            ]
+        return "\n".join(indent + line for line in lines)
+
+    text, count = _ROUNDING64.subn(repl, text)
+    if count:
+        for name, args in (
+            ("fabs", "double"),
+            ("floor", "double"),
+            ("copysign", "double, double"),
+        ):
+            if f"declare double @llvm.{name}.f64(" not in text:
+                text += f"\ndeclare double @llvm.{name}.f64({args})\n"
+    return text
 
 
 def expand_ctlz(text):

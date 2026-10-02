@@ -19,6 +19,8 @@ INTS = _rng.integers(-20, 20, 64).astype(np.int64)
 NONZERO = np.where(INTS == 0, 3, INTS)
 SPECIAL = np.array([0.0, -0.0, 1.5, -2.5, np.inf, -np.inf, np.nan, 2.0] * 8, dtype=f32)
 REVERSED = SPECIAL[::-1].copy()
+# Halves, which round to even, and ordinary values.
+HALVES = np.concatenate([np.arange(-8, 8) + 0.5, SYM[:48]]).astype(f32)
 
 
 def _elementwise(fn, nargs):
@@ -315,7 +317,7 @@ UNARY_UFUNCS = {
     "sin": SYM, "cos": SYM, "tan": UNIT, "arcsin": UNIT, "arccos": UNIT, "arctan": SYM,
     "sinh": SYM, "cosh": SYM, "tanh": SYM, "arcsinh": SYM, "arccosh": POS + 1, "arctanh": UNIT,
     "exp": SYM, "exp2": SYM, "expm1": UNIT, "log": POS, "log2": POS, "log10": POS, "log1p": UNIT,
-    "sqrt": POS, "fabs": SYM, "floor": SYM, "ceil": SYM, "trunc": SYM,
+    "sqrt": POS, "fabs": SYM, "floor": SYM, "ceil": SYM, "trunc": SYM, "rint": HALVES,
     "degrees": SYM, "radians": SYM, "rad2deg": SYM, "deg2rad": SYM,
     "negative": SYM, "absolute": SYM, "sign": SPECIAL, "square": SYM, "reciprocal": POS,
     "isnan": SPECIAL, "isinf": SPECIAL, "isfinite": SPECIAL, "logical_not": SYM,

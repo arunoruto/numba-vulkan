@@ -96,11 +96,19 @@ class Mode(NamedTuple):
         Whether ``float32`` atomic additions may use the device's native
         instruction (``VK_EXT_shader_atomic_float``) instead of a
         compare-and-swap loop.
+    soft_fma : bool
+        Whether ``float64`` fused multiply-add is computed in software,
+        because the device does not fuse it (see `numba_vulkan.probes`).
+    soft_rounding : bool
+        Whether ``float64`` truncation and rounding to even are computed
+        from ``floor``, because the device gets them wrong (llvmpipe).
     """
 
     floats: bool = False
     ints: bool = False
     float_atomics: bool = False
+    soft_fma: bool = False
+    soft_rounding: bool = False
 
 
 # The mode of the kernel being compiled. Compilation holds Numba's global
