@@ -829,6 +829,45 @@ class DeviceArray:
             f"on {self.device.info.name}>"
         )
 
+    def reshape(self, *shape):
+        """Give the array a new shape without copying.
+
+        Parameters
+        ----------
+        *shape : int or tuple of int
+            The new shape, with as many elements as the array has; one
+            extent may be ``-1``, as in NumPy.
+
+        Returns
+        -------
+        DeviceArray
+            An array that shares the data with this one.
+
+        Raises
+        ------
+        ValueError
+            If the number of elements differs.
+        """
+        if len(shape) == 1 and not np.isscalar(shape[0]):
+            shape = tuple(shape[0])
+        shape = np.empty(self.size, dtype=np.uint8).reshape(shape).shape
+        view = object.__new__(DeviceArray)
+        view.device, view.shape, view.dtype = self.device, shape, self.dtype
+        view._stored, view._nbytes = self._stored, self._nbytes
+        view._buffer = self._buffer
+        # The original owns the buffer; the view keeps it alive.
+        view._base = getattr(self, "_base", None) or self
+        return view
+
+    def ravel(self):
+        """The array as one dimension, without copying.
+
+        Returns
+        -------
+        DeviceArray
+        """
+        return self.reshape(-1)
+
     def copy_to_device(self, array):
         """Overwrite the contents with those of a host array.
 
