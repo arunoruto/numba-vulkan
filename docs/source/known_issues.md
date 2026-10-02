@@ -104,8 +104,9 @@ entry point. SPIR-V forbids recursion, so this will not change.
 ### KI-23: less accurate math without libclc or with `fastmath`
 
 With libclc, math functions are accurate to the last digit or two in both
-precisions (but see KI-31 for `float64` `exp` on some devices). Without it, and for `float32` with `fastmath=True`, the
-drivers' and this package's own versions are used: `lgamma` is then
+precisions (but see KI-31 for `float64` on some devices). Without it, and
+for `float32` with `fastmath=True`, the drivers' and this package's own
+versions are used: `lgamma` is then
 accurate to about 1e-5, as is `gamma` without libclc (with libclc,
 `gamma` ignores `fastmath`), `erf` and `erfc` have an absolute error
 of about 1.5e-7, and the trigonometric functions are only as good as the
@@ -239,27 +240,31 @@ than the one inside llvmlite, so the bundled copy (LLVM 22) relies on the
 Vulkan target from the LLVM sources in a small Nix derivation of this
 project's own, pinned to llvmlite's LLVM version.
 
-### KI-31: libclc's `float64` `exp` loses precision on some devices
+### KI-31: some libclc `float64` functions lose precision on some devices
 
-libclc's `exp` in `float64` is accurate to 1 ulp on the Titan X, but on the
-UHD 630 and llvmpipe its error grows with the argument:
+Measured against mpmath on 1500 random arguments per function, every
+libclc `float64` function used here is within 2 ulp on the Titan X. On the
+UHD 630 and llvmpipe, some lose precision as the argument grows:
 
-| `math.exp`, `float64` | \|x\| < 1 | 1 < \|x\| < 20 | 20 < \|x\| < 170 | 170 < \|x\| < 700 |
-| --- | ---: | ---: | ---: | ---: |
-| NVIDIA Titan X | 1 ulp | 1 ulp | 1 ulp | 1 ulp |
-| Intel UHD 630 | 1 ulp | 6 ulp | 50 ulp | 208 ulp |
-| llvmpipe | 1 ulp | 20 ulp | 167 ulp | 673 ulp |
+| `float64` | Titan X | UHD 630 | llvmpipe | arguments |
+| --- | ---: | ---: | ---: | --- |
+| `erfc` | 2 ulp | 202 ulp | 630 ulp | −6 to 26 |
+| `sin`, `cos`, `tan` | 1 ulp | 2 ulp | up to 1.2e7 ulp | −1000 to 1000 |
 
-(maxima over 1500 random arguments per range, against mpmath). `pow` stays
-within 2 ulp on all three. The growth with the argument suggests an
-argument reduction that is exact only with fused multiply-add; llvmpipe
-does not fuse `float64`. That is not confirmed, and the UHD 630 does fuse
-`llvm.fma`. `gamma` inherits the error for arguments beyond 16 (up to 166
-ulp on llvmpipe). Other functions built on `exp` have not been measured.
+`exp`, `expm1`, `sinh` and `cosh` had the same problem (up to 673 ulp on
+llvmpipe and 208 on the UHD 630 near 700). They are now computed by this
+package (`mathimpl.reduced_exp`): `x` is reduced to `k ln 2 + r` with exact
+arithmetic, and libclc only computes `exp(r)` for small `r`, where it is
+accurate on every device. All other functions are within 2 ulp on all three
+devices. Why libclc's `exp` code loses precision on these two drivers is
+not known; its reduction is exact even without fused multiply-add.
+llvmpipe does not fuse `float64` multiply-adds, which may explain the
+trigonometric functions there, whose argument reduction depends on it.
 
-**Fix:** a Cody-Waite reduction in this package, `x = k ln 2 + r` with a
-split `ln 2` whose products with `k` are exact, then libclc's `exp(r)`,
-which is accurate for small `r` on every device, scaled by `2**k`.
+**Fix:** the same treatment for `erfc` (the error comes from `exp(-x*x)`
+inside it, which needs `x*x` split exactly) and, if llvmpipe matters, an
+argument reduction for the trigonometric functions that does not rely on
+fused multiply-add.
 
 ### KI-22: lint warnings
 

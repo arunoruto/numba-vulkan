@@ -199,11 +199,10 @@ def _gamma_arguments(lo, hi, dtype):
 
 
 # Tolerances: the worst error measured on the Titan X, the UHD 630 and
-# llvmpipe is 7 ulp in float32 and 166 ulp (3.7e-14) in float64, the
-# latter from libclc's exp on the UHD 630 and llvmpipe (KI-31). Results
-# below the normal range may be flushed to zero.
+# llvmpipe is 7 ulp in float32 and 6 ulp in float64. Results below the
+# normal range may be flushed to zero.
 GAMMA_RANGES = {
-    "float64": (-185.5, 171.5, np.float64, 1e-13),
+    "float64": (-185.5, 171.5, np.float64, 3e-15),
     "float32": (-41.5, 35.0, f32, 1e-6),
 }
 
@@ -227,6 +226,40 @@ def test_gamma_with_fastmath_keeps_its_accuracy(run):
     # NVIDIA reorders arithmetic in fastmath kernels, which costs a few
     # digits but must not overflow.
     np.testing.assert_allclose(out, want, rtol=1e-5, atol=2 * float(np.finfo(f32).tiny))
+
+
+# libclc's float64 exp, expm1, sinh and cosh lose up to 670 ulp for large
+# arguments on llvmpipe and 200 on the UHD 630; their replacements in
+# mathimpl measure 1 ulp. NumPy's versions are accurate to the last bit.
+EXP_FAMILY = {
+    "exp": (math.exp, np.exp, (-745.0, 709.7)),
+    "expm1": (math.expm1, np.expm1, (-50.0, 709.7)),
+    "sinh": (math.sinh, np.sinh, (-710.4, 710.4)),
+    "cosh": (math.cosh, np.cosh, (-710.4, 710.4)),
+}
+
+
+@pytest.mark.skipif(not libclc.available(), reason="libclc is not installed")
+@pytest.mark.parametrize("name", EXP_FAMILY)
+def test_float64_exp_family_over_its_range(run, name):
+    fn, reference, (lo, hi) = EXP_FAMILY[name]
+    x = np.concatenate([np.linspace(lo, hi, 3000), np.linspace(-1.5, 1.5, 301)])
+    want = reference(x)
+    tiny = float(np.finfo(np.float64).tiny)
+    _check(run, ("exp family", name), fn, (x,), want, rtol=1e-15, atol=2 * tiny)
+
+
+@pytest.mark.skipif(not libclc.available(), reason="libclc is not installed")
+@pytest.mark.parametrize("name", EXP_FAMILY)
+def test_float64_exp_family_special_values(run, name):
+    fn, reference, _ = EXP_FAMILY[name]
+    x = np.array([0.0, -0.0, np.inf, -np.inf, np.nan, 800.0, -800.0, 710.6])
+    with np.errstate(over="ignore"):
+        want = reference(x)
+    out = np.zeros_like(x)
+    run(_elementwise(fn, 1), x.size, x, out)
+    np.testing.assert_array_equal(out, want)
+    np.testing.assert_array_equal(np.signbit(out), np.signbit(want))
 
 
 @pytest.mark.parametrize("dtype", [np.float64, f32])

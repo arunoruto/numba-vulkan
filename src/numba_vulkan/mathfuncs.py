@@ -27,8 +27,7 @@ import numpy as np
 from numba.core import types
 from numba.core.typing import signature
 
-from numba_vulkan import libclc
-from numba_vulkan.mathimpl import libclc_name, lower
+from numba_vulkan.mathimpl import call_libclc, libclc_name, lower
 
 
 def _hypot(ty):
@@ -462,9 +461,9 @@ def _sinpi(ty):
 # Coefficients of the gamma function after OCML (AMD's device library), as
 # adopted by upstream libclc after LLVM 22 ("libclc: Improve tgamma
 # handling", llvm-project#188066). That code is under Apache-2.0 WITH
-# LLVM-exception, like the bundled libclc; see data/LICENSE-libclc.txt. For |x| < 16, after
-# shifting x into [-1/2, 1/2] by the recurrence, gamma is n / (d (1 + y q(y)));
-# beyond that, Stirling's series in 1 / |x|. Each tuple lists a polynomial's
+# LLVM-exception, like the bundled libclc; see data/LICENSE-libclc.txt.
+# For |x| < 16, after shifting x into [-1/2, 1/2] by the recurrence, gamma
+# is n / (d (1 + y q(y))); beyond that, Stirling's series in 1 / |x|. Each tuple lists a polynomial's
 # coefficients from the highest degree down, for Horner's scheme.
 _GAMMA = {
     64: {
@@ -679,7 +678,7 @@ def _register(pyfn, factory, nargs):
         vals = [context.cast(builder, a, t, ty) for a, t in zip(args, sig.args)]
         from_libclc = libclc_name(context, pyfn, ty)
         if from_libclc is not None:
-            res = libclc.call(builder, from_libclc, vals)
+            res = call_libclc(builder, from_libclc, vals, ty)
             return context.cast(builder, res, ty, sig.return_type)
         inner = signature(ty, *[ty] * nargs)
         res = context.compile_internal(builder, factory(ty), inner, vals)

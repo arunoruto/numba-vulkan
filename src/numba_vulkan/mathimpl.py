@@ -176,7 +176,7 @@ def _float_math(context, builder, pyfn, name, f32_only, sig, args):
     vals = [context.cast(builder, a, t, ty) for a, t in zip(args, sig.args)]
     from_libclc = libclc_name(context, pyfn, ty)
     if from_libclc is not None:
-        return libclc.call(builder, from_libclc, vals)
+        return call_libclc(builder, from_libclc, vals, ty)
     if f32_only and ty == types.float64 and not narrowing.current.floats:
         if not context.narrow_math:
             raise VulkanUnsupportedError(
@@ -188,6 +188,185 @@ def _float_math(context, builder, pyfn, name, f32_only, sig, args):
         vals = [builder.fptrunc(v, ir.FloatType()) for v in vals]
         return builder.fpext(call_intrinsic(builder, name, vals), ir.DoubleType())
     return call_intrinsic(builder, name, vals)
+
+
+# Cody and Waite's split of ln 2 (as in fdlibm): the head has 21 trailing
+# zero bits, so its products with the integers used below are exact.
+_LN2_HI = float.fromhex("0x1.62e42feep-1")
+_LN2_LO = float.fromhex("0x1.a39ef35793c76p-33")
+# Beyond this, exp overflows or underflows to zero for any reduction.
+_EXP_REDUCE_LIMIT = 746.0
+
+
+def reduced_exp(builder, x, scale=0):
+    """``exp`` of a ``double``, reduced here before calling libclc.
+
+    libclc's own ``float64`` ``exp`` loses precision as the argument grows
+    on some devices (up to 673 ulp on llvmpipe and 208 on Intel's UHD 630
+    near 700, 1 ulp on NVIDIA), while it is accurate everywhere for small
+    arguments. So ``x`` is split into ``k ln 2 + r`` with ``|r| <= ln(2)/2``
+    and exact arithmetic, libclc computes ``exp(r)``, and the result is
+    scaled by ``2**k``, built from its bit pattern in two factors so that
+    neither overflows near the ends of the range.
+
+    Parameters
+    ----------
+    builder : llvmlite.ir.IRBuilder
+        Builder positioned where the code is emitted.
+    x : llvmlite.ir.Value
+        The argument, a ``double``.
+    scale : int, optional
+        Power of two to multiply the result by, exactly; ``-1`` gives
+        ``exp(x) / 2`` without overflowing where that is finite.
+
+    Returns
+    -------
+    llvmlite.ir.Value
+        ``exp(x) * 2**scale`` as a ``double``.
+
+    Notes
+    -----
+    Arguments beyond about 746 in magnitude, infinities and NaN go to
+    libclc unreduced; the result is then infinite, zero or NaN anyway.
+    """
+    f64, i32 = ir.DoubleType(), ir.IntType(32)
+    absx = call_intrinsic(builder, "llvm.fabs", [x])
+    # False for NaN, which therefore takes the unreduced path.
+    reduce = builder.fcmp_ordered("<=", absx, f64(_EXP_REDUCE_LIMIT))
+    safe = builder.select(reduce, x, f64(0.0))
+    rounding = call_intrinsic(builder, "llvm.copysign", [f64(0.5), safe])
+    n = call_intrinsic(
+        builder,
+        "llvm.trunc",
+        [builder.fadd(builder.fmul(safe, f64(1 / math.log(2))), rounding)],
+    )
+    r = builder.fsub(
+        builder.fsub(safe, builder.fmul(n, f64(_LN2_HI))),
+        builder.fmul(n, f64(_LN2_LO)),
+    )
+    k = builder.fptosi(n, i32)
+    if scale:
+        k = builder.add(k, i32(scale))
+    half = builder.ashr(k, i32(1))
+    scaled = libclc.call(builder, "exp", [builder.select(reduce, r, x)])
+    for e in (half, builder.sub(k, half)):
+        high = builder.shl(builder.add(e, i32(1023)), i32(20))
+        scaled = builder.fmul(scaled, words_double(builder, i32(0), high))
+    return scaled
+
+
+def _branch(builder, small, small_value, large_value):
+    """Choose between two values computed only on their own branch.
+
+    Parameters
+    ----------
+    builder : llvmlite.ir.IRBuilder
+    small : llvmlite.ir.Value
+        ``i1`` condition selecting `small_value`.
+    small_value, large_value : callable
+        Emit the code of each alternative and return its value.
+
+    Returns
+    -------
+    llvmlite.ir.Value
+    """
+    with builder.if_else(small) as (then, otherwise):
+        with then:
+            a = small_value()
+            a_block = builder.block
+        with otherwise:
+            b = large_value()
+            b_block = builder.block
+    phi = builder.phi(a.type)
+    phi.add_incoming(a, a_block)
+    phi.add_incoming(b, b_block)
+    return phi
+
+
+def _cosh_sinh(sign):
+    """Build ``cosh`` (``sign`` 1) or ``sinh`` (``sign`` -1) for doubles.
+
+    From 1 on, they are ``e/2 + sign / (4 e/2)`` with ``e/2 = exp(|x|) / 2``
+    from `reduced_exp`; below, libclc's own versions, which are accurate
+    there, are used.
+    """
+    name = "cosh" if sign == 1 else "sinh"
+
+    def lower_double(builder, x):
+        f64 = ir.DoubleType()
+        absx = call_intrinsic(builder, "llvm.fabs", [x])
+
+        def large():
+            half_e = reduced_exp(builder, absx, scale=-1)
+            tail = builder.fdiv(f64(0.25), half_e)
+            if sign == 1:
+                return builder.fadd(half_e, tail)
+            value = builder.fsub(half_e, tail)
+            return call_intrinsic(builder, "llvm.copysign", [value, x])
+
+        small = builder.fcmp_unordered("<", absx, f64(1.0))
+        return _branch(builder, small, lambda: libclc.call(builder, name, [x]), large)
+
+    return lower_double
+
+
+def _expm1_double(builder, x):
+    """``expm1`` for doubles: libclc below 1/2 in magnitude, else ``exp - 1``.
+
+    From 1/2 on, ``exp(x) - 1`` amplifies the error of `reduced_exp` at most
+    2.5-fold, and libclc's ``expm1`` loses precision for large arguments in
+    the same way as its ``exp``. A zero argument is returned as it is,
+    because libclc's ``expm1(-0.0)`` is ``+0.0``.
+    """
+    f64 = ir.DoubleType()
+    absx = call_intrinsic(builder, "llvm.fabs", [x])
+    small = builder.fcmp_unordered("<", absx, f64(0.5))
+
+    def near_zero():
+        value = libclc.call(builder, "expm1", [x])
+        return builder.select(builder.fcmp_ordered("==", x, f64(0.0)), x, value)
+
+    return _branch(
+        builder,
+        small,
+        near_zero,
+        lambda: builder.fsub(reduced_exp(builder, x), f64(1.0)),
+    )
+
+
+# libclc functions whose float64 versions lose precision for large
+# arguments on some devices (KI-31 has the measurements), and the lowering
+# that replaces them.
+_EXP_FAMILY = {
+    "exp": reduced_exp,
+    "expm1": _expm1_double,
+    "cosh": _cosh_sinh(1),
+    "sinh": _cosh_sinh(-1),
+}
+
+
+def call_libclc(builder, name, args, ty):
+    """Call a libclc math function, or this package's replacement for it.
+
+    Parameters
+    ----------
+    builder : llvmlite.ir.IRBuilder
+        Builder positioned where the code is emitted.
+    name : str
+        The libclc function, as returned by `libclc_name`.
+    args : list of llvmlite.ir.Value
+        Arguments, of type `ty`.
+    ty : numba.types.Float
+        Type the function is evaluated in.
+
+    Returns
+    -------
+    llvmlite.ir.Value
+        The result, of type `ty`.
+    """
+    if name in _EXP_FAMILY and ty == types.float64 and not narrowing.current.floats:
+        return _EXP_FAMILY[name](builder, args[0])
+    return libclc.call(builder, name, args)
 
 
 def _register(pyfn, name, f32_only):

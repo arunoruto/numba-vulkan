@@ -50,10 +50,14 @@ as `exp(lgamma(x))`, which loses precision as the argument grows (1800 ulp
 near 170 in `float64`) and returns infinity instead of tiny values for
 large negative arguments. This package uses a port of the newer upstream
 `tgamma` (from AMD's OCML) instead, in both precisions and also with
-`fastmath`. It is within 7 ulp in `float32` on all tested devices and in
-`float64` on the Titan X; on the UHD 630 and llvmpipe, libclc's `exp`
-limits it to about 50 and 170 ulp for arguments beyond 16 (KI-31).
-numba-cuda and Numba's CPU target are within 3 ulp.
+`fastmath`. It is within 7 ulp in both precisions on all three tested
+devices; numba-cuda and Numba's CPU target are within 3 ulp.
+
+In `float64`, `exp`, `expm1`, `sinh` and `cosh` are not libclc's either,
+except for small arguments: on Intel's and Mesa's drivers, libclc's versions
+lose up to a few hundred ulp for large arguments (KI-31). This package
+reduces the argument to `k ln 2 + r` exactly and lets libclc compute only
+`exp(r)`, which gives 1 ulp on every tested device.
 
 ### Choosing speed over accuracy
 
