@@ -192,6 +192,55 @@ def test_gamma_functions_of_negative_arguments(run):
     _check(run, ("math", "lgamma"), math.lgamma, (x,), lgamma, rtol=2e-6, atol=1e-6)
 
 
+def _gamma_arguments(lo, hi, dtype):
+    """Arguments across gamma's range, away from the poles."""
+    x = np.linspace(lo, hi, 2000).astype(dtype)
+    return x[(x > 0) | (np.abs(x - np.round(x)) > 1e-3)]
+
+
+# Tolerances: the worst error measured on the Titan X, the UHD 630 and
+# llvmpipe is 7 ulp in float32 and 166 ulp (3.7e-14) in float64, the
+# latter from libclc's exp on the UHD 630 and llvmpipe (KI-31). Results
+# below the normal range may be flushed to zero.
+GAMMA_RANGES = {
+    "float64": (-185.5, 171.5, np.float64, 1e-13),
+    "float32": (-41.5, 35.0, f32, 1e-6),
+}
+
+
+@pytest.mark.skipif(not libclc.available(), reason="libclc is not installed")
+@pytest.mark.parametrize("case", GAMMA_RANGES)
+def test_gamma_over_its_range(run, case):
+    lo, hi, dtype, rtol = GAMMA_RANGES[case]
+    x = _gamma_arguments(lo, hi, dtype)
+    want = np.vectorize(math.gamma)(x.astype(np.float64)).astype(dtype)
+    atol = 2 * float(np.finfo(dtype).tiny)
+    _check(run, ("gamma range", case), math.gamma, (x,), want, rtol=rtol, atol=atol)
+
+
+def test_gamma_with_fastmath_keeps_its_accuracy(run):
+    x = _gamma_arguments(-41.5, 35.0, f32)
+    want = np.vectorize(math.gamma)(x.astype(np.float64)).astype(f32)
+    kernel = nv.jit(fastmath=True)(_elementwise(math.gamma, 1).py_func)
+    out = np.zeros_like(x)
+    run(kernel, x.size, x, out)
+    # NVIDIA reorders arithmetic in fastmath kernels, which costs a few
+    # digits but must not overflow.
+    np.testing.assert_allclose(out, want, rtol=1e-5, atol=2 * float(np.finfo(f32).tiny))
+
+
+@pytest.mark.parametrize("dtype", [np.float64, f32])
+def test_gamma_special_values(run, dtype):
+    if dtype == np.float64 and not libclc.available():
+        pytest.skip("libclc is not installed")
+    x = np.array([0.0, -0.0, -3.0, np.inf, -np.inf, np.nan, 200.0, -200.5], dtype=dtype)
+    out = np.zeros_like(x)
+    run(_elementwise(math.gamma, 1), x.size, x, out)
+    want = np.array([np.inf, -np.inf, np.nan, np.inf, np.nan, np.nan, np.inf, -0.0])
+    np.testing.assert_array_equal(out, want.astype(dtype))
+    assert np.signbit(out[[1, 7]]).all()
+
+
 @nv.jit
 def _power(a, b):
     return a**b

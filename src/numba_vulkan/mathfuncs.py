@@ -23,6 +23,7 @@ only on Vulkan, so most of these functions inherit that restriction; see
 
 import math
 
+import numpy as np
 from numba.core import types
 from numba.core.typing import signature
 
@@ -418,6 +419,95 @@ def _lgamma(ty):
     return lgamma
 
 
+def _sinpi(ty):
+    """Build ``sin(pi * x)`` with exact argument reduction.
+
+    Parameters
+    ----------
+    ty : numba.types.Float
+        Float type to compute in.
+
+    Returns
+    -------
+    function
+        The implementation for ``ty``.
+
+    Notes
+    -----
+    ``x`` is reduced to [-1/2, 1/2] with operations that are exact
+    (truncation, and subtractions whose results are representable), so the
+    result
+    keeps its relative accuracy near the zeros at the integers, which
+    ``sin(pi * x)`` loses for large ``x``. ``fmod`` would not do: Vulkan
+    only requires ``OpFRem`` to be as accurate as ``x - y * trunc(x / y)``.
+    """
+    half, one, two, pi = ty(0.5), ty(1), ty(2), ty(math.pi)
+
+    def sinpi(x):
+        """``sin(pi * x)``."""
+        r = x - two * np.trunc(x * half)
+        if r > one:
+            r -= two
+        elif r < -one:
+            r += two
+        if r > half:
+            r = one - r
+        elif r < -half:
+            r = -one - r
+        return math.sin(pi * r)
+
+    return _jit(sinpi)
+
+
+# Coefficients of the gamma function after OCML (AMD's device library), as
+# adopted by upstream libclc after LLVM 22 ("libclc: Improve tgamma
+# handling", llvm-project#188066). That code is under Apache-2.0 WITH
+# LLVM-exception, like the bundled libclc; see data/LICENSE-libclc.txt. For |x| < 16, after
+# shifting x into [-1/2, 1/2] by the recurrence, gamma is n / (d (1 + y q(y)));
+# beyond that, Stirling's series in 1 / |x|. Each tuple lists a polynomial's
+# coefficients from the highest degree down, for Horner's scheme.
+_GAMMA = {
+    64: {
+        "q": (
+            "-0x1.aed75feec7b9ap-23", "0x1.31854a0be3cd3p-20",
+            "-0x1.5037d6a97a8b7p-20", "-0x1.51d67f2cdbcfbp-16",
+            "0x1.0c8ab2ac5112dp-13", "-0x1.c364ce9b5e149p-13",
+            "-0x1.317113a39f929p-10", "0x1.d919c501178a3p-8",
+            "-0x1.3b4af282da690p-7", "-0x1.59af103bf2cd0p-5",
+            "0x1.5512320b432ccp-3", "-0x1.5815e8fa28886p-5",
+            "-0x1.4fcf4026afa24p-1", "0x1.2788cfc6fb61cp-1",
+        ),
+        # Stirling: the series is 1 + p(1/x) / x.
+        "p": (
+            "-0x1.2b04c5ea74bbfp-11", "0x1.14869344f1d9bp-14",
+            "0x1.9b3457156ffefp-11", "-0x1.e1427e86ee097p-13",
+            "-0x1.5f7266f67c4e0p-9", "0x1.c71c71c0f96adp-9",
+            "0x1.5555555555a28p-4",
+        ),
+        "sqrt2pi": "0x1.40d931ff62706p+1",
+        # Beyond `overflow` the result is infinite; below `split` the
+        # reflection is evaluated in two steps to avoid overflow, and
+        # below `underflow` the result is zero.
+        "overflow": "0x1.573fae561f646p+7",
+        "split": "-170.5",
+        "underflow": "-184.0",
+    },
+    32: {
+        "q": (
+            "0x1.d5a56ep-8", "-0x1.4dcb00p-7", "-0x1.59c03ap-5",
+            "0x1.55405ap-3", "-0x1.5810f2p-5", "-0x1.4fcfd6p-1",
+            "0x1.2788ccp-1",
+        ),
+        # Stirling: the series is p(1/x) itself.
+        "p": ("0x1.96d7e4p-9", "0x1.556652p-4", "0x1.fffff8p-1"),
+        "sqrt2pi": "0x1.40d932p+1",
+        "overflow": "0x1.18521ep+5",
+        "split": "-30.0",
+        "underflow": "-41.0",
+    },
+}  # fmt: skip
+
+
 def _gamma(ty):
     """Build ``math.gamma``.
 
@@ -433,19 +523,115 @@ def _gamma(ty):
 
     Notes
     -----
-    Computed as the exponential of the log-gamma function, with the
-    reflection formula below one half.
+    A port of the ``tgamma`` of upstream libclc after LLVM 22, which
+    replaced the ``exp(lgamma(x))`` of libclc 22. That form loses precision
+    as ``lgamma`` grows (up to 1800 ulp near 170) and overflows in the
+    reflection for large negative arguments. It is used even where libclc
+    is available, and ``fastmath`` does not apply to it.
+
+    Upstream writes the recurrence steps as multiply-adds, ``n * y - n``
+    and ``d * y + d``, which cancel badly near the poles unless they are
+    fused (Mesa's copy of libclc fuses them for that reason). Here they are
+    ``n * (y - 1)`` and ``d * (y + 1)``: in the range where they are used,
+    ``y - 1`` and ``y + 1`` are exact, so each step rounds once, as a fused
+    multiply-add would, on every device. Vulkan does not guarantee fusion;
+    llvmpipe does not fuse float64.
     """
-    half, one, pi = ty(0.5), ty(1), ty(math.pi)
-    positive = _lgamma_positive(ty)
+    table = _GAMMA[ty.bitwidth]
+    q = tuple(ty(float.fromhex(c)) for c in table["q"])
+    p = tuple(ty(float.fromhex(c)) for c in table["p"])
+    stirling_has_one = ty.bitwidth == 64
+    sqrt2pi = ty(float.fromhex(table["sqrt2pi"]))
+    sqrtpiby2 = sqrt2pi / ty(2)
+    overflow = ty(float.fromhex(table["overflow"]))
+    split, underflow = ty(float(table["split"])), ty(float(table["underflow"]))
+    zero, quarter, half, one = ty(0), ty(0.25), ty(0.5), ty(1)
+    sixteen, inf, nan = ty(16), ty(math.inf), ty(math.nan)
+    sinpi = _sinpi(ty)
+
+    def is_integer(x):
+        # also true for infinities, whose gamma is NaN on the left
+        return math.isinf(x) or np.trunc(x) == x
+
+    is_integer = _jit(is_integer)
+
+    def times_series(g, xr, acc):
+        # g times Stirling's series, rounded as upstream does
+        if stirling_has_one:
+            return g * (xr * acc) + g
+        return g * acc
+
+    times_series = _jit(times_series)
 
     def gamma(x):
         """Gamma function."""
-        if x < half:
-            return pi / (math.sin(pi * x) * math.exp(positive(one - x)))
-        return math.exp(positive(x))
+        ax = abs(x)
+        if ax < sixteen:
+            y = x
+            if x > zero:
+                n = one
+                while y > ty(2.5):
+                    n = n * (y - one)
+                    y = y - one
+                    n = n * (y - one)
+                    y = y - one
+                if y > ty(1.5):
+                    n = n * (y - one)
+                    y = y - one
+                if x >= half:
+                    y = y - one
+                d = x if x < half else one
+            else:
+                d = x
+                while y < ty(-1.5):
+                    d = d * (y + one)
+                    y = y + one
+                    d = d * (y + one)
+                    y = y + one
+                if y < -half:
+                    d = d * (y + one)
+                    y = y + one
+                n = one
+            acc = q[0]
+            for c in q[1:]:
+                acc = y * acc + c
+            ret = n / (d * (y * acc) + d)
+            if x == zero:
+                return math.copysign(inf, x)
+            if x < zero and is_integer(x):
+                return nan
+            return ret
+        # x^(x/2 - 1/4) e^(-x/2): its square is gamma up to the series, so
+        # no partial product below can overflow, in whatever order a
+        # driver evaluates it (NVIDIA reorders in fastmath kernels, which
+        # are not decorated NoContraction).
+        h = math.pow(ax, ax * half - quarter) * math.exp(-ax * half)
+        xr = one / ax
+        acc = p[0]
+        for c in p[1:]:
+            acc = xr * acc + c
+        if x > zero:
+            if x > overflow:
+                return inf
+            return times_series(sqrt2pi * h * h, xr, acc)
+        if is_integer(x) or math.isnan(x):
+            return nan
+        s = -x * sinpi(x)
+        if x > split:
+            return sqrtpiby2 / times_series(s * h * h, xr, acc)
+        if x > underflow:
+            return (sqrtpiby2 / times_series(h, xr, acc)) / (s * h)
+        return math.copysign(zero, s)
 
-    return gamma
+    # Compiled without fastmath even in fastmath kernels, so that it keeps
+    # libclc's exp and pow and LLVM keeps the order of operations.
+    accurate = _jit(gamma)
+
+    def gamma_call(x):
+        """Gamma function."""
+        return accurate(x)
+
+    return gamma_call
 
 
 _UNARY = {
