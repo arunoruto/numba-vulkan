@@ -1,10 +1,13 @@
 """Typing of Vulkan-specific functions."""
 
 import math
+import operator
 
+import numpy as np
 from numba.core import errors, types
 from numba.core.typing.templates import (
     AbstractTemplate,
+    AttributeTemplate,
     CallableTemplate,
     ConcreteTemplate,
     Registry,
@@ -12,8 +15,8 @@ from numba.core.typing.templates import (
 )
 
 from numba_vulkan import stubs
-from numba_vulkan.buffers import SHARED_BASE, shared_sizes
-from numba_vulkan.vktypes import VulkanArray
+from numba_vulkan.buffers import LOCAL_BASE, SHARED_BASE, shared_sizes
+from numba_vulkan.vktypes import VulkanArray, VulkanExpr
 
 registry = Registry()
 
@@ -91,11 +94,119 @@ def _dtype(dtype):
     return None
 
 
+def _static_array_type(shape, dtype, site, base):
+    """The type of an array with a constant shape, or ``None``.
+
+    Parameters
+    ----------
+    shape, dtype : numba.types.Type
+        Types of the shape and dtype arguments.
+    site : numba.types.Type
+        Type of the hidden call-site argument.
+    base : int
+        `SHARED_BASE` or `LOCAL_BASE`.
+
+    Returns
+    -------
+    VulkanArray or None
+    """
+    dims, dtype = _literal_shape(shape), _dtype(dtype)
+    if dims is None or dtype is None or not isinstance(site, types.IntegerLiteral):
+        return None
+    if any(n <= 0 for n in dims):
+        raise errors.TypingError("arrays in kernels need a positive constant shape")
+    binding = base + site.literal_value
+    shared_sizes[binding] = math.prod(dims)
+    return VulkanArray(dtype, len(dims), "C", binding)
+
+
+@registry.register_global(stubs.local.array)
+class LocalArray(CallableTemplate):
+    """Typing of ``local.array(shape, dtype)``; see `SharedArray`."""
+
+    def generic(self):
+        """Return the typer.
+
+        Returns
+        -------
+        callable
+        """
+
+        def typer(_vulkan_site, shape, dtype):
+            return _static_array_type(shape, dtype, _vulkan_site, LOCAL_BASE)
+
+        return typer
+
+
+def _numpy_constructor(function, fill):
+    """Register the typing of ``np.empty`` and its relatives inside kernels.
+
+    They give local arrays (see `LocalArray`). A shape that is not a
+    constant is an error, because shaders cannot allocate memory.
+
+    Parameters
+    ----------
+    function : callable
+        ``np.empty``, ``np.zeros``, ``np.ones`` or ``np.full``.
+    fill : bool
+        Whether the function takes a fill value after the shape.
+    """
+
+    def check(shape, site):
+        # Numba types the call twice, the second time with literals; only
+        # then can a shape be told to be constant or not.
+        if not isinstance(site, types.IntegerLiteral):
+            return False
+        if _literal_shape(shape) is None and not isinstance(shape, types.Literal):
+            if isinstance(shape, (types.Integer, types.BaseTuple)):
+                raise errors.TypingError(
+                    f"np.{function.__name__}() in a Vulkan kernel needs a constant "
+                    "shape: shaders cannot allocate memory at run time"
+                )
+        return True
+
+    if fill:
+
+        @registry.register_global(function)
+        class Constructor(CallableTemplate):
+            def generic(self):
+                def typer(_vulkan_site, shape, fill_value, dtype=None):
+                    if not check(shape, _vulkan_site):
+                        return None
+                    if dtype is None or isinstance(dtype, types.NoneType):
+                        dtype = types.NumberClass(fill_value)
+                    return _static_array_type(shape, dtype, _vulkan_site, LOCAL_BASE)
+
+                return typer
+
+    else:
+
+        @registry.register_global(function)
+        class Constructor(CallableTemplate):
+            def generic(self):
+                def typer(_vulkan_site, shape, dtype=None):
+                    if not check(shape, _vulkan_site):
+                        return None
+                    if dtype is None or isinstance(dtype, types.NoneType):
+                        dtype = types.NumberClass(types.float64)
+                    return _static_array_type(shape, dtype, _vulkan_site, LOCAL_BASE)
+
+                return typer
+
+    Constructor.__doc__ = f"Typing of ``np.{function.__name__}`` inside kernels."
+    return Constructor
+
+
+for _function in (np.empty, np.zeros, np.ones):
+    _numpy_constructor(_function, fill=False)
+_numpy_constructor(np.full, fill=True)
+
+
 @registry.register_global(stubs.shared.array)
 class SharedArray(CallableTemplate):
     """Typing of ``shared.array(shape, dtype)``.
 
-    The call carries a third, hidden argument: a literal that identifies the
+    The call carries a hidden first argument: a literal that identifies the
     call site, added by `numba_vulkan.compiler.NumberSharedArrays`. It
     becomes the "binding" of the array type, which tells element accesses
     which workgroup variable to use.
@@ -109,17 +220,8 @@ class SharedArray(CallableTemplate):
         callable
         """
 
-        def typer(shape, dtype, _vulkan_site=None):
-            dims, dtype = _literal_shape(shape), _dtype(dtype)
-            if dims is None or dtype is None:
-                return None
-            if not isinstance(_vulkan_site, types.IntegerLiteral):
-                return None
-            if any(n <= 0 for n in dims):
-                raise errors.TypingError("shared arrays need a positive constant shape")
-            binding = SHARED_BASE + _vulkan_site.literal_value
-            shared_sizes[binding] = math.prod(dims)
-            return VulkanArray(dtype, len(dims), "C", binding)
+        def typer(_vulkan_site, shape, dtype):
+            return _static_array_type(shape, dtype, _vulkan_site, SHARED_BASE)
 
         return typer
 
@@ -157,6 +259,8 @@ def _atomic_target(array, index, dtypes):
     """Whether atomics apply to `array` at an index of type `index`."""
     if not isinstance(array, VulkanArray) or array.dtype not in dtypes:
         return False
+    if array.binding >= LOCAL_BASE:
+        raise errors.TypingError("atomic operations on local arrays are not supported")
     if not array.mutable:
         raise errors.TypingError("atomic operations need a writable array")
     count = len(index) if isinstance(index, types.BaseTuple) else 1
@@ -182,3 +286,223 @@ class CompareAndSwap(AbstractTemplate):
         if not _atomic_target(array, index, (types.int32, types.uint32, types.float32)):
             return None
         return signature(array.dtype, array, index, array.dtype, array.dtype)
+
+
+# -- array expressions ----------------------------------------------------------
+
+_BINARY_OPERATORS = (
+    operator.add,
+    operator.sub,
+    operator.mul,
+    operator.truediv,
+    operator.floordiv,
+    operator.mod,
+    operator.pow,
+    operator.and_,
+    operator.or_,
+    operator.xor,
+    operator.lshift,
+    operator.rshift,
+    operator.lt,
+    operator.le,
+    operator.gt,
+    operator.ge,
+    operator.eq,
+    operator.ne,
+)
+_UNARY_OPERATORS = (operator.neg, operator.pos, operator.invert, abs)
+_INPLACE_OPERATORS = {
+    operator.iadd: operator.add,
+    operator.isub: operator.sub,
+    operator.imul: operator.mul,
+    operator.itruediv: operator.truediv,
+    operator.ifloordiv: operator.floordiv,
+    operator.imod: operator.mod,
+    operator.ipow: operator.pow,
+    operator.iand: operator.and_,
+    operator.ior: operator.or_,
+    operator.ixor: operator.xor,
+}
+
+
+def _ufuncs():
+    """The NumPy ufuncs that kernels support on scalars, as functions."""
+    from numba_vulkan import ufuncs
+
+    names = (
+        list(ufuncs._REUSED)
+        + list(ufuncs._UNARY)
+        + list(ufuncs._BINARY)
+        + list(ufuncs._PREDICATES)
+    )
+    return [getattr(np, name) for name in dict.fromkeys(names) if hasattr(np, name)]
+
+
+def is_array_like(ty):
+    """Whether a type is an array or an array expression of this target."""
+    return isinstance(ty, (VulkanArray, VulkanExpr))
+
+
+def element_type(ty):
+    """Type of an element of an array or expression; a scalar's own type."""
+    return ty.dtype if is_array_like(ty) else ty
+
+
+def expression_type(context, op, args):
+    """The type of applying `op` element-wise to `args`, or ``None``.
+
+    Parameters
+    ----------
+    context : numba.core.typing.Context
+        The typing context.
+    op : callable
+        An operator or ufunc.
+    args : tuple of numba.types.Type
+        Argument types; at least one must be an array or expression, the
+        others scalars.
+
+    Returns
+    -------
+    VulkanExpr or None
+    """
+    if not any(is_array_like(a) for a in args):
+        return None
+    if not all(
+        is_array_like(a) or isinstance(a, (types.Number, types.Boolean)) for a in args
+    ):
+        return None
+    elements = tuple(element_type(a) for a in args)
+    try:
+        sig = context.resolve_function_type(
+            context.resolve_value_type(op), elements, {}
+        )
+    except errors.TypingError:
+        return None
+    if sig is None or not isinstance(sig.return_type, (types.Number, types.Boolean)):
+        return None
+    ndim = max(a.ndim for a in args if is_array_like(a))
+    return VulkanExpr(op, args, sig.return_type, ndim)
+
+
+def _expression_template(op):
+    """Register the typing of `op` applied to arrays as a `VulkanExpr`."""
+
+    @registry.register_global(op)
+    class ExpressionTemplate(AbstractTemplate):
+        __doc__ = f"Typing of ``{getattr(op, '__name__', op)}`` on arrays."
+
+        def generic(self, args, kws):
+            if kws:
+                return None
+            result = expression_type(self.context, op, args)
+            return None if result is None else signature(result, *args)
+
+    return ExpressionTemplate
+
+
+for _op in _BINARY_OPERATORS + _UNARY_OPERATORS + tuple(_ufuncs()):
+    _expression_template(_op)
+
+
+def _inplace_template(op, plain):
+    """Register the typing of an in-place operator on a writable array."""
+
+    @registry.register_global(op)
+    class InplaceTemplate(AbstractTemplate):
+        __doc__ = f"Typing of ``{op.__name__}`` on arrays: an element-wise update."
+
+        def generic(self, args, kws):
+            if kws or len(args) != 2 or not isinstance(args[0], VulkanArray):
+                return None
+            if expression_type(self.context, plain, args) is None:
+                return None
+            if not args[0].mutable:
+                raise errors.TypingError("cannot modify a read-only array")
+            return signature(args[0], *args)
+
+    return InplaceTemplate
+
+
+for _op, _plain in _INPLACE_OPERATORS.items():
+    _inplace_template(_op, _plain)
+
+
+@registry.register_global(operator.getitem)
+class ExpressionGetItem(AbstractTemplate):
+    """Typing of ``expression[index]``: one element, for a full index."""
+
+    def generic(self, args, kws):
+        """Type a call; only integer indices for every axis are accepted."""
+        if len(args) != 2 or not isinstance(args[0], VulkanExpr):
+            return None
+        expr, index = args
+        indices = index if isinstance(index, types.BaseTuple) else (index,)
+        if len(indices) != expr.ndim or not all(
+            isinstance(i, types.Integer) for i in indices
+        ):
+            raise errors.TypingError(
+                f"an array expression can only be indexed with {expr.ndim} integers"
+            )
+        return signature(expr.dtype, *args)
+
+
+@registry.register_global(operator.setitem)
+class ExpressionSetItem(AbstractTemplate):
+    """Typing of ``array[index] = expression``."""
+
+    def generic(self, args, kws):
+        """Type a call."""
+        if len(args) != 3 or not isinstance(args[2], VulkanExpr):
+            return None
+        if not isinstance(args[0], VulkanArray):
+            return None
+        if not args[0].mutable:
+            raise errors.TypingError("cannot modify a read-only array")
+        return signature(types.none, *args)
+
+
+@registry.register_attr
+class ExpressionAttributes(AttributeTemplate):
+    """Attributes of array expressions: ``shape``, ``size``, ``ndim``."""
+
+    key = VulkanExpr
+
+    def resolve_shape(self, ty):
+        return types.UniTuple(types.intp, ty.ndim)
+
+    def resolve_size(self, ty):
+        return types.intp
+
+    def resolve_ndim(self, ty):
+        return types.intp
+
+
+@registry.register_global(len)
+class ExpressionLen(AbstractTemplate):
+    """Typing of ``len(expression)``."""
+
+    def generic(self, args, kws):
+        """Type a call."""
+        if len(args) == 1 and isinstance(args[0], VulkanExpr) and args[0].ndim:
+            return signature(types.intp, *args)
+        return None
+
+
+@registry.register_global(operator.getitem)
+@registry.register_global(operator.setitem)
+class FancyIndexing(AbstractTemplate):
+    """Reject indexing with arrays (masks, index lists) with a clear message."""
+
+    def generic(self, args, kws):
+        """Raise for an array or expression used as an index."""
+        if len(args) < 2 or not isinstance(args[0], VulkanArray):
+            return None
+        index = args[1]
+        parts = index if isinstance(index, types.BaseTuple) else (index,)
+        if any(isinstance(p, (types.Array, VulkanExpr)) for p in parts):
+            raise errors.TypingError(
+                "indexing with arrays (boolean masks, lists of indices) is not "
+                "supported in Vulkan kernels: it would create an array of run-time "
+                "size. Loop over the elements instead."
+            )
+        return None

@@ -13,6 +13,9 @@ are tracked in {doc}`known_issues`.
 - views: slices refer to the same data, can be passed to functions and
   written through; `a[1:3] = x` fills a slice from a scalar or an array
 - iteration over arrays (`for v in a`, `enumerate`, `zip`)
+- arrays of a constant shape inside kernels (`np.zeros(4)`,
+  `nv.local.array`), and array expressions (`a * 2 + b`, `np.sqrt(a)`),
+  computed element by element where they are used
 - NumPy arrays from the enclosing scope as read-only tables
 - workgroup-shared arrays, barriers, atomics (`add`, `sub`, `max`, `min`,
   `exch`, `and_`, `or_`, `xor`, `cas`) on 32-bit elements, and launches
@@ -47,11 +50,11 @@ are tracked in {doc}`known_issues`.
   is not installed, calling them with `float64` raises an error, unless
   `@nv.jit(narrow_math=True)` asks for `float32` precision.
 
-Array expressions and allocation
-: Anything that creates a new array is unsupported: `a * 2`, `a[mask]`,
-  `a.copy()`, `np.zeros(n)`, reductions along an `axis`. Work on elements
-  and views instead. `a[1:] = a[:-1]` is rejected, because the two slices
-  could overlap.
+Arrays of run-time size
+: Nothing can create an array whose size is only known at run time:
+  `a[mask]`, `a.copy()`, `np.zeros(n)` with a variable `n`, reductions along
+  an `axis`. Arrays of a constant shape and array expressions, which are
+  computed element by element, cover most uses (see {doc}`usage`).
 
 Exceptions and recursion
 : An exception raised inside a kernel is raised by the launch once the

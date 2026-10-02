@@ -108,14 +108,27 @@ class VulkanBackend(LoweringPass):
         return True
 
 
+# Calls that create arrays of a constant shape, by Numba's name for them.
+_STATIC_ARRAYS = {
+    ("array", "numba_vulkan.shared"),
+    ("array", "numba_vulkan.local"),
+    ("empty", "numpy"),
+    ("zeros", "numpy"),
+    ("ones", "numpy"),
+    ("full", "numpy"),
+}
+
+
 @register_pass(mutates_CFG=False, analysis_only=False)
 class NumberSharedArrays(FunctionPass):
-    """Give every ``shared.array(...)`` call site an identity.
+    """Give every call that creates an array an identity.
 
-    A shared array becomes a workgroup variable, which must be the same for
-    every execution of the call and different from that of any other call.
+    Shared arrays become workgroup variables, and local arrays (including
+    ``np.zeros`` and its relatives) private variables, which must be the
+    same for every execution of the call and different from that of any
+    other call.
     The pass passes a literal derived from the function and the position of
-    the call as a hidden argument, which typing turns into the array's
+    the call as a hidden first argument, which typing turns into the array's
     "binding" (see `numba_vulkan.vkdecl.SharedArray`). Being derived from
     the source, it is the same in every process, as the kernel cache needs.
     """
@@ -148,8 +161,7 @@ class NumberSharedArrays(FunctionPass):
                     isinstance(stmt, numba_ir.Assign)
                     and isinstance(expr, numba_ir.Expr)
                     and expr.op == "call"
-                    and guard(find_callname, func_ir, expr)
-                    == ("array", "numba_vulkan.shared")
+                    and guard(find_callname, func_ir, expr) in _STATIC_ARRAYS
                 ):
                     seen += 1
                     site = (
@@ -163,7 +175,7 @@ class NumberSharedArrays(FunctionPass):
                     body.append(
                         numba_ir.Assign(numba_ir.Const(value, stmt.loc), var, stmt.loc)
                     )
-                    expr.kws = list(expr.kws) + [("_vulkan_site", var)]
+                    expr.args = [var, *expr.args]
                     changed = True
                 body.append(stmt)
             block.body = body

@@ -6,7 +6,7 @@ import warnings
 
 import numpy as np
 from numba import typeof
-from numba.core import types, typing, utils
+from numba.core import errors, types, typing, utils
 from numba.core.target_extension import (
     dispatcher_registry,
     jit_registry,
@@ -171,6 +171,16 @@ class VulkanDispatcher:
                     self.fastmath,
                     self.boundscheck,
                 )
+            except errors.TypingError as exc:
+                # Numba's array constructors ask for an allocator.
+                if "_allocate" not in str(exc):
+                    raise
+                raise VulkanUnsupportedError(
+                    f"'{self.py_func.__name__}' creates an array whose size is only "
+                    "known at run time, which Vulkan shaders cannot do. Arrays of a "
+                    "constant shape (np.zeros(4), nv.local.array) and array "
+                    "expressions, which are computed element by element, work."
+                ) from None
             except KeyError as exc:
                 # Numba's own array code asks for the data pointer, which
                 # arrays on this target do not have.

@@ -6,7 +6,12 @@ from numba.core import types
 from numba.core.datamodel.registry import DataModelManager, register
 from numba.core.extending import models
 
-from numba_vulkan.vktypes import VulkanArray, VulkanArrayIterator, VulkanDispatcherType
+from numba_vulkan.vktypes import (
+    VulkanArray,
+    VulkanArrayIterator,
+    VulkanDispatcherType,
+    VulkanExpr,
+)
 
 vulkan_data_manager = DataModelManager()
 register_model = functools.partial(register, vulkan_data_manager)
@@ -65,3 +70,20 @@ class VulkanArrayIteratorModel(models.StructModel):
 
 
 register_model(VulkanDispatcherType)(models.OpaqueModel)
+
+
+@register_model(VulkanExpr)
+class VulkanExprModel(models.StructModel):
+    """The operands of an array expression, one member each.
+
+    Parameters
+    ----------
+    dmm : numba.core.datamodel.DataModelManager
+        The data model manager.
+    fe_type : VulkanExpr
+        The expression type being modelled.
+    """
+
+    def __init__(self, dmm, fe_type):
+        members = [(f"operand{k}", t) for k, t in enumerate(fe_type.operands)]
+        super().__init__(dmm, fe_type, members)

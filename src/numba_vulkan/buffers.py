@@ -62,11 +62,15 @@ CONSTANT_BASE = 1 << 20
 # Workgroup-shared arrays are typed with "bindings" from here upwards. They
 # are no buffers: their accesses become accesses to a Workgroup variable.
 SHARED_BASE = 1 << 24
-# Number of elements of each shared array, by its binding.
+# Arrays local to an invocation (nv.local.array, np.zeros... in kernels) are
+# typed with "bindings" from here upwards; they become Private variables.
+LOCAL_BASE = 1 << 25
+# Number of elements of each shared or local array, by its binding.
 shared_sizes = {}
 # Memory scopes of SPIR-V.
 _SCOPE_DEVICE, _SCOPE_WORKGROUP = 1, 2
 _AS_WORKGROUP = 3
+_AS_PRIVATE = 10
 _constants = {}
 # llvmlite quotes the function name, LLVM's own printer does not.
 _CONSTANT_ACCESS = re.compile(
@@ -447,15 +451,16 @@ def expand_buffer_access(text):
         mangled = access_as.get((binding, mangled), mangled)
         if int(binding) >= SHARED_BASE:
             ty = _LLVM_TYPES[mangled]
-            shared[int(binding)] = ty
+            space = _AS_PRIVATE if int(binding) >= LOCAL_BASE else _AS_WORKGROUP
+            shared[int(binding)] = (ty, space)
             array = f"[{shared_sizes[int(binding)]} x {ty}]"
             return (
                 n,
                 (
                     f"{indent}%nv.p{n} = getelementptr inbounds {array}, "
-                    f"ptr addrspace({_AS_WORKGROUP}) @nv.shared.{binding}, i32 0, i32 {index}\n"
+                    f"ptr addrspace({space}) @nv.shared.{binding}, i32 0, i32 {index}\n"
                 ),
-                _AS_WORKGROUP,
+                space,
             )
         used.add((mangled, binding))
         ext = _ext_type(mangled)
@@ -551,9 +556,9 @@ def expand_buffer_access(text):
             # The backend insists on a named global string for every resource.
             f'@.{label} = private constant [{len(label) + 1} x i8] c"{label}\\00"'
         )
-    for binding, ty in sorted(shared.items()):
+    for binding, (ty, space) in sorted(shared.items()):
         extra.append(
-            f"@nv.shared.{binding} = internal addrspace({_AS_WORKGROUP}) "
+            f"@nv.shared.{binding} = internal addrspace({space}) "
             f"global [{shared_sizes[binding]} x {ty}] poison"
         )
     for mangled in sorted({m for m, _ in used}):

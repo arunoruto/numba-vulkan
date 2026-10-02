@@ -13,11 +13,11 @@ the entry is removed from this page.
 uv run pytest tests/test_known_issues.py -rxX
 ```
 
-Numbers are not reused: KI-02, KI-03, KI-06, KI-07, KI-13, KI-24 and KI-25
-(NumPy functions on scalars, missing `math` functions, global constant
-arrays, complex numbers, all data copied on every call, nested loop exits
-that failed to compile, libclc linked in full for every kernel) have been
-fixed.
+Numbers are not reused: KI-02, KI-03, KI-05, KI-06, KI-07, KI-13, KI-24 and
+KI-25 (NumPy functions on scalars, missing `math` functions, allocating
+arrays in kernels, global constant arrays, complex numbers, all data copied
+on every call, nested loop exits that failed to compile, libclc linked in
+full for every kernel) have been fixed.
 
 ## Language and library coverage
 
@@ -42,35 +42,28 @@ that is not kept in the repository.
 `clspv--.bc`, keep the computation in `float32`, or use
 `@nv.jit(narrow_math=True)`.
 
-### KI-04: array expressions and fancy indexing
+### KI-04: arrays of run-time size
 
 ```python
-(x * 2)[i]        # VulkanUnsupportedError: ... needs direct access to memory
-x[x > 0]          # the same
-x.sum(axis=0)     # TypingError
-x[1:] = x[:-1]    # VulkanUnsupportedError: the slices could overlap
+x[x > 0]            # TypingError: indexing with arrays ... is not supported
+x.copy()            # VulkanUnsupportedError: ... size is only known at run time
+np.zeros(n)         # TypingError: ... needs a constant shape
+x.sum(axis=0)       # TypingError
+x[1:] = x[:-1] * 2  # ValueError: the expression reads the array ... at other positions
 ```
 
-Indexing with integers and slices, views, iteration and whole-array
-reductions work (see {doc}`limitations`). What does not is everything that
-has to create a new array, because there is nowhere to put it (KI-05), and
-Numba's own implementations of other array functions, which walk the data
-pointer that arrays on this target do not have.
+Shaders cannot allocate memory, so nothing can create an array whose size
+is only known when the kernel runs. Arrays of a constant shape
+(`np.zeros(4)`, `nv.local.array`) and array expressions, which are computed
+element by element where they are used, cover the rest (see {doc}`usage`).
 
-**Fix:** further functions can be added as `@overload`s for the `vulkan`
-target on top of indexing, as `arrayfuncs.py` does for the reductions.
-Array expressions need local arrays first.
+Because an expression is computed while it is being assigned, assigning it
+to an array it reads is only allowed where it reads each element at the
+position it writes, as in `a[:] = a * 2`; anything else is detected at run
+time and raises `ValueError`, where NumPy would compute a temporary first.
 
-### KI-05: allocating arrays inside a kernel
-
-**Symptom:** `np.zeros(...)` fails typing, because the target has no memory
-allocator (Numba's NRT is disabled).
-
-**Workaround:** tuples work as small fixed-size arrays; larger scratch
-space has to be passed in as an argument.
-
-**Fix:** fixed-size local arrays could map to SPIR-V function-local
-variables. Nothing exists yet.
+**Fix:** reductions along an axis can be added as `@overload`s on top of
+expressions, as `arrayfuncs.py` does for whole-array reductions.
 
 ### KI-08: `print`
 
