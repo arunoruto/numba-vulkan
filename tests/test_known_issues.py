@@ -37,21 +37,6 @@ def _(x, out):
         out[i] = x[x > 0][0]
 
 
-@known_issue("KI-08 print()", XF, lambda x: x)
-def _(x, out):
-    i = nv.global_id(0)
-    if i < x.size:
-        print(i)
-        out[i] = x[i]
-
-
-@known_issue("KI-09 float16 array", XF.astype(np.float16), lambda x: x)
-def _(x, out):
-    i = nv.global_id(0)
-    if i < x.size:
-        out[i] = x[i]
-
-
 @known_issue(
     "KI-09 structured array",
     np.zeros(N, dtype=[("a", np.float32), ("b", np.float32)]),

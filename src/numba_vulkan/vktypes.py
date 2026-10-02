@@ -25,16 +25,25 @@ class VulkanArray(types.Array):
         Whether the array is immutable.
     aligned : bool, optional
         Whether the data is aligned.
+    half : bool, optional
+        Whether the buffer holds ``float16`` values; the elements are then
+        ``float32`` to the kernel.
 
     Attributes
     ----------
     binding : int
         Descriptor binding of the buffer holding the data.
+    half : bool
+        As given.
     """
 
-    def __init__(self, dtype, ndim, layout, binding, readonly=False, aligned=True):
+    def __init__(
+        self, dtype, ndim, layout, binding, readonly=False, aligned=True, half=False
+    ):
         self.binding = binding
-        name = f"vkarray({dtype}, {ndim}d, {layout}, binding={binding})"
+        self.half = half
+        storage = ", float16" if half else ""
+        name = f"vkarray({dtype}{storage}, {ndim}d, {layout}, binding={binding})"
         super().__init__(
             dtype, ndim, layout, readonly=readonly, name=name, aligned=aligned
         )
@@ -67,6 +76,7 @@ class VulkanArray(types.Array):
             binding=self.binding,
             readonly=not self.mutable if readonly is None else readonly,
             aligned=self.aligned,
+            half=self.half,
         )
 
     @property
@@ -87,7 +97,36 @@ class VulkanArray(types.Array):
         -------
         tuple
         """
-        return super().key + (self.binding,)
+        return super().key + (self.binding, self.half)
+
+
+class HalfArray(types.Array):
+    """Type of a ``float16`` array argument before it is given a binding.
+
+    Its elements are ``float32``; see `VulkanArray`.
+    """
+
+    def __init__(self, ndim, layout, readonly=False):
+        super().__init__(
+            types.float32,
+            ndim,
+            layout,
+            readonly=readonly,
+            name=f"halfarray({ndim}d, {layout})",
+        )
+
+    def copy(self, dtype=None, ndim=None, layout=None, readonly=None):
+        """Return a copy with some properties replaced (but not the dtype)."""
+        return HalfArray(
+            self.ndim if ndim is None else ndim,
+            self.layout if layout is None else layout,
+            not self.mutable if readonly is None else readonly,
+        )
+
+    @property
+    def key(self):
+        """Identity of the type."""
+        return super().key + ("half",)
 
 
 class VulkanArrayIterator(types.ArrayIterator):

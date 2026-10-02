@@ -386,7 +386,7 @@ ones most likely to bite:
 | --- | --- | --- |
 | KI-01 | float64 `math.sin(x)`, `x ** 2.5`... need libclc, which a source checkout lacks | install a wheel, or set `NUMBA_VULKAN_LIBCLC` |
 | KI-04 | no arrays of run-time size: `a[mask]`, `a.copy()`, `np.zeros(n)`, `axis=` reductions | constant-shape arrays, array expressions |
-| KI-10 | no bounds checks unless asked for; integer division by zero is not reported | `@nv.jit(boundscheck=True)` while debugging |
+| KI-10 | indices and divisions by zero are only checked on request | `@nv.jit(boundscheck=True, error_model="python")` while debugging |
 | KI-17 | running without float64/int64 (mobile, Apple) is tested only with the features switched off on desktop GPUs | report what you find |
 
 `tests/test_known_issues.py` reproduces the coverage gaps as expected
@@ -421,6 +421,7 @@ To continue the work, start with the
 - [ ] Publish to PyPI
 - [x] `numba.vectorize` / `numba.guvectorize` with `target="vulkan"`
 - [x] `reduce` of `vectorize` functions
+- [x] `print()` in kernels, `float16` arrays, `error_model="python"`
 - [ ] Other ufunc methods (`accumulate`, `outer`)
 - [x] Shared memory, atomics, barriers and CUDA-style launch configuration
 - [x] On-disk caching of compiled kernels

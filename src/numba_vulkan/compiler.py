@@ -41,7 +41,7 @@ from numba_vulkan.codegen import (
     spirv_capabilities,
 )
 from numba_vulkan.target import TARGET_NAME, vulkan_target
-from numba_vulkan.vkimpl import buffer_element_type
+from numba_vulkan.vkimpl import buffer_element_type, storage_type
 from numba_vulkan.vktypes import VulkanArray
 
 LOCAL_SIZES = {1: (64, 1, 1), 2: (8, 8, 1), 3: (4, 4, 4)}
@@ -214,7 +214,13 @@ _NARROW_HELPERS = {}
 
 @global_compiler_lock
 def compile_vulkan(
-    pyfunc, return_type, args, narrow_math=False, fast_math=False, boundscheck=False
+    pyfunc,
+    return_type,
+    args,
+    narrow_math=False,
+    fast_math=False,
+    boundscheck=False,
+    error_model="numpy",
 ):
     """Run ``pyfunc`` through Numba's pipeline down to LLVM IR.
 
@@ -233,6 +239,9 @@ def compile_vulkan(
         Use the device's built-in float32 math functions instead of libclc.
     boundscheck : bool
         Raise ``IndexError`` for array indices that are out of bounds.
+    error_model : {'numpy', 'python'}
+        Numba's error model: ``'python'`` raises ``ZeroDivisionError`` for
+        divisions by zero, ``'numpy'`` gives NumPy's results.
 
     Returns
     -------
@@ -244,7 +253,7 @@ def compile_vulkan(
     flags.no_compile = True
     flags.no_cpython_wrapper = True
     flags.no_cfunc_wrapper = True
-    flags.error_model = "numpy"
+    flags.error_model = error_model
     options = {"narrow_math": narrow_math, "fast_math": fast_math}
     if narrowing.current.floats:
         # Helper functions compiled without float64 are kept apart from the
@@ -295,7 +304,7 @@ def _load_argument(context, builder, index, ty, shape_offset):
         for dim in range(ty.ndim):
             extent = load_element(builder, META_BINDING, i32, i32(shape_offset + dim))
             shape.append(builder.zext(extent, intp))
-        itemsize = context.get_abi_sizeof(buffer_element_type(context, ty.dtype))
+        itemsize = context.get_abi_sizeof(storage_type(context, ty))
         strides, step = [], intp(itemsize)
         for extent in reversed(shape):
             strides.insert(0, step)
@@ -399,6 +408,7 @@ def compile_kernel(cres, ndim, exact=True, local_size=None):
         capabilities=spirv_capabilities(spirv),
         written_bindings=set(library.written_bindings),
         shared_bytes=_shared_bytes(library.get_optimized_llvm_str()),
+        print_binding=library.print_binding,
         constants=dict(library.constants),
         mode=library.mode,
         narrowed=library.narrowed,

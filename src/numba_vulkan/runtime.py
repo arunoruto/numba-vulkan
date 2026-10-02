@@ -3,6 +3,7 @@
 import itertools
 import math
 import os
+import warnings
 import weakref
 from dataclasses import dataclass, field
 
@@ -10,6 +11,7 @@ import numpy as np
 import vulkan as vk
 
 from numba_vulkan import narrowing
+from numba_vulkan.buffers import print_formats
 from numba_vulkan.errors import VulkanSupportError
 
 _DEVICE_TYPES = {
@@ -40,6 +42,10 @@ class DeviceInfo:
         The ``VkPhysicalDevice`` handle.
     int64_atomics : bool
         Whether shaders may apply atomic operations to 64-bit integers.
+    float16 : bool
+        Whether shaders may compute with ``float16`` values.
+    storage16 : bool
+        Whether buffers may hold 16-bit values (``float16`` arrays).
     float32_atomic_add : bool
         Whether shaders may add to ``float32`` values atomically, in
         buffers and in shared memory (``VK_EXT_shader_atomic_float``).
@@ -62,6 +68,8 @@ class DeviceInfo:
     int8: bool
     handle: object
     int64_atomics: bool = False
+    float16: bool = False
+    storage16: bool = False
     float32_atomic_add: bool = False
     max_local_size: tuple = (128, 128, 64)
     max_local_invocations: int = 128
@@ -101,6 +109,29 @@ def _get_instance():
         )
         _instance = vk.vkCreateInstance(info, None)
     return _instance
+
+
+def _vulkan11_features(handle):
+    """The Vulkan 1.1 features of a device.
+
+    Parameters
+    ----------
+    handle : object
+        A ``VkPhysicalDevice`` handle.
+
+    Returns
+    -------
+    object
+        The filled ``VkPhysicalDeviceVulkan11Features`` structure.
+    """
+    feats = vk.VkPhysicalDeviceVulkan11Features(
+        sType=vk.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES
+    )
+    feats2 = vk.VkPhysicalDeviceFeatures2(
+        sType=vk.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, pNext=feats
+    )
+    vk.vkGetPhysicalDeviceFeatures2(handle, feats2)
+    return feats
 
 
 def _vulkan12_features(handle):
@@ -181,6 +212,7 @@ def list_devices(refresh=False):
             continue
         feats = vk.vkGetPhysicalDeviceFeatures(handle)
         feats12 = _vulkan12_features(handle)
+        feats11 = _vulkan11_features(handle)
         float_atomics = _float_atomic_features(handle)
         limits = props.limits
         found.append(
@@ -197,6 +229,8 @@ def list_devices(refresh=False):
                     feats12.shaderBufferInt64Atomics
                     and feats12.shaderSharedInt64Atomics
                 ),
+                float16=bool(feats12.shaderFloat16),
+                storage16=bool(feats11.storageBuffer16BitAccess),
                 float32_atomic_add=bool(
                     float_atomics is not None
                     and float_atomics.shaderBufferFloat32AtomicAdd
@@ -272,11 +306,17 @@ class Device:
             shaderInt8=info.int8,
             shaderBufferInt64Atomics=info.int64_atomics,
             shaderSharedInt64Atomics=info.int64_atomics,
+            shaderFloat16=info.float16,
             **chain,
+        )
+        features11 = vk.VkPhysicalDeviceVulkan11Features(
+            sType=vk.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES,
+            storageBuffer16BitAccess=info.storage16,
+            pNext=features12,
         )
         create = vk.VkDeviceCreateInfo(
             sType=vk.VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
-            pNext=features12,
+            pNext=features11,
             queueCreateInfoCount=1,
             pQueueCreateInfos=[queue_info],
             pEnabledFeatures=features,
@@ -944,6 +984,14 @@ class Device:
                 buffers.append((buffer, max(array.nbytes, 4)))
                 self._upload(buffer, array.reshape(-1).view(np.uint8))
             buffers += state.constants
+            if kernel.print_binding is not None:
+                if state.print_buffer is None:
+                    state.print_buffer = self._acquire(
+                        PRINT_BUFFER_WORDS * 4, host=True
+                    )
+                header = np.array([0, PRINT_BUFFER_WORDS], dtype=np.uint32)
+                state.print_buffer.view[:8] = header.view(np.uint8)
+                buffers.append((state.print_buffer, PRINT_BUFFER_WORDS * 4))
 
             # Repeated launches mostly see the same buffers, and then neither
             # the descriptor set nor the recorded commands have to change.
@@ -995,6 +1043,8 @@ class Device:
                     continue
                 if binding in kernel.written_bindings:
                     self._download(buffer, array.reshape(-1).view(np.uint8))
+            if kernel.print_binding is not None:
+                print_records(state.print_buffer.view.view(np.uint32))
         finally:
             # In reverse, so that the next launch gets the same buffers at
             # the same bindings from the pool.
@@ -1031,6 +1081,51 @@ def _dispatch(cmd, groups, limit):
                 vk.vkCmdDispatchBase(
                     cmd, x, y, z, min(lx, gx - x), min(ly, gy - y), min(lz, gz - z)
                 )
+
+
+PRINT_BUFFER_WORDS = int(os.environ.get("NUMBA_VULKAN_PRINT_WORDS", 1 << 18))
+
+
+def print_records(words):
+    """Print what a kernel's ``print`` calls recorded.
+
+    Parameters
+    ----------
+    words : numpy.ndarray
+        The print buffer as ``uint32``: cursor, capacity, then records;
+        see `numba_vulkan.vkimpl.lower_print`.
+    """
+    used, capacity = int(words[0]), int(words[1])
+    position, end = 2, min(used + 2, capacity)
+    while position < end:
+        form = print_formats.get(int(words[position]))
+        position += 1
+        if form is None:
+            break
+        items = []
+        for part in form:
+            code = part[0]
+            if code == "s":
+                items.append(part[1])
+            elif code == "b":
+                items.append(bool(words[position]))
+                position += 1
+            elif code == "f":
+                items.append(words[position : position + 1].view(np.float32)[0])
+                position += 1
+            else:
+                pair = words[position : position + 2].copy()
+                kind = {"i": np.int64, "u": np.uint64, "d": np.float64}[code]
+                value = pair.view(kind)[0]
+                items.append(float(value) if code == "d" else int(value))
+                position += 2
+        print(*items)
+    if used + 2 > capacity:
+        warnings.warn(
+            f"the print buffer of {capacity} words overflowed; some output was "
+            "lost (NUMBA_VULKAN_PRINT_WORDS sets its size)",
+            stacklevel=4,
+        )
 
 
 def _barrier(cmd):
@@ -1092,6 +1187,8 @@ class _Pipeline:
     bound : tuple or None
         Serial number and size of the buffer at each binding of the
         descriptor set, as last written.
+    print_buffer : _Buffer or None
+        Where the kernel's ``print`` calls write, if it has any.
     free_slots : list of _Slot
         Slots for asynchronous launches that are not in use.
     slots : int
@@ -1106,6 +1203,7 @@ class _Pipeline:
     constants: list
     keep: tuple
     bound: tuple = None
+    print_buffer: object = None
     free_slots: list = field(default_factory=list)
     slots: int = 0
     async_pool: object = None

@@ -24,6 +24,7 @@ from numba_vulkan.buffers import (
     constant_order,
     expand_buffer_access,
     renumber_constants,
+    renumber_print,
 )
 from numba_vulkan.errors import SpirvCodegenError, VulkanUnsupportedError
 from numba_vulkan.legalize import legalize
@@ -35,7 +36,9 @@ ENTRY_POINT = "main"
 _SPV_CAPABILITIES = {
     10: "float64",
     11: "int64",
+    9: "float16",
     12: "int64_atomics",
+    4433: "storage16",
     22: "int16",
     39: "int8",
     6033: "float32_atomic_add",
@@ -266,6 +269,7 @@ def emit_spirv(llvm_ir, exact=True, narrow_ints=False):
         If the backend fails or the module does not pass `check_spirv`.
     """
     spirv = fix_barrier_semantics(fix_compare_exchange(emitter.emit(llvm_ir)))
+    spirv = half_storage(spirv)
     if narrow_ints:
         spirv = narrow_index_constants(spirv)
     spirv = strip_unused(spirv)
@@ -309,6 +313,7 @@ class CompiledKernel:
     capabilities: set = field(default_factory=set)
     written_bindings: set = field(default_factory=set)
     shared_bytes: int = 0
+    print_binding: int = None
     constants: dict = field(default_factory=dict)
     mode: narrowing.Mode = narrowing.Mode()
     narrowed: narrowing.Mode = narrowing.Mode()
@@ -320,10 +325,15 @@ class CompiledKernel:
         Returns
         -------
         int
-            One for the shape buffer, one per argument and one per constant
-            array.
+            One for the shape buffer, one per argument, one per constant
+            array, and one for the output of ``print``.
         """
-        return 1 + len(self.argtypes) + len(self.constants)
+        return (
+            1
+            + len(self.argtypes)
+            + len(self.constants)
+            + (self.print_binding is not None)
+        )
 
 
 def spirv_capabilities(spirv):
@@ -503,6 +513,61 @@ def fix_compare_exchange(spirv):
                 inst[at] = replace.get(inst[at], inst[at])
             inst = tuple(inst)
         out.append(inst)
+    return _assemble(header, out)
+
+
+_OP_LOAD, _OP_STORE, _OP_FCONVERT, _OP_COPY_OBJECT = 61, 62, 115, 83
+_CAP_FLOAT16, _CAP_STORAGE16 = 9, 4433
+
+
+def half_storage(spirv):
+    """Declare 16-bit storage instead of 16-bit arithmetic where possible.
+
+    ``float16`` arrays are read and written as ``half`` and computed with
+    as ``float``. The backend declares the ``Float16`` capability for any
+    use of ``half``, which needs the ``shaderFloat16`` device feature. If
+    ``half`` values are only loaded, stored and converted, the capability
+    is replaced by ``StorageBuffer16BitAccess``, which more devices offer.
+
+    Parameters
+    ----------
+    spirv : bytes
+        A SPIR-V module.
+
+    Returns
+    -------
+    bytes
+        The module; unchanged if it does not use ``half`` or computes with
+        it.
+    """
+    header, instructions = _instructions(spirv)
+    half = {
+        i[1] for i in instructions if i[0] & 0xFFFF == _OP_TYPE_FLOAT and i[2] == 16
+    }
+    if not half:
+        return spirv
+    values = set()
+    for inst in instructions:
+        opcode = inst[0] & 0xFFFF
+        if len(inst) > 2 and inst[1] in half and opcode not in _UNTYPED:
+            if opcode not in (_OP_LOAD, _OP_FCONVERT, _OP_COPY_OBJECT):
+                return spirv
+            values.add(inst[2])
+    for inst in instructions:
+        opcode = inst[0] & 0xFFFF
+        if opcode in (_OP_STORE, _OP_FCONVERT, _OP_COPY_OBJECT, _OP_DECORATE, 5):
+            continue
+        used = set(_id_operands(inst))
+        if len(inst) > 2 and inst[1] in half:
+            used.discard(inst[2])  # the definition itself
+        if values & used:
+            return spirv
+    out = [
+        (inst[0], _CAP_STORAGE16)
+        if inst[0] & 0xFFFF == _OP_CAPABILITY and inst[1] == _CAP_FLOAT16
+        else inst
+        for inst in instructions
+    ]
     return _assemble(header, out)
 
 
@@ -904,6 +969,7 @@ class VulkanCodeLibrary(CodeLibrary):
         self._spirv = {}
         self.written_bindings = set()
         self.constants = {}
+        self.print_binding = None
         self._placeholders = {}
         self._text = None
         self.first_constant_binding = 0
@@ -1080,6 +1146,9 @@ class VulkanCodeLibrary(CodeLibrary):
             text, self.first_constant_binding, constant_order(self._source())
         )
         self._bind_constants()
+        binding = self.first_constant_binding + len(self.constants)
+        text, prints = renumber_print(text, binding)
+        self.print_binding = binding if prints else None
         if constant_order(text):
             # A placeholder binding in a shader crashes drivers.
             raise SpirvCodegenError("a constant array was not given a binding")
@@ -1153,6 +1222,7 @@ class VulkanCodeLibrary(CodeLibrary):
                     int(binding): order[slot]
                     for binding, slot in entry["constants"].items()
                 }
+                self.print_binding = entry.get("print_binding")
                 self._bind_constants()
                 self._spirv[exact] = entry["spirv"]
                 return entry["spirv"]
@@ -1171,6 +1241,7 @@ class VulkanCodeLibrary(CodeLibrary):
                         binding: order.index(placeholder)
                         for binding, placeholder in self._placeholders.items()
                     },
+                    "print_binding": self.print_binding,
                 },
             )
         return spirv
