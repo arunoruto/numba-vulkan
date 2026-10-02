@@ -105,3 +105,47 @@ class VulkanDispatcherType(types.Dispatcher):
     value: calls are resolved at compile time, and the default lowering of
     `numba.types.Dispatcher` would embed a host address.
     """
+
+
+class VulkanExpr(types.Type):
+    """An array expression that is evaluated element by element.
+
+    Kernels cannot allocate memory, so ``a * 2`` or ``np.sqrt(a) + b`` on
+    arrays does not compute a new array. Its value is the operation and its
+    operands; an element is computed when it is read, by indexing, a
+    reduction, iteration or an assignment to a slice.
+
+    Parameters
+    ----------
+    op : callable
+        The operator or ufunc, such as ``operator.add`` or ``np.sqrt``.
+    operands : tuple of numba.types.Type
+        Types of the operands: arrays, expressions or scalars.
+    dtype : numba.types.Type
+        Type of an element of the result.
+    ndim : int
+        Number of dimensions of the result, after broadcasting.
+
+    Attributes
+    ----------
+    op, operands, dtype, ndim
+        As given.
+    """
+
+    def __init__(self, op, operands, dtype, ndim):
+        self.op = op
+        self.operands = tuple(operands)
+        self.dtype = dtype
+        self.ndim = ndim
+        name = getattr(op, "__name__", str(op))
+        super().__init__(f"vkexpr({name}, {', '.join(map(str, operands))})")
+
+    @property
+    def key(self):
+        """Identity of the type: the operation and the operand types.
+
+        Returns
+        -------
+        tuple
+        """
+        return self.op, self.operands

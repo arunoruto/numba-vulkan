@@ -67,8 +67,37 @@ normalise_rows.forall(a.shape[0])(a, out)
 Available on arrays and views: `.shape`, `.size`, `.ndim`, `.T`, `len()`,
 iteration (also with `enumerate` and `zip`), `sum`, `prod`, `mean`, `min`,
 `max`, `argmin`, `argmax`, `any`, `all` over all elements, and `np.dot` of
-two 1-d arrays. Whatever would create a new array (`a * 2`, `a[mask]`,
-`np.zeros`) is not available; see {doc}`limitations`.
+two 1-d arrays.
+
+### Arrays inside kernels and array expressions
+
+Arrays of a constant shape can be created inside kernels. They are private
+to each invocation and live as long as it does:
+
+```python
+tmp = np.zeros(8, dtype=np.float32)       # also np.empty, np.ones, np.full
+acc = nv.local.array((4, 4), np.int32)    # like cuda.local.array
+```
+
+Arithmetic and ufuncs on arrays give *array expressions*. Kernels cannot
+allocate the memory a result of run-time size would need, so an
+expression stores only its operands; an element is computed when it is
+read:
+
+```python
+d = a[i] - b                      # nothing is computed yet
+out[i] = np.sqrt((d * d).sum())   # elements computed inside the reduction
+out[i, :] = a[i] * w + c          # computed element by element into out
+out[i, :] *= 2                    # in-place operators work the same way
+x = (a[i] * 2)[3]                 # computes one element
+```
+
+Expressions support element indexing with integers, `shape`, `size`,
+`ndim`, `len()`, the reductions above, `np.dot`, assignment to slices
+and in-place operators; they broadcast like NumPy. Each read computes the
+element again, so an expression read many times is better written into a
+local array once. Indexing with masks or index arrays, `copy()` and
+anything else that needs an array of run-time size is not available.
 
 NumPy arrays defined outside a kernel can be used inside it, and inside
 functions it calls, as read-only lookup tables:

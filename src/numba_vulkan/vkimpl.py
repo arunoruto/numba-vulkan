@@ -1,21 +1,24 @@
 """Lowering of Vulkan-specific functions and of array element access."""
 
+import itertools
 import math
 import operator
 
+import numpy as np
 from llvmlite import ir
 from numba.core import cgutils, types
 from numba.core.extending import intrinsic
 from numba.core.imputils import RefType, Registry, iternext_impl
 from numba.cpython import slicing
 
-from numba_vulkan import narrowing, stubs
+from numba_vulkan import narrowing, stubs, vkdecl
 from numba_vulkan.buffers import (
     atomic_element,
     barrier,
     compare_and_swap,
     i32,
     load_element,
+    shared_sizes,
     store_element,
 )
 from numba_vulkan.errors import VulkanUnsupportedError
@@ -23,6 +26,7 @@ from numba_vulkan.vktypes import (
     VulkanArray,
     VulkanArrayIterator,
     VulkanDispatcherType,
+    VulkanExpr,
 )
 
 registry = Registry("vkimpl")
@@ -448,10 +452,19 @@ def lower_setitem(context, builder, sig, args):
                 "(only scalars and arrays of the same dimensionality are)"
             )
         if valty.binding == aryty.binding:
-            raise VulkanUnsupportedError(
-                "copying between slices of the same array is not supported on "
-                "Vulkan, because the slices could overlap"
-            )
+            # Allowed only as a no-op: ``a[i] += x`` assigns a view to itself.
+            offset, shape, _, steps = _unpack(context, builder, valty, args[2])
+            _, _, _, view_steps = _unpack(context, builder, viewty, view)
+            same = builder.icmp_signed("==", offset, selection.offset)
+            for a, b in zip(shape + steps, selection.shape + view_steps):
+                same = builder.and_(same, builder.icmp_signed("==", a, b))
+            with builder.if_then(builder.not_(same), likely=False):
+                context.call_conv.return_user_exc(
+                    builder,
+                    ValueError,
+                    ("copying between slices of the same array, which could overlap",),
+                )
+            return context.get_dummy_value()
         source_shape = _unpack(context, builder, valty, args[2])[1]
         for extent, wanted in zip(source_shape, selection.shape):
             with builder.if_then(
@@ -546,8 +559,8 @@ def flat_item(typingctx, array, position):
 
     Parameters
     ----------
-    array : VulkanArray
-        The array, of any dimensionality.
+    array : VulkanArray or VulkanExpr
+        The array or array expression, of any dimensionality.
     position : int
         Position between 0 and ``array.size - 1``; it is not checked.
 
@@ -556,13 +569,22 @@ def flat_item(typingctx, array, position):
     scalar
         The element.
     """
-    if not isinstance(array, VulkanArray) or not isinstance(position, types.Integer):
+    if not isinstance(array, (VulkanArray, VulkanExpr)) or not isinstance(
+        position, types.Integer
+    ):
         return None
 
     def codegen(context, builder, sig, args):
         """Emit the element access."""
         aryty, posty = sig.args
         k = context.cast(builder, args[1], posty, types.intp)
+        if isinstance(aryty, VulkanExpr):
+            shape = expression_shape(context, builder, aryty, args[0])
+            indices = []
+            for extent in reversed(shape):
+                indices.insert(0, builder.urem(k, extent))
+                k = builder.udiv(k, extent)
+            return expression_element(context, builder, aryty, args[0], indices)
         offset, shape, _, steps = _unpack(context, builder, aryty, args[0])
         if aryty.layout == "C":
             return _load(context, builder, aryty, builder.add(offset, _i32(builder, k)))
@@ -664,7 +686,7 @@ def static_array(context, builder, aryty, shape):
     return proxy._getvalue()
 
 
-@lower(stubs.shared.array, types.Any, types.Any, types.IntegerLiteral)
+@lower(stubs.shared.array, types.IntegerLiteral, types.Any, types.Any)
 def lower_shared_array(context, builder, sig, args):
     """Lower ``shared.array(shape, dtype)``.
 
@@ -676,13 +698,55 @@ def lower_shared_array(context, builder, sig, args):
     -------
     llvmlite.ir.Value
     """
-    shape = sig.args[0]
+    shape = sig.args[1]
     dims = (
         (shape.literal_value,)
         if isinstance(shape, types.IntegerLiteral)
         else tuple(s.literal_value for s in shape)
     )
     return static_array(context, builder, sig.return_type, dims)
+
+
+@lower(stubs.local.array, types.IntegerLiteral, types.Any, types.Any)
+def lower_local_array(context, builder, sig, args):
+    """Lower ``local.array(shape, dtype)``; see `lower_shared_array`.
+
+    Returns
+    -------
+    llvmlite.ir.Value
+    """
+    return lower_shared_array(context, builder, sig, args)
+
+
+def _register_constructor(function, fill):
+    """Lower ``np.empty`` and its relatives inside kernels."""
+
+    def lower_constructor(context, builder, sig, args):
+        aryty = sig.return_type
+        array = lower_shared_array(context, builder, sig, args)
+        if function is np.empty:
+            return array
+        if fill:
+            value = context.cast(builder, args[2], sig.args[2], aryty.dtype)
+        else:
+            value = context.get_constant(aryty.dtype, 1 if function is np.ones else 0)
+        count = context.get_constant(types.intp, shared_sizes[aryty.binding])
+        with cgutils.for_range(builder, count) as loop:
+            _store(
+                context, builder, aryty, _i32(builder, loop.index), value, aryty.dtype
+            )
+        return array
+
+    lower_constructor.__doc__ = f"Lower ``np.{function.__name__}`` in kernels."
+    count = 2 if fill else 1
+    for extra in range(2):  # with and without dtype
+        types_ = [types.IntegerLiteral] + [types.Any] * (count + extra)
+        lower(function, *types_)(lower_constructor)
+
+
+for _function in (np.empty, np.zeros, np.ones):
+    _register_constructor(_function, fill=False)
+_register_constructor(np.full, fill=True)
 
 
 def _atomic_position(context, builder, aryty, ary, idxty, idx):
@@ -836,3 +900,332 @@ def lower_cas(context, builder, sig, args):
     return (
         builder.bitcast(old, ir.FloatType()) if isinstance(dtype, types.Float) else old
     )
+
+
+# -- array expressions ----------------------------------------------------------
+
+
+def _operand_shape(context, builder, ty, value):
+    """Extents of an expression operand; none for a scalar."""
+    if isinstance(ty, VulkanArray):
+        return _unpack(context, builder, ty, value)[1]
+    if isinstance(ty, VulkanExpr):
+        return expression_shape(context, builder, ty, value)
+    return []
+
+
+def _operands(context, builder, ty, value):
+    """The operand values of an expression."""
+    proxy = cgutils.create_struct_proxy(ty)(context, builder, value=value)
+    return [getattr(proxy, f"operand{k}") for k in range(len(ty.operands))]
+
+
+def expression_shape(context, builder, ty, value):
+    """The broadcast shape of an expression.
+
+    Raises ``ValueError`` in the kernel if the operands cannot be
+    broadcast together.
+
+    Returns
+    -------
+    list of llvmlite.ir.Value
+        One ``intp`` extent per dimension.
+    """
+    intp = context.get_value_type(types.intp)
+    one = intp(1)
+    shape = [one] * ty.ndim
+    for opty, operand in zip(ty.operands, _operands(context, builder, ty, value)):
+        extents = _operand_shape(context, builder, opty, operand)
+        for k, extent in enumerate(extents):
+            dim = ty.ndim - len(extents) + k
+            current = shape[dim]
+            clash = builder.and_(
+                builder.icmp_signed("!=", extent, current),
+                builder.and_(
+                    builder.icmp_signed("!=", extent, one),
+                    builder.icmp_signed("!=", current, one),
+                ),
+            )
+            with builder.if_then(clash, likely=False):
+                context.call_conv.return_user_exc(
+                    builder, ValueError, ("operands could not be broadcast together",)
+                )
+            shape[dim] = builder.select(
+                builder.icmp_signed("==", current, one), extent, current
+            )
+    return shape
+
+
+def _operand_element(context, builder, ty, value, indices):
+    """One element of an operand at the given (right-aligned) indices."""
+    if isinstance(ty, VulkanExpr):
+        return expression_element(
+            context, builder, ty, value, indices[len(indices) - ty.ndim :]
+        )
+    if not isinstance(ty, VulkanArray):
+        return value
+    offset, shape, _, steps = _unpack(context, builder, ty, value)
+    own = indices[len(indices) - ty.ndim :]
+    for index, extent, step in zip(own, shape, steps):
+        # Axes of extent 1 are broadcast.
+        index = builder.select(
+            builder.icmp_signed("==", extent, extent.type(1)), index.type(0), index
+        )
+        offset = builder.add(offset, builder.mul(_i32(builder, index), step))
+    return _load(context, builder, ty, offset)
+
+
+def expression_element(context, builder, ty, value, indices):
+    """Compute one element of an expression.
+
+    Parameters
+    ----------
+    context : VulkanTargetContext
+        The target context.
+    builder : llvmlite.ir.IRBuilder
+        Builder positioned where the code is emitted.
+    ty : VulkanExpr
+        Type of the expression.
+    value : llvmlite.ir.Value
+        The expression.
+    indices : list of llvmlite.ir.Value
+        One non-negative, in-range ``intp`` index per dimension of `ty`.
+
+    Returns
+    -------
+    llvmlite.ir.Value
+        The element, of type ``ty.dtype``.
+    """
+    values, elements = [], []
+    for opty, operand in zip(ty.operands, _operands(context, builder, ty, value)):
+        values.append(_operand_element(context, builder, opty, operand, indices))
+        elements.append(
+            opty.dtype if isinstance(opty, (VulkanArray, VulkanExpr)) else opty
+        )
+    typing = context.typing_context
+    fnty = typing.resolve_value_type(ty.op)
+    sig = typing.resolve_function_type(fnty, tuple(elements), {})
+    values = [
+        context.cast(builder, v, t, a) for v, t, a in zip(values, elements, sig.args)
+    ]
+    result = context.get_function(fnty, sig)(builder, values)
+    return context.cast(builder, result, sig.return_type, ty.dtype)
+
+
+def _register_expression(op, arity):
+    """Lower `op` on arrays: it only records its operands."""
+
+    def lower_expression(context, builder, sig, args):
+        proxy = cgutils.create_struct_proxy(sig.return_type)(context, builder)
+        for k, value in enumerate(args):
+            setattr(proxy, f"operand{k}", value)
+        return proxy._getvalue()
+
+    lower_expression.__doc__ = f"Lower ``{getattr(op, '__name__', op)}`` on arrays."
+    kinds = (VulkanArray, VulkanExpr, types.Number, types.Boolean)
+    for pattern in itertools.product(kinds, repeat=arity):
+        if any(k in (VulkanArray, VulkanExpr) for k in pattern):
+            lower(op, *pattern)(lower_expression)
+
+
+for _op in vkdecl._BINARY_OPERATORS:
+    _register_expression(_op, 2)
+for _op in vkdecl._UNARY_OPERATORS:
+    _register_expression(_op, 1)
+for _ufunc in vkdecl._ufuncs():
+    _register_expression(_ufunc, _ufunc.nin)
+
+
+def _wrap_indices(context, builder, shape, idxty, idx):
+    """Per-axis indices with negative ones wrapped around, as ``intp``."""
+    if isinstance(idxty, types.BaseTuple):
+        indices = cgutils.unpack_tuple(builder, idx, count=len(idxty))
+        index_types = list(idxty)
+    else:
+        indices, index_types = [idx], [idxty]
+    out = []
+    for dim, (index, ty) in enumerate(zip(indices, index_types)):
+        index = context.cast(builder, index, ty, types.intp)
+        if ty.signed:
+            negative = builder.icmp_signed("<", index, index.type(0))
+            index = builder.select(negative, builder.add(index, shape[dim]), index)
+        _check_bounds(context, builder, index, shape[dim], dim, len(shape))
+        out.append(index)
+    return out
+
+
+@lower(operator.getitem, VulkanExpr, types.Integer)
+@lower(operator.getitem, VulkanExpr, types.BaseTuple)
+def lower_expression_getitem(context, builder, sig, args):
+    """Lower ``expression[index]``: compute one element.
+
+    Returns
+    -------
+    llvmlite.ir.Value
+    """
+    exprty, idxty = sig.args
+    shape = expression_shape(context, builder, exprty, args[0])
+    indices = _wrap_indices(context, builder, shape, idxty, args[1])
+    return expression_element(context, builder, exprty, args[0], indices)
+
+
+@registry.lower_getattr(VulkanExpr, "shape")
+def lower_expression_shape(context, builder, ty, value):
+    """Lower ``expression.shape``."""
+    intp = context.get_value_type(types.intp)
+    return cgutils.pack_array(
+        builder, expression_shape(context, builder, ty, value), ty=intp
+    )
+
+
+@registry.lower_getattr(VulkanExpr, "size")
+def lower_expression_size(context, builder, ty, value):
+    """Lower ``expression.size``."""
+    size = context.get_constant(types.intp, 1)
+    for extent in expression_shape(context, builder, ty, value):
+        size = builder.mul(size, extent)
+    return size
+
+
+@registry.lower_getattr(VulkanExpr, "ndim")
+def lower_expression_ndim(context, builder, ty, value):
+    """Lower ``expression.ndim``."""
+    return context.get_constant(types.intp, ty.ndim)
+
+
+@lower(len, VulkanExpr)
+def lower_expression_len(context, builder, sig, args):
+    """Lower ``len(expression)``."""
+    return expression_shape(context, builder, sig.args[0], args[0])[0]
+
+
+def _arrays_in(ty, value, context, builder):
+    """The array operands of an expression, with their values, recursively."""
+    if isinstance(ty, VulkanArray):
+        return [(ty, value)]
+    if not isinstance(ty, VulkanExpr):
+        return []
+    found = []
+    for opty, operand in zip(ty.operands, _operands(context, builder, ty, value)):
+        found += _arrays_in(opty, operand, context, builder)
+    return found
+
+
+def assign_expression(context, builder, aryty, selection, exprty, expr):
+    """Write an expression, element by element, into a view.
+
+    Parameters
+    ----------
+    aryty : VulkanArray
+        Type of the array written to.
+    selection : _Selection
+        The view of it that is written.
+    exprty : VulkanExpr
+        Type of the expression.
+    expr : llvmlite.ir.Value
+        The expression.
+
+    Notes
+    -----
+    NumPy computes the right-hand side before writing. Element by element,
+    that is the same only if the expression reads the written array at the
+    very positions it writes; anything else raises ``ValueError``.
+    """
+    view_shape = selection.shape
+    if exprty.ndim > len(view_shape):
+        raise VulkanUnsupportedError(
+            f"cannot assign a {exprty.ndim}-d expression to a {len(view_shape)}-d slice"
+        )
+    shape = expression_shape(context, builder, exprty, expr)
+    for k, extent in enumerate(shape):
+        wanted = view_shape[len(view_shape) - exprty.ndim + k]
+        bad = builder.and_(
+            builder.icmp_signed("!=", extent, wanted),
+            builder.icmp_signed("!=", extent, extent.type(1)),
+        )
+        with builder.if_then(bad, likely=False):
+            context.call_conv.return_user_exc(
+                builder,
+                ValueError,
+                ("cannot assign slice from input of different size",),
+            )
+    itemsize = context.get_abi_sizeof(buffer_element_type(context, aryty.dtype))
+    view_steps = [
+        _i32(builder, builder.sdiv(stride, stride.type(itemsize), flags=["exact"]))
+        for stride in selection.strides
+    ]
+    for opty, operand in _arrays_in(exprty, expr, context, builder):
+        if opty.binding != aryty.binding:
+            continue
+        offset, op_shape, _, steps = _unpack(context, builder, opty, operand)
+        if opty.ndim != len(view_shape):
+            raise VulkanUnsupportedError(
+                "an expression may only read the array it is assigned to at the "
+                "positions it writes"
+            )
+        same = builder.icmp_signed("==", offset, selection.offset)
+        for a, b in zip(op_shape, view_shape):
+            same = builder.and_(same, builder.icmp_signed("==", a, b))
+        for a, b in zip(steps, view_steps):
+            same = builder.and_(same, builder.icmp_signed("==", a, b))
+        with builder.if_then(builder.not_(same), likely=False):
+            context.call_conv.return_user_exc(
+                builder,
+                ValueError,
+                (
+                    "the expression reads the array it is assigned to at other positions",
+                ),
+            )
+    viewty = aryty.copy(ndim=len(view_shape), layout="A")
+    view = _make_view(context, builder, viewty, selection)
+    intp = context.get_value_type(types.intp)
+    with cgutils.loop_nest(builder, view_shape, intp) as indices:
+        value = expression_element(
+            context,
+            builder,
+            exprty,
+            expr,
+            list(indices)[len(view_shape) - exprty.ndim :],
+        )
+        target = _position(context, builder, viewty, view, indices)
+        _store(context, builder, aryty, target, value, exprty.dtype)
+
+
+@lower(operator.setitem, VulkanArray, types.Integer, VulkanExpr)
+@lower(operator.setitem, VulkanArray, types.BaseTuple, VulkanExpr)
+@lower(operator.setitem, VulkanArray, types.SliceType, VulkanExpr)
+@lower(operator.setitem, VulkanArray, types.EllipsisType, VulkanExpr)
+def lower_setitem_expression(context, builder, sig, args):
+    """Lower ``array[index] = expression``; see `assign_expression`.
+
+    Returns
+    -------
+    llvmlite.ir.Value
+        A dummy value.
+    """
+    aryty, idxty, exprty = sig.args
+    selection = _select(context, builder, aryty, args[0], idxty, args[1])
+    assign_expression(context, builder, aryty, selection, exprty, args[2])
+    return context.get_dummy_value()
+
+
+def _register_inplace(op, plain):
+    """Lower an in-place operator on an array as an element-wise update."""
+
+    def lower_inplace(context, builder, sig, args):
+        aryty, valty = sig.args
+        exprty = VulkanExpr(plain, (aryty, valty), aryty.dtype, aryty.ndim)
+        proxy = cgutils.create_struct_proxy(exprty)(context, builder)
+        proxy.operand0, proxy.operand1 = args
+        offset, shape, strides, _ = _unpack(context, builder, aryty, args[0])
+        selection = _Selection(offset, shape, strides)
+        assign_expression(context, builder, aryty, selection, exprty, proxy._getvalue())
+        return args[0]
+
+    lower_inplace.__doc__ = f"Lower ``{op.__name__}`` on arrays."
+    for kind in (VulkanArray, VulkanExpr, types.Number, types.Boolean):
+        lower(op, VulkanArray, kind)(lower_inplace)
+
+
+for _op, _plain in vkdecl._INPLACE_OPERATORS.items():
+    _register_inplace(_op, _plain)

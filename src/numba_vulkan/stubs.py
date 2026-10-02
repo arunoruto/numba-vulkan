@@ -222,3 +222,31 @@ atomic = _module(
         _cas,
     ],
 )
+
+
+def _local_array(shape, dtype):
+    """Allocate an array private to the current invocation.
+
+    Like ``numba.cuda.local.array``; ``np.empty``, ``np.zeros``,
+    ``np.ones`` and ``np.full`` with a constant shape do the same inside
+    kernels.
+
+    Parameters
+    ----------
+    shape : int or tuple of int
+        Constant shape.
+    dtype : numpy dtype or Numba type
+        Constant element type.
+
+    Returns
+    -------
+    array
+        Uninitialised. It lives as long as the invocation.
+    """
+    raise NotImplementedError("local.array() can only be called inside a kernel")
+
+
+_local_array.__name__ = "array"
+local = _module(
+    "local", "Invocation-private memory, like ``numba.cuda.local``.", [_local_array]
+)

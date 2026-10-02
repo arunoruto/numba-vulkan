@@ -30,27 +30,11 @@ def known_issue(issue, x, expected):
     return register
 
 
-@known_issue("KI-04 array expression", XF, lambda x: 2 * x)
-def _(x, out):
-    i = nv.global_id(0)
-    if i < x.size:
-        out[i] = (x * 2)[i]
-
-
 @known_issue("KI-04 fancy indexing", XF, lambda x: x)
 def _(x, out):
     i = nv.global_id(0)
     if i < x.size:
         out[i] = x[x > 0][0]
-
-
-@known_issue("KI-05 allocating an array (np.zeros)", XF, lambda x: x)
-def _(x, out):
-    i = nv.global_id(0)
-    if i < x.size:
-        tmp = np.zeros(4, dtype=np.float32)
-        tmp[0] = x[i]
-        out[i] = tmp[0]
 
 
 @known_issue("KI-08 print()", XF, lambda x: x)

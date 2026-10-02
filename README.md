@@ -348,8 +348,9 @@ Does not work:
   math library. Wheels bundle it; in a source checkout without it such calls
   raise, unless you opt in to float32 precision with
   `@nv.jit(narrow_math=True)`.
-- **Anything that creates an array** (`a * 2`, `a[mask]`, `np.zeros`),
-  `try`/`except`, recursion.
+- **Arrays of run-time size** (`a[mask]`, `a.copy()`, `np.zeros(n)`),
+  `try`/`except`, recursion. Arrays of constant shape and array expressions
+  such as `a * 2 + b` work.
 - **float64 precision on devices without float64.** Many mobile GPUs and
   Apple devices lack float64 or int64. Kernels are narrowed to 32-bit types
   there, with a warning; this path is tested only on desktop GPUs with the
@@ -384,7 +385,7 @@ ones most likely to bite:
 | | Issue | Workaround |
 | --- | --- | --- |
 | KI-01 | float64 `math.sin(x)`, `x ** 2.5`... need libclc, which a source checkout lacks | install a wheel, or set `NUMBA_VULKAN_LIBCLC` |
-| KI-04 | nothing that creates an array: `a * 2`, `a[mask]`, `np.zeros`, `axis=` reductions | work on elements and views |
+| KI-04 | no arrays of run-time size: `a[mask]`, `a.copy()`, `np.zeros(n)`, `axis=` reductions | constant-shape arrays, array expressions |
 | KI-10 | no bounds checks unless asked for; integer division by zero is not reported | `@nv.jit(boundscheck=True)` while debugging |
 | KI-17 | running without float64/int64 (mobile, Apple) is tested only with the features switched off on desktop GPUs | report what you find |
 
@@ -413,7 +414,7 @@ To continue the work, start with the
 - [x] Launch overhead of about 0.1 ms for repeated launches
 - [ ] Asynchronous launches; scalars as push constants
 - [x] Slices, array views, iteration and reductions
-- [ ] Array expressions and local arrays
+- [x] Array expressions and local arrays
 - [x] Kernels narrowed to 32-bit types on devices without float64/int64
 - [x] float64 math, through libclc
 - [x] Bundle libclc in wheels

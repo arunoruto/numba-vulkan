@@ -15,7 +15,7 @@ from numba.core import types
 from numba.core.extending import overload, overload_method
 
 from numba_vulkan.vkimpl import flat_item
-from numba_vulkan.vktypes import VulkanArray
+from numba_vulkan.vktypes import VulkanArray, VulkanExpr
 
 TARGET = "vulkan"
 
@@ -196,12 +196,13 @@ def _register(name, factory, functions):
     """
 
     def typer(a):
-        """Select the implementation for arrays of this target."""
-        if isinstance(a, VulkanArray):
+        """Select the implementation for arrays and expressions of this target."""
+        if isinstance(a, (VulkanArray, VulkanExpr)):
             return factory(a)
         return None
 
     overload_method(VulkanArray, name, target=TARGET)(typer)
+    overload_method(VulkanExpr, name, target=TARGET)(typer)
     for function in functions:
         overload(function, target=TARGET)(typer)
 
@@ -213,7 +214,10 @@ for _name, (_factory, _functions) in _REDUCTIONS.items():
 @overload(np.dot, target=TARGET)
 def _dot(a, b):
     """Build ``np.dot`` for two 1-d arrays."""
-    if not (isinstance(a, VulkanArray) and isinstance(b, VulkanArray)):
+    if not (
+        isinstance(a, (VulkanArray, VulkanExpr))
+        and isinstance(b, (VulkanArray, VulkanExpr))
+    ):
         return None
     if a.ndim != 1 or b.ndim != 1:
         return None
@@ -224,7 +228,7 @@ def _dot(a, b):
             raise ValueError("incompatible array sizes for np.dot(a, b)")
         total = acc(0)
         for k in range(a.shape[0]):
-            total += a[k] * b[k]
+            total += flat_item(a, k) * flat_item(b, k)
         return total
 
     return impl

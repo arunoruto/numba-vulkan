@@ -200,8 +200,10 @@ def test_slice_assignment_checks_sizes(run):
 
 
 def test_overlapping_copy_is_rejected(run):
-    with pytest.raises(errors.NumbaError, match="could overlap"):
+    with pytest.raises(ValueError, match="could overlap"):
         rows("out[i, 1:] = out[i, :-1]", A, run=run)
+    out = rows("out[i] = a[i]\nout[i] = out[i]", A, run=run, columns=5)
+    np.testing.assert_array_equal(out, A)
 
 
 def test_zero_step_raises(run):
@@ -217,8 +219,12 @@ def test_bounds_check_applies_to_views(run):
 
 
 def test_unsupported_array_operations_say_so(run):
+    with pytest.raises(nv.VulkanUnsupportedError, match="only known at run time"):
+        rows("out[i, 0] = a[i].copy()[0]", A, run=run)
     with pytest.raises(nv.VulkanUnsupportedError, match="direct access to memory"):
-        rows("out[i, 0] = (a[i] * 2)[0]", A, run=run)
+        rows("out[i, 0] = a.flat[i]", A, run=run)
+    with pytest.raises(errors.NumbaError, match="indexing with arrays"):
+        rows("out[i, 0] = a[i][a[i] > 2][0]", A, run=run)
     with pytest.raises(errors.NumbaError, match="only integers, slices and"):
         rows("out[i, 0] = a[i, np.newaxis][0, 0]", A, run=run)
 
