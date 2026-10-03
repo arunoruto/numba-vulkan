@@ -140,8 +140,34 @@ x.copy_to_device(new_values)      # overwrite in place
 
 Host and device arrays can be mixed in one call. A device array belongs to
 the device it was created on (`device=` selects it, as for `forall`) and
-cannot be passed to a kernel that runs on another one. There is no indexing
-or arithmetic on device arrays from Python; copy to the host for that.
+cannot be passed to a kernel that runs on another one.
+
+Device arrays are indexed like NumPy arrays, without advanced indexing
+(arrays or lists as indices). An integer for every axis reads or writes one
+element; slices, `...`, `None`, `.T`, `transpose` and `reshape` give
+*views* that share the memory and that kernels take like any device array:
+
+```python
+a = nv.to_device(np.arange(48, dtype=np.float32).reshape(6, 8))
+a[2, 3]                       # one element, copied to the host
+a[0] = 0                      # writes a row
+rows = a[1::2, ::-1]          # a view: every other row, reversed
+scale.forall(rows.shape)(rows, 2.0)   # the kernel works on a's memory
+b = (rows + 1) * a[::2]       # computed on the device; b is a device array
+b.sum(), np.sqrt(b).max()     # reductions return scalars
+```
+
+A view passes the position of its first element and its steps to the
+kernel as push constants, so kernels are compiled once for all views of a
+dimensionality; arrays that are contiguous from their first element need
+neither. `reshape` gives a view where the steps allow it and raises
+otherwise; `copy()` and `ravel()` copy. NumPy's ufuncs (`np.add`,
+`np.sqrt`, ...) and the operators run as kernels when an argument is a
+device array, through the same machinery as `vectorize` (see below), and so
+do their `reduce` along all axes, `sum()`, `min()` and `max()`; other ufunc
+methods raise `TypeError`. Elements that a view skips are read and written
+back when the view is copied to, so other kernels must not write them at
+the same time.
 
 The buffers behind device arrays and behind the temporary copies of NumPy
 arguments are recycled: when an array is dropped, its buffer goes to a pool
@@ -464,10 +490,10 @@ total = add.reduce(x)              # 1-d x; axis=None for any shape
 The reduction runs on the device as a tree, so the function should be
 associative; it needs no identity, except for empty arrays.
 
-The results are not real `numpy.ufunc` objects: `accumulate`, `outer`,
-`reduce` along other axes and NumPy's dispatch (`np.add(a, b)` on device
-arrays) are not available, and they cannot be called from inside a kernel;
-call the `@nv.jit` function there instead.
+The results are not real `numpy.ufunc` objects: `accumulate`, `outer` and
+`reduce` along other axes are not available, and they cannot be called from
+inside a kernel; call the `@nv.jit` function there instead. NumPy's own
+ufuncs applied to device arrays run on the device (see above).
 
 ## Errors
 

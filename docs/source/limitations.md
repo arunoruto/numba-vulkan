@@ -79,7 +79,8 @@ Devices without `float64` or `int64`
 Data transfer
 : NumPy arguments are copied to the device on every call, and written ones
   back. Use device arrays to keep data on the device (see {doc}`usage`);
-  they support transfers only, no indexing or arithmetic from Python.
+  they support basic indexing, views and NumPy's ufuncs, but no advanced
+  indexing.
 
 Workgroup size
 : Without an explicit size, workgroups have 64, 8×8 or 4×4×4 invocations,

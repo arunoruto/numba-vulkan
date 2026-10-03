@@ -1024,7 +1024,7 @@ class Device:
         # Waiting for the queue to be idle finished every pending launch.
         self._retire(len(self._pending))
 
-    def _upload(self, buffer, data):
+    def _upload(self, buffer, data, offset=0):
         """Copy host bytes into a buffer.
 
         Parameters
@@ -1032,21 +1032,25 @@ class Device:
         buffer : _Buffer
             The destination.
         data : numpy.ndarray
-            One-dimensional ``uint8`` array, no larger than the buffer.
+            One-dimensional ``uint8`` array that fits behind `offset`.
+        offset : int
+            Position in the buffer, in bytes.
         """
         if not data.size:
             return
         if buffer.view is not None:
-            buffer.view[: data.size] = data
+            buffer.view[offset : offset + data.size] = data
             return
         staging = self._acquire(data.size, host=True)
         try:
             staging.view[: data.size] = data
-            self._submit(lambda cmd: _copy(cmd, staging, buffer, data.size))
+            self._submit(
+                lambda cmd: _copy(cmd, staging, buffer, data.size, target_offset=offset)
+            )
         finally:
             self._release(staging)
 
-    def _download(self, buffer, out):
+    def _download(self, buffer, out, offset=0):
         """Copy the contents of a buffer into host bytes.
 
         Parameters
@@ -1054,17 +1058,20 @@ class Device:
         buffer : _Buffer
             The source.
         out : numpy.ndarray
-            One-dimensional ``uint8`` array to fill, no larger than the
-            buffer.
+            One-dimensional ``uint8`` array to fill from `offset` on.
+        offset : int
+            Position in the buffer, in bytes.
         """
         if not out.size:
             return
         if buffer.view is not None:
-            out[:] = buffer.view[: out.size]
+            out[:] = buffer.view[offset : offset + out.size]
             return
         staging = self._acquire(out.size, host=True)
         try:
-            self._submit(lambda cmd: _copy(cmd, buffer, staging, out.size))
+            self._submit(
+                lambda cmd: _copy(cmd, buffer, staging, out.size, source_offset=offset)
+            )
             out[:] = staging.view[: out.size]
         finally:
             self._release(staging)
@@ -1820,9 +1827,11 @@ def _pool_size(nbytes):
     return -(-nbytes // (1 << 16)) * (1 << 16)
 
 
-def _copy(cmd, source, target, nbytes):
-    """Record a copy of the first `nbytes` bytes between two buffers."""
-    region = vk.VkBufferCopy(srcOffset=0, dstOffset=0, size=nbytes)
+def _copy(cmd, source, target, nbytes, source_offset=0, target_offset=0):
+    """Record a copy of `nbytes` bytes between two buffers."""
+    region = vk.VkBufferCopy(
+        srcOffset=source_offset, dstOffset=target_offset, size=nbytes
+    )
     vk.vkCmdCopyBuffer(cmd, source.handle, target.handle, 1, [region])
 
 
@@ -1832,6 +1841,13 @@ class DeviceArray:
     Kernels use device arrays in place, without the copies to and from the
     device that NumPy arrays need on every call. Create them with
     `to_device`, `device_array` or `device_array_like`.
+
+    Indexing works as on NumPy arrays, without advanced indexing: an
+    integer for every axis reads or writes one element, and slices,
+    integers for some axes, ``...`` and ``None`` give a *view* that shares
+    the memory, which kernels accept like any device array. ``.T``,
+    `transpose` and `reshape` give views as well (`reshape` only where the
+    strides allow, as NumPy without copying).
 
     Parameters
     ----------
@@ -1859,6 +1875,8 @@ class DeviceArray:
     >>> out = nv.device_array_like(x)
     >>> kernel.forall(8)(x, out)
     >>> out.copy_to_host()
+    >>> out[2:6].copy_to_host()     # a view of four elements
+    >>> out[0] = 1                  # writes one element
     """
 
     def __init__(self, device, shape, dtype):
@@ -1866,10 +1884,25 @@ class DeviceArray:
         self.shape = tuple(int(n) for n in shape)
         self.dtype = np.dtype(dtype)
         self._stored = narrowing.stored_dtype(self.dtype, device.mode)
+        # Bytes of the buffer that kernels may address; views share them.
         self._nbytes = self.size * self._stored.itemsize
         self._buffer = device._acquire(max(self._nbytes, 4), host=False)
+        # Position of the first element and steps between elements along
+        # each axis, in elements of the buffer.
+        self._offset = 0
+        self._steps = _c_steps(self.shape)
         # The buffer returns to the device's pool when the array is dropped.
         self._finalizer = weakref.finalize(self, device._release, self._buffer)
+
+    def _view(self, shape, offset, steps):
+        """An array on the same buffer with another shape and layout."""
+        view = object.__new__(DeviceArray)
+        view.device, view.dtype, view._stored = self.device, self.dtype, self._stored
+        view.shape, view._offset, view._steps = tuple(shape), offset, tuple(steps)
+        view._nbytes, view._buffer = self._nbytes, self._buffer
+        # The original owns the buffer; the view keeps it alive.
+        view._base = getattr(self, "_base", None) or self
+        return view
 
     @property
     def ndim(self):
@@ -1886,6 +1919,29 @@ class DeviceArray:
         """Size of the elements in bytes, as they are stored on the host."""
         return self.size * self.dtype.itemsize
 
+    @property
+    def strides(self):
+        """Steps between elements along each axis in bytes, as in NumPy."""
+        return tuple(step * self.dtype.itemsize for step in self._steps)
+
+    @property
+    def is_contiguous(self):
+        """Whether the elements lie one after the other in C order.
+
+        Returns
+        -------
+        bool
+        """
+        return all(
+            step == want or extent == 1
+            for extent, step, want in zip(self.shape, self._steps, _c_steps(self.shape))
+        )
+
+    @property
+    def T(self):
+        """The array with its axes reversed, as a view."""
+        return self.transpose()
+
     def __len__(self):
         if not self.shape:
             raise TypeError("len() of a zero-dimensional array")
@@ -1895,6 +1951,30 @@ class DeviceArray:
         return (
             f"<DeviceArray shape={self.shape} dtype={self.dtype} "
             f"on {self.device.info.name}>"
+        )
+
+    def transpose(self, *axes):
+        """Permute the axes, as a view.
+
+        Parameters
+        ----------
+        *axes : int or tuple of int
+            The new order of the axes; reversed by default.
+
+        Returns
+        -------
+        DeviceArray
+        """
+        if len(axes) == 1 and not np.isscalar(axes[0]):
+            axes = tuple(axes[0])
+        axes = axes or tuple(reversed(range(self.ndim)))
+        if sorted(a % self.ndim for a in axes) != list(range(self.ndim)):
+            raise ValueError(f"axes {axes} do not match an array of {self.ndim}")
+        axes = [a % self.ndim for a in axes]
+        return self._view(
+            [self.shape[a] for a in axes],
+            self._offset,
+            [self._steps[a] for a in axes],
         )
 
     def reshape(self, *shape):
@@ -1914,27 +1994,57 @@ class DeviceArray:
         Raises
         ------
         ValueError
-            If the number of elements differs.
+            If the number of elements differs, or if the layout of the
+            array does not allow the shape without copying; `copy` first.
         """
         if len(shape) == 1 and not np.isscalar(shape[0]):
             shape = tuple(shape[0])
-        shape = np.empty(self.size, dtype=np.uint8).reshape(shape).shape
-        view = object.__new__(DeviceArray)
-        view.device, view.shape, view.dtype = self.device, shape, self.dtype
-        view._stored, view._nbytes = self._stored, self._nbytes
-        view._buffer = self._buffer
-        # The original owns the buffer; the view keeps it alive.
-        view._base = getattr(self, "_base", None) or self
-        return view
+        shape = _resolve_shape(tuple(int(n) for n in shape), self.size)
+        steps = _reshaped_steps(self.shape, self._steps, shape)
+        if steps is None:
+            raise ValueError(
+                f"a device array with strides {self.strides} cannot take the "
+                f"shape {shape} without copying; call .copy() first"
+            )
+        return self._view(shape, self._offset, steps)
 
     def ravel(self):
-        """The array as one dimension, without copying.
+        """The array as one dimension, a view where the layout allows it.
 
         Returns
         -------
         DeviceArray
         """
-        return self.reshape(-1)
+        steps = _reshaped_steps(self.shape, self._steps, (self.size,))
+        return self.reshape(-1) if steps is not None else self.copy().reshape(-1)
+
+    def copy(self):
+        """A contiguous copy on the same device.
+
+        Returns
+        -------
+        DeviceArray
+        """
+        return to_device(self.copy_to_host(), self.device)
+
+    def _span(self):
+        """First and last-but-one element the array covers in the buffer."""
+        low = self._offset + sum(
+            min(0, (n - 1) * step) for n, step in zip(self.shape, self._steps)
+        )
+        high = self._offset + sum(
+            max(0, (n - 1) * step) for n, step in zip(self.shape, self._steps)
+        )
+        return low, high + 1
+
+    def _elements(self, span, low):
+        """The elements as a strided view into the host copy of their span."""
+        size = self._stored.itemsize
+        return np.lib.stride_tricks.as_strided(
+            span[self._offset - low :],
+            shape=self.shape,
+            strides=[step * size for step in self._steps],
+        )
 
     def copy_to_device(self, array):
         """Overwrite the contents with those of a host array.
@@ -1961,7 +2071,19 @@ class DeviceArray:
         array = narrowing.convert(np.asarray(array), self._stored)
         if array.shape != self.shape:
             raise ValueError(f"cannot copy shape {array.shape} into {self.shape}")
-        self.device._upload(self._buffer, array.reshape(-1).view(np.uint8))
+        if not self.size:
+            return self
+        size = self._stored.itemsize
+        if self.is_contiguous:
+            data = np.ascontiguousarray(array).reshape(-1).view(np.uint8)
+            self.device._upload(self._buffer, data, self._offset * size)
+            return self
+        # A view with gaps: its span is read, changed and written back.
+        low, high = self._span()
+        span = np.empty(high - low, dtype=self._stored)
+        self.device._download(self._buffer, span.view(np.uint8), low * size)
+        self._elements(span, low)[...] = array
+        self.device._upload(self._buffer, span.view(np.uint8), low * size)
         return self
 
     def copy_to_host(self, out=None):
@@ -1996,18 +2118,277 @@ class DeviceArray:
             raise ValueError(
                 f"out must be a C-contiguous {self.dtype} array of shape {self.shape}"
             )
-        if self._stored != self.dtype:
-            stored = np.empty(self.shape, dtype=self._stored)
-            self.device._download(self._buffer, stored.reshape(-1).view(np.uint8))
-            out[...] = stored != 0 if self.dtype == np.bool_ else stored
+        if not self.size:
+            return out
+        size = self._stored.itemsize
+        if self.is_contiguous:
+            if self._stored == self.dtype:
+                stored = out
+            else:
+                stored = np.empty(self.shape, dtype=self._stored)
+            data = stored.reshape(-1).view(np.uint8)
+            self.device._download(self._buffer, data, self._offset * size)
         else:
-            self.device._download(self._buffer, out.reshape(-1).view(np.uint8))
+            low, high = self._span()
+            span = np.empty(high - low, dtype=self._stored)
+            self.device._download(self._buffer, span.view(np.uint8), low * size)
+            stored = self._elements(span, low)
+        if stored is not out:
+            out[...] = stored != 0 if self.dtype == np.bool_ else stored
         return out
+
+    def _index(self, key):
+        """The view that a basic index selects.
+
+        Returns
+        -------
+        DeviceArray
+            Zero-dimensional where the index names one element.
+
+        Raises
+        ------
+        IndexError
+            For indices out of bounds, as NumPy raises it.
+        TypeError
+            For advanced indexing (arrays, lists, booleans).
+        """
+        key = key if isinstance(key, tuple) else (key,)
+        for part in key:
+            if not (
+                part is None
+                or part is Ellipsis
+                or isinstance(part, slice)
+                or (isinstance(part, (int, np.integer)) and not isinstance(part, bool))
+            ):
+                raise TypeError(
+                    "device arrays support basic indexing only (integers, "
+                    f"slices, ... and None), not {type(part).__name__}"
+                )
+        if Ellipsis not in key:
+            key = (*key, Ellipsis)  # a view even where all axes are indexed
+        # NumPy computes the view on a stand-in with one-byte elements, so
+        # that its strides and data offset count elements; nothing is read.
+        stand_in = np.lib.stride_tricks.as_strided(
+            np.zeros(1, np.uint8), shape=self.shape, strides=self._steps
+        )
+        view = stand_in[key]
+        moved = view.__array_interface__["data"][0]
+        moved -= stand_in.__array_interface__["data"][0]
+        return self._view(view.shape, self._offset + moved, view.strides)
+
+    def __getitem__(self, key):
+        """An element, or a view; see the class description.
+
+        Returns
+        -------
+        scalar or DeviceArray
+        """
+        view = self._index(key)
+        if view.ndim == 0 and not (isinstance(key, tuple) and None in key):
+            return view.copy_to_host()[()]
+        return view
+
+    def __setitem__(self, key, value):
+        """Write an element, or a value or array into a view.
+
+        `value` is broadcast to the selected shape, as in NumPy.
+        """
+        view = self._index(key)
+        values = np.broadcast_to(np.asarray(value, dtype=self.dtype), view.shape)
+        view.copy_to_device(values)
 
     def __array__(self, dtype=None, copy=None):
         """Convert to a NumPy array, which copies from the device."""
         out = self.copy_to_host()
         return out if dtype is None else out.astype(dtype)
+
+    def __array_ufunc__(self, ufunc, method, *inputs, out=None, **kwargs):
+        """Compute NumPy ufuncs on the device.
+
+        Calls of ufuncs with one result, and their ``reduce`` along
+        ``axis=None`` (or ``axis=0`` of a 1-d array), run as kernels; see
+        `numba_vulkan.vectorizers`. Operators (``a + b``, ``a < b``, ...)
+        and `sum`, `min` and `max` go through here as well. The result is
+        a device array, or a scalar for a reduction.
+
+        Returns
+        -------
+        DeviceArray, scalar or NotImplemented
+            ``NotImplemented`` for other methods and options, which makes
+            NumPy raise a ``TypeError``.
+        """
+        if ufunc.nout != 1 or kwargs.keys() - {"axis"}:
+            return NotImplemented
+        if out is not None:
+            if len(out) != 1:
+                return NotImplemented
+            out = out[0]
+        device_ufunc = _device_ufunc(ufunc)
+        if method == "__call__" and "axis" not in kwargs:
+            return device_ufunc(*inputs, out=out)
+        if method == "reduce" and ufunc.nin == 2 and out is None and len(inputs) == 1:
+            return device_ufunc.reduce(inputs[0], axis=kwargs.get("axis", 0))
+        return NotImplemented
+
+    def sum(self):
+        """Sum of all elements, computed on the device.
+
+        Returns
+        -------
+        scalar
+        """
+        return np.add.reduce(self, axis=None)
+
+    def min(self):
+        """Smallest element, computed on the device.
+
+        Returns
+        -------
+        scalar
+        """
+        return np.minimum.reduce(self, axis=None)
+
+    def max(self):
+        """Largest element, computed on the device.
+
+        Returns
+        -------
+        scalar
+        """
+        return np.maximum.reduce(self, axis=None)
+
+
+def _operator(ufunc, reflected=False):
+    """A binary operator method of DeviceArray that applies `ufunc`."""
+    if reflected:
+        return lambda self, other: ufunc(other, self)
+    return lambda self, other: ufunc(self, other)
+
+
+for _name, _ufunc in {
+    "add": np.add,
+    "sub": np.subtract,
+    "mul": np.multiply,
+    "truediv": np.true_divide,
+    "floordiv": np.floor_divide,
+    "mod": np.remainder,
+    "pow": np.power,
+    "and": np.bitwise_and,
+    "or": np.bitwise_or,
+    "xor": np.bitwise_xor,
+}.items():
+    setattr(DeviceArray, f"__{_name}__", _operator(_ufunc))
+    setattr(DeviceArray, f"__r{_name}__", _operator(_ufunc, reflected=True))
+for _name, _ufunc in {
+    "lt": np.less,
+    "le": np.less_equal,
+    "gt": np.greater,
+    "ge": np.greater_equal,
+    "eq": np.equal,
+    "ne": np.not_equal,
+}.items():
+    setattr(DeviceArray, f"__{_name}__", _operator(_ufunc))
+DeviceArray.__neg__ = lambda self: np.negative(self)
+DeviceArray.__abs__ = lambda self: np.absolute(self)
+DeviceArray.__invert__ = lambda self: np.invert(self)
+# Equality is elementwise, so device arrays cannot be hashed.
+DeviceArray.__hash__ = None
+
+_DEVICE_UFUNCS = {}
+
+
+def _device_ufunc(ufunc):
+    """A Vulkan ufunc that applies a NumPy ufunc, created once per ufunc."""
+    if ufunc not in _DEVICE_UFUNCS:
+        from numba import vectorize  # imports this module
+
+        names = ", ".join(f"x{k}" for k in range(ufunc.nin))
+        scope = {"np": np}
+        exec(  # noqa: S102
+            f"def {ufunc.__name__}({names}):\n"
+            f"    return np.{ufunc.__name__}({names})\n",
+            scope,
+        )
+        _DEVICE_UFUNCS[ufunc] = vectorize(target="vulkan", identity=ufunc.identity)(
+            scope[ufunc.__name__]
+        )
+    return _DEVICE_UFUNCS[ufunc]
+
+
+def _c_steps(shape):
+    """Steps between elements of a C-contiguous array, in elements."""
+    steps, step = [], 1
+    for extent in reversed(shape):
+        steps.insert(0, step)
+        step *= max(extent, 1)
+    return tuple(steps)
+
+
+def _resolve_shape(shape, size):
+    """A shape with its ``-1`` replaced, checked against the element count.
+
+    Raises
+    ------
+    ValueError
+        If the shape does not fit `size` elements.
+    """
+    unknown = [k for k, n in enumerate(shape) if n == -1]
+    known = int(np.prod([n for n in shape if n != -1], dtype=np.int64))
+    if len(unknown) > 1 or any(n < -1 for n in shape):
+        raise ValueError(f"invalid shape {shape}")
+    if unknown:
+        if known == 0 or size % known:
+            raise ValueError(f"cannot reshape {size} elements into {shape}")
+        shape = tuple(size // known if n == -1 else n for n in shape)
+    if int(np.prod(shape, dtype=np.int64)) != size:
+        raise ValueError(f"cannot reshape {size} elements into {shape}")
+    return shape
+
+
+def _reshaped_steps(shape, steps, new):
+    """Steps that give an array a new shape without copying, if any exist.
+
+    A port of NumPy's ``_attempt_nocopy_reshape``: runs of axes that are
+    contiguous with each other may be split and merged.
+
+    Parameters
+    ----------
+    shape, steps : tuple of int
+        The current shape and steps, in elements.
+    new : tuple of int
+        The wanted shape, with as many elements.
+
+    Returns
+    -------
+    tuple of int or None
+        The steps for `new`, or ``None`` if it needs a copy.
+    """
+    if 0 in shape or 0 in new:
+        return _c_steps(new)
+    old = [(n, step) for n, step in zip(shape, steps) if n != 1]
+    dims, strides = [n for n, _ in old], [step for _, step in old]
+    out = [0] * len(new)
+    oi, oj, ni, nj = 0, 1, 0, 1
+    while ni < len(new) and oi < len(dims):
+        np_, op = new[ni], dims[oi]
+        while np_ != op:
+            if np_ < op:
+                np_ *= new[nj]
+                nj += 1
+            else:
+                op *= dims[oj]
+                oj += 1
+        for ok in range(oi, oj - 1):
+            if strides[ok] != dims[ok + 1] * strides[ok + 1]:
+                return None
+        out[nj - 1] = strides[oj - 1]
+        for nk in range(nj - 1, ni, -1):
+            out[nk - 1] = out[nk] * new[nk]
+        ni, nj, oi, oj = nj, nj + 1, oj, oj + 1
+    last = out[ni - 1] if ni >= 1 else 1
+    for nk in range(ni, len(new)):
+        out[nk] = last
+    return tuple(out)
 
 
 def to_device(array, device=None):

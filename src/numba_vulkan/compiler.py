@@ -314,7 +314,8 @@ def _push_members(context, argtypes):
     wide, narrow, shapes = [], [], []
     for index, ty in enumerate(argtypes):
         if isinstance(ty, VulkanArray):
-            shapes += [("shape", len(shapes) + k) for k in range(ty.ndim)]
+            count = _layout_values(ty)
+            shapes += [("shape", len(shapes) + k) for k in range(count)]
             continue
         if isinstance(ty, types.Boolean):
             narrow.append((("arg", index), i32))
@@ -333,6 +334,20 @@ def _push_members(context, argtypes):
     members = wide + narrow + [(source, i32) for source in shapes]
     size = 8 * len(wide) + 4 * (len(narrow) + len(shapes))
     return members if size <= PUSH_CONSTANT_BYTES - _GRID_BYTES else None
+
+
+def _layout_values(ty):
+    """Number of values that describe the layout of an array argument.
+
+    Its extents; for an array that is not plainly contiguous (layout
+    ``"A"``, a view on the host side), also the position of its first
+    element and its steps along each axis, in elements.
+
+    Returns
+    -------
+    int
+    """
+    return ty.ndim if ty.layout == "C" else 2 * ty.ndim + 1
 
 
 def _push_dtype(ty, mode):
@@ -370,7 +385,9 @@ def _load_argument(context, builder, index, ty, shape_offset, push=None):
         Type of the argument.
     shape_offset : int
         Index of the array's first extent in the shape buffer, or among
-        the extents in the push-constant block. Ignored for scalars.
+        the extents in the push-constant block; for arrays of layout
+        ``"A"``, the first element and the steps follow. Ignored for
+        scalars.
     push : callable, optional
         Loads a member of the push-constant block, given its source as in
         `_push_members`. Without it, scalars and extents come from buffers.
@@ -383,27 +400,38 @@ def _load_argument(context, builder, index, ty, shape_offset, push=None):
     """
     intp = context.get_value_type(types.intp)
     if isinstance(ty, VulkanArray):
-        shape = []
-        for dim in range(ty.ndim):
+
+        def layout_value(k):
+            """The `k`-th value describing the array's layout."""
             if push is not None:
-                extent = push(("shape", shape_offset + dim))
-            else:
-                extent = load_element(
-                    builder, META_BINDING, i32, i32(shape_offset + dim)
-                )
-            shape.append(builder.zext(extent, intp))
+                return push(("shape", shape_offset + k))
+            return load_element(builder, META_BINDING, i32, i32(shape_offset + k))
+
+        shape = [builder.zext(layout_value(dim), intp) for dim in range(ty.ndim)]
         itemsize = context.get_abi_sizeof(storage_type(context, ty))
-        strides, step = [], intp(itemsize)
-        for extent in reversed(shape):
-            strides.insert(0, step)
-            step = builder.mul(step, extent)
-        nitems = step if not shape else builder.udiv(step, intp(itemsize))
+        nitems = intp(1)
+        for extent in shape:
+            nitems = builder.mul(nitems, extent)
+        offset = intp(0)
+        if ty.layout == "C":
+            strides, step = [], intp(itemsize)
+            for extent in reversed(shape):
+                strides.insert(0, step)
+                step = builder.mul(step, extent)
+        else:
+            # A view: its first element and steps (which may be negative).
+            offset = builder.zext(layout_value(ty.ndim), intp)
+            strides = [
+                builder.mul(builder.sext(layout_value(ty.ndim + 1 + d), intp),
+                            intp(itemsize))
+                for d in range(ty.ndim)
+            ]  # fmt: skip
         proxy = cgutils.create_struct_proxy(ty)(context, builder)
         proxy.nitems = nitems
         proxy.itemsize = intp(itemsize)
         proxy.shape = cgutils.pack_array(builder, shape, ty=intp)
         proxy.strides = cgutils.pack_array(builder, strides, ty=intp)
-        proxy.offset = intp(0)
+        proxy.offset = offset
         return proxy._getvalue()
     elem = buffer_element_type(context, ty)
     if push is not None:
@@ -476,7 +504,7 @@ def compile_kernel(cres, ndim, exact=True, local_size=None):
     for index, ty in enumerate(argtypes):
         callargs.append(_load_argument(context, builder, index, ty, shape_offset, push))
         if isinstance(ty, VulkanArray):
-            shape_offset += ty.ndim
+            shape_offset += _layout_values(ty)
     status, _ = context.call_conv.call_function(
         builder, func, fndesc.restype, argtypes, callargs
     )
