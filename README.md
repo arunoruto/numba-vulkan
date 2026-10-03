@@ -422,6 +422,7 @@ To continue the work, start with the
 - [x] `print()` in kernels, `float16` arrays, `error_model="python"`
 - [ ] Other ufunc methods (`accumulate`, `outer`)
 - [x] Shared memory, atomics, barriers and CUDA-style launch configuration
+- [x] Subgroup operations: reductions, scans, votes, ballots, shuffles
 - [x] On-disk caching of compiled kernels
 - [x] Testing on Apple (MoltenVK)
 - [ ] Testing on AMD and mobile GPUs

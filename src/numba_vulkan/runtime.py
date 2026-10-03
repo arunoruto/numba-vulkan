@@ -79,6 +79,12 @@ class DeviceInfo:
     nan_preserve : tuple of int
         Float widths for which shaders can require NaN, infinity and signed
         zero to be kept (``SignedZeroInfNanPreserve``).
+    subgroup_size : int
+        Invocations per subgroup (``subgroup.size()`` in kernels).
+    subgroup_basic, subgroup_vote, subgroup_arithmetic, subgroup_ballot, \
+subgroup_shuffle, subgroup_shuffle_relative : bool
+        Which classes of subgroup operations compute shaders may use; see
+        `numba_vulkan.stubs.subgroup`.
     """
 
     index: int
@@ -99,6 +105,13 @@ class DeviceInfo:
     max_groups: tuple = (65535, 65535, 65535)
     max_shared_memory: int = 16384
     nan_preserve: tuple = ()
+    subgroup_size: int = 1
+    subgroup_basic: bool = False
+    subgroup_vote: bool = False
+    subgroup_arithmetic: bool = False
+    subgroup_ballot: bool = False
+    subgroup_shuffle: bool = False
+    subgroup_shuffle_relative: bool = False
 
     def __repr__(self):
         return f"<{self.index}: {self.name} ({self.kind})>"
@@ -335,8 +348,8 @@ def _vulkan12_features(handle):
     return feats
 
 
-def _nan_preserving_widths(handle):
-    """Float widths for which shaders can ask to keep NaN, infinity and -0.
+def _vulkan_properties(handle):
+    """The Vulkan 1.1 and 1.2 properties of a device.
 
     Parameters
     ----------
@@ -345,24 +358,66 @@ def _nan_preserving_widths(handle):
 
     Returns
     -------
+    props11, props12 : object
+        The filled ``VkPhysicalDeviceVulkan11Properties`` and
+        ``VkPhysicalDeviceVulkan12Properties`` structures.
+    """
+    props12 = vk.VkPhysicalDeviceVulkan12Properties(
+        sType=vk.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_PROPERTIES
+    )
+    props11 = vk.VkPhysicalDeviceVulkan11Properties(
+        sType=vk.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_PROPERTIES,
+        pNext=props12,
+    )
+    props2 = vk.VkPhysicalDeviceProperties2(
+        sType=vk.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, pNext=props11
+    )
+    vk.vkGetPhysicalDeviceProperties2(handle, props2)
+    return props11, props12
+
+
+def _nan_preserving_widths(props12):
+    """Float widths for which shaders can ask to keep NaN, infinity and -0.
+
+    Returns
+    -------
     tuple of int
         Out of 32 and 64, from ``shaderSignedZeroInfNanPreserveFloat*``.
     """
-    props = vk.VkPhysicalDeviceVulkan12Properties(
-        sType=vk.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_PROPERTIES
-    )
-    props2 = vk.VkPhysicalDeviceProperties2(
-        sType=vk.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, pNext=props
-    )
-    vk.vkGetPhysicalDeviceProperties2(handle, props2)
     return tuple(
         width
         for width, kept in (
-            (32, props.shaderSignedZeroInfNanPreserveFloat32),
-            (64, props.shaderSignedZeroInfNanPreserveFloat64),
+            (32, props12.shaderSignedZeroInfNanPreserveFloat32),
+            (64, props12.shaderSignedZeroInfNanPreserveFloat64),
         )
         if kept
     )
+
+
+# Subgroup operations by the DeviceInfo attribute that says they are
+# supported (VkSubgroupFeatureFlagBits).
+_SUBGROUP_FEATURES = {
+    "subgroup_basic": 0x1,
+    "subgroup_vote": 0x2,
+    "subgroup_arithmetic": 0x4,
+    "subgroup_ballot": 0x8,
+    "subgroup_shuffle": 0x10,
+    "subgroup_shuffle_relative": 0x20,
+}
+
+
+def _subgroup_features(props11):
+    """The subgroup operations compute shaders of a device may use.
+
+    Returns
+    -------
+    dict of str to bool
+        By the names in `_SUBGROUP_FEATURES`; all false unless compute
+        shaders support subgroup operations at all.
+    """
+    compute = props11.subgroupSupportedStages & vk.VK_SHADER_STAGE_COMPUTE_BIT
+    operations = props11.subgroupSupportedOperations if compute else 0
+    return {name: bool(operations & bit) for name, bit in _SUBGROUP_FEATURES.items()}
 
 
 _FLOAT_ATOMICS = "VK_EXT_shader_atomic_float"
@@ -426,6 +481,7 @@ def list_devices(refresh=False):
         feats12 = _vulkan12_features(handle)
         feats11 = _vulkan11_features(handle)
         float_atomics = _float_atomic_features(handle)
+        props11, props12 = _vulkan_properties(handle)
         limits = props.limits
         found.append(
             DeviceInfo(
@@ -453,7 +509,9 @@ def list_devices(refresh=False):
                 max_local_invocations=limits.maxComputeWorkGroupInvocations,
                 max_groups=tuple(limits.maxComputeWorkGroupCount),
                 max_shared_memory=limits.maxComputeSharedMemorySize,
-                nan_preserve=_nan_preserving_widths(handle),
+                nan_preserve=_nan_preserving_widths(props12),
+                subgroup_size=props11.subgroupSize,
+                **_subgroup_features(props11),
             )
         )
     _infos = found

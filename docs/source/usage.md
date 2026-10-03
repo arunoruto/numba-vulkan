@@ -352,6 +352,57 @@ instruction where it has one (`VK_EXT_shader_atomic_float`) and a
 compare-and-swap loop otherwise; float `max` and `min` always use the loop.
 `float64` atomics are not available.
 
+## Subgroups
+
+A workgroup runs as *subgroups* (warps, in CUDA's terms) whose invocations
+execute together and can combine or exchange values without shared memory
+or barriers. {py:mod}`nv.subgroup <numba_vulkan.stubs.subgroup>` offers:
+
+| function | result |
+| --- | --- |
+| `size()`, `lane()`, `id()`, `count()` | subgroup size, index in the subgroup (`cuda.laneid`), index of the subgroup in the workgroup, subgroups per workgroup |
+| `sum(v)`, `prod(v)`, `min(v)`, `max(v)` | over the active invocations of the subgroup |
+| `inclusive_sum(v)`, `exclusive_sum(v)`, ... | prefix scans, also for `prod`, `min` and `max` |
+| `any(p)`, `all(p)`, `elect()` | votes; `elect()` is true for the lowest active lane |
+| `ballot(p)`, `ballot_count(p)` | the lanes for which `p` holds, as four `uint32` words, or their number |
+| `broadcast(v, lane)`, `broadcast_first(v)` | `v` of one lane (`lane` the same for the whole subgroup) |
+| `shuffle(v, lane)`, `shuffle_xor(v, mask)`, `shuffle_up(v, d)`, `shuffle_down(v, d)` | `v` of another lane, like `cuda.shfl_*_sync` |
+
+Values are 32- or 64-bit integers or floats. Only the invocations that
+reach the call take part, as with CUDA's `*_sync` functions under a mask of
+the active threads.
+
+```python
+@nv.jit
+def total(x, out):
+    partial = nv.shared.array(32, np.float32)    # one value per subgroup
+    i = nv.global_id(0)
+    v = nv.subgroup.sum(x[i] if i < x.shape[0] else np.float32(0))
+    if nv.subgroup.elect():
+        partial[nv.subgroup.id()] = v
+    nv.barrier()
+    if nv.subgroup.id() == 0:
+        lane = nv.subgroup.lane()
+        v = partial[lane] if lane < nv.subgroup.count() else np.float32(0)
+        v = nv.subgroup.sum(v)
+        if nv.subgroup.elect():
+            nv.atomic.add(out, 0, v)                 # one atomic per workgroup
+```
+
+A grid-stride sum of 16 M floats written like this took 3.2 ms on an Intel
+UHD 630, against 4.6 ms with the shared-memory tree above; on an NVIDIA
+TITAN X, which is limited by memory bandwidth here, both took 0.32 ms. One
+atomic per *subgroup* instead was 17 times slower on the UHD 630, whose
+float additions go through compare-and-swap loops.
+
+Subgroups need not be full. `size()` is what the device reports, but
+drivers may run fewer invocations per subgroup: Intel's runs many kernels
+16 wide while reporting 32, and `count()` then gives the actual number of
+subgroups. Devices that do not support a class of operations (see the
+`subgroup_*` attributes of {py:class}`~numba_vulkan.runtime.DeviceInfo`)
+raise {py:class}`~numba_vulkan.errors.VulkanSupportError` for kernels that
+use it.
+
 ## Ufuncs: `vectorize` and `guvectorize`
 
 Numba's own decorators accept `target="vulkan"` once `numba_vulkan` is

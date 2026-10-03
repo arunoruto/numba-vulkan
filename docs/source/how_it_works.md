@@ -159,6 +159,11 @@ rewrites with disjoint footprints are made on one analysis. A kernel of
 some 5700 blocks needs 11 analyses instead of several hundred, and about
 2 s instead of 40 s.
 
+Subgroup operations must stay where the program puts them: the
+invocations that reach one instruction together take part in it. They are
+calls of `convergent` functions, which LLVM neither moves across conditions
+nor duplicates, and the structurizer never copies a block that contains one.
+
 After code generation, `codegen.check_structure` checks every module for the
 rules of structured control flow that a failure here or in LLVM's backend
 would break (a conditional branch without a merge instruction, a branch
@@ -185,10 +190,27 @@ module it translates. To keep that cheap, one helper process is started
 when the first function is compiled; it imports llvmlite once and forks
 for each module ({py:class}`numba_vulkan.codegen.Emitter`).
 
-Two things happen to the binary afterwards. Every float operation is
-decorated `NoContraction`, because shader compilers otherwise reassociate
-arithmetic freely, which Numba code does not expect. And the module is
-checked for constructs known to crash drivers before it is handed to one.
+Passes over the binary then finish the module (`codegen.emit_spirv`):
+
+- calls of functions named `nv.sg.*`, which the backend emits as imported
+  functions, become the `OpGroupNonUniform*` instructions of their name
+  (`lower_group_operations`). The backend offers subgroup reductions but no
+  products, scans or shuffles; declaring a function and replacing its calls
+  afterwards gives access to any instruction it lacks;
+- repairs of what the backend gets wrong (compare-and-swap results,
+  barrier semantics, `OpConstantNull` indices), and capabilities it
+  declares too broadly (`Float16`, `Int8`) or not at all
+  (`StorageBuffer8BitAccess`);
+- the workgroup size becomes a specialization constant
+  (`specialize_local_size`);
+- every float operation is decorated `NoContraction`, because shader
+  compilers otherwise reassociate arithmetic freely, which Numba code does
+  not expect;
+- the module is checked for constructs known to crash drivers and for the
+  rules of structured control flow (`check_spirv`).
+
+At pipeline creation, the runtime adds `SignedZeroInfNanPreserve` for
+kernels without `fastmath` (see the table below).
 
 ## Shared memory, atomics and barriers
 

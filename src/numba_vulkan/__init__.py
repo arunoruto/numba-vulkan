@@ -30,6 +30,7 @@ from numba_vulkan.stubs import (
     local_size,
     num_groups,
     shared,
+    subgroup,
     syncthreads,
 )
 
@@ -58,6 +59,7 @@ __all__ = [
     "num_groups",
     "select_device",
     "shared",
+    "subgroup",
     "synchronize",
     "syncthreads",
     "to_device",

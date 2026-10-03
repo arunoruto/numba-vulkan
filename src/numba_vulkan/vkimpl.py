@@ -1389,3 +1389,165 @@ def lower_print(context, builder, sig, args):
                 builder, PRINT_BINDING, i32, builder.add(position, i32(k)), word
             )
     return context.get_dummy_value()
+
+
+# -- subgroups ----------------------------------------------------------------
+
+_GROUP_SUFFIX = {"i32": "i32", "i64": "i64", "float": "f32", "double": "f64"}
+
+
+def _group_call(builder, operation, restype, args):
+    """Call the placeholder of a subgroup operation.
+
+    The function is only declared; `numba_vulkan.codegen.lower_group_operations`
+    turns the call into the group instruction. It is ``convergent``, so that
+    LLVM neither moves it across conditions nor duplicates it.
+
+    Parameters
+    ----------
+    builder : llvmlite.ir.IRBuilder
+        Builder positioned where the code is emitted.
+    operation : str
+        Name after ``nv.sg.``, without the type, for example ``"fadd.incl"``.
+    restype : llvmlite.ir.Type
+        Result type.
+    args : list of llvmlite.ir.Value
+        Operands.
+
+    Returns
+    -------
+    llvmlite.ir.Value
+    """
+    value_type = str(args[0].type) if args else ""
+    suffix = _GROUP_SUFFIX.get(value_type)
+    name = f"nv.sg.{operation}" + (f".{suffix}" if suffix else "")
+    fn = builder.module.globals.get(name)
+    if fn is None:
+        fnty = ir.FunctionType(restype, [a.type for a in args])
+        fn = ir.Function(builder.module, fnty, name)
+        fn.attributes.add("convergent")
+        fn.attributes.add("nounwind")
+    return builder.call(fn, args)
+
+
+def _register_subgroup_builtin(stub, intrinsic):
+    """Lower a function without arguments to a SPIR-V built-in variable."""
+
+    @lower(stub)
+    def lower_builtin(context, builder, sig, args):
+        fn = builder.module.globals.get(intrinsic)
+        if fn is None:
+            fn = ir.Function(builder.module, ir.FunctionType(i32, []), intrinsic)
+        return builder.call(fn, [])
+
+    lower_builtin.__doc__ = f"Lower ``subgroup.{stub.__name__}()`` to ``{intrinsic}``."
+    return lower_builtin
+
+
+for _name, _intrinsic in (
+    ("size", "llvm.spv.subgroup.size"),
+    ("lane", "llvm.spv.subgroup.local.invocation.id"),
+    ("id", "llvm.spv.subgroup.id"),
+    ("count", "llvm.spv.num.subgroups"),
+):
+    _register_subgroup_builtin(getattr(stubs.subgroup, _name), _intrinsic)
+
+
+def _arithmetic(op, ty):
+    """Name of the group instruction for an operation on values of `ty`."""
+    if isinstance(ty, types.Float):
+        return {"sum": "fadd", "prod": "fmul", "min": "fmin", "max": "fmax"}[op]
+    signed = "s" if ty.signed else "u"
+    return {
+        "sum": "iadd",
+        "prod": "imul",
+        "min": f"{signed}min",
+        "max": f"{signed}max",
+    }[op]
+
+
+def _register_subgroup_arithmetic(stub, op, scan):
+    """Lower a reduction or scan over the subgroup."""
+
+    @lower(stub, types.Number)
+    def lower_arithmetic(context, builder, sig, args):
+        operation = f"{_arithmetic(op, sig.args[0])}.{scan}"
+        return _group_call(builder, operation, args[0].type, [args[0]])
+
+    lower_arithmetic.__doc__ = f"Lower ``subgroup.{stub.__name__}(value)``."
+    return lower_arithmetic
+
+
+for _op in ("sum", "prod", "min", "max"):
+    _register_subgroup_arithmetic(getattr(stubs.subgroup, _op), _op, "red")
+    _register_subgroup_arithmetic(
+        getattr(stubs.subgroup, f"inclusive_{_op}"), _op, "incl"
+    )
+    _register_subgroup_arithmetic(
+        getattr(stubs.subgroup, f"exclusive_{_op}"), _op, "excl"
+    )
+
+
+def _register_subgroup_exchange(stub, operation):
+    """Lower a function of a value and a lane, delta or mask."""
+
+    @lower(stub, types.Number, types.Integer)
+    def lower_exchange(context, builder, sig, args):
+        lane = context.cast(builder, args[1], sig.args[1], types.uint32)
+        return _group_call(builder, operation, args[0].type, [args[0], lane])
+
+    lower_exchange.__doc__ = f"Lower ``subgroup.{stub.__name__}(value, lane)``."
+    return lower_exchange
+
+
+for _name, _operation in (
+    ("broadcast", "broadcast"),
+    ("shuffle", "shuffle"),
+    ("shuffle_xor", "shufflexor"),
+    ("shuffle_up", "shuffleup"),
+    ("shuffle_down", "shuffledown"),
+):
+    _register_subgroup_exchange(getattr(stubs.subgroup, _name), _operation)
+
+
+@lower(stubs.subgroup.broadcast_first, types.Number)
+def lower_broadcast_first(context, builder, sig, args):
+    """Lower ``subgroup.broadcast_first(value)``."""
+    return _group_call(builder, "broadcastfirst", args[0].type, [args[0]])
+
+
+@lower(stubs.subgroup.any, types.Boolean)
+def lower_subgroup_any(context, builder, sig, args):
+    """Lower ``subgroup.any(predicate)``."""
+    return _group_call(builder, "any", ir.IntType(1), [args[0]])
+
+
+@lower(stubs.subgroup.all, types.Boolean)
+def lower_subgroup_all(context, builder, sig, args):
+    """Lower ``subgroup.all(predicate)``."""
+    return _group_call(builder, "all", ir.IntType(1), [args[0]])
+
+
+@lower(stubs.subgroup.elect)
+def lower_subgroup_elect(context, builder, sig, args):
+    """Lower ``subgroup.elect()``."""
+    return _group_call(builder, "elect", ir.IntType(1), [])
+
+
+def _ballot(builder, predicate):
+    """The ballot of a predicate as four 32-bit words."""
+    return _group_call(builder, "ballot", ir.VectorType(i32, 4), [predicate])
+
+
+@lower(stubs.subgroup.ballot, types.Boolean)
+def lower_subgroup_ballot(context, builder, sig, args):
+    """Lower ``subgroup.ballot(predicate)`` to a tuple of four words."""
+    words = _ballot(builder, args[0])
+    items = [builder.extract_element(words, i32(k)) for k in range(4)]
+    return context.make_tuple(builder, sig.return_type, items)
+
+
+@lower(stubs.subgroup.ballot_count, types.Boolean)
+def lower_subgroup_ballot_count(context, builder, sig, args):
+    """Lower ``subgroup.ballot_count(predicate)``."""
+    return _group_call(builder, "ballotcount.red", i32, [_ballot(builder, args[0])])
