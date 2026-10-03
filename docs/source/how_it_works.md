@@ -43,14 +43,21 @@ shaders use *logical addressing*: there are no general pointers, and memory
 is reached only through buffers bound at fixed descriptor bindings.
 
 numba-vulkan therefore uses its own array type,
-{py:class}`~numba_vulkan.vktypes.VulkanArray`, which records the binding of
-its buffer **in the type**. Its runtime value holds only metadata (item
-count, shape, strides), under the same member names as Numba's array model,
-so Numba's implementations of `.shape`, `.size` and `len()` work unchanged.
+{py:class}`~numba_vulkan.vktypes.VulkanArray`, whose runtime value holds
+only metadata (item count, shape, strides, offset) under the same member
+names as Numba's array model, so Numba's implementations of `.shape`,
+`.size` and `len()` work unchanged, plus the binding of its buffer.
 Indexing is implemented by the target.
 
-One consequence: a function taking arrays is compiled once per combination
-of bindings it is called with.
+Every buffer access in a shader must name its binding as a constant. Arrays
+created in a kernel (shared, local and constant arrays) have their binding
+in the type. Kernel arguments carry it as a value instead (`binding=None` in
+the type), which the entry point sets; a function taking arrays is
+therefore compiled once, whatever buffers it is called with, as clspv
+resolves resources after inlining. Inlining everything into the entry point
+makes the value a constant again before the accesses are expanded.
+Choosing between arrays at run time (`a = x if flag else y`) leaves it a
+variable, which is reported as an error.
 
 The bindings of a kernel are laid out as follows:
 

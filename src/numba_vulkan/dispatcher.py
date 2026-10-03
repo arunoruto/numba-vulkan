@@ -334,11 +334,13 @@ class VulkanDispatcher:
         bound = []
         for index, ty in enumerate(argtypes):
             if isinstance(ty, types.Array):
+                # The binding is a value of the array (see vktypes), so
+                # functions called with it are compiled once for all.
                 ty = VulkanArray(
                     ty.dtype,
                     ty.ndim,
                     ty.layout,
-                    arg_binding(index),
+                    None,
                     readonly=not ty.mutable,
                     half=isinstance(ty, HalfArray),
                 )

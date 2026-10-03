@@ -267,6 +267,17 @@ def _mangle(llty):
     raise VulkanUnsupportedError(f"buffers of {llty} are not supported on Vulkan")
 
 
+def _binding(binding):
+    """A binding as the ``i32`` operand of a placeholder call.
+
+    Parameters
+    ----------
+    binding : int or llvmlite.ir.Value
+        A number, or a value that is a constant after inlining.
+    """
+    return i32(binding) if isinstance(binding, int) else binding
+
+
 def _index(builder, index):
     """Truncate an element index to the ``i32`` that buffer access takes.
 
@@ -294,9 +305,9 @@ def load_element(builder, binding, elem, index):
     ----------
     builder : llvmlite.ir.IRBuilder
         Builder positioned where the code is emitted.
-    binding : int
-        Descriptor binding of the buffer. It must be a compile-time
-        constant.
+    binding : int or llvmlite.ir.Value
+        Descriptor binding of the buffer: a number, or a value that is a
+        constant once the kernel is inlined.
     elem : llvmlite.ir.Type
         Element type of the buffer.
     index : llvmlite.ir.Value
@@ -311,7 +322,7 @@ def load_element(builder, binding, elem, index):
     fn = builder.module.globals.get(name)
     if fn is None:
         fn = ir.Function(builder.module, ir.FunctionType(elem, [i32, i32]), name=name)
-    return builder.call(fn, [i32(binding), _index(builder, index)])
+    return builder.call(fn, [_binding(binding), _index(builder, index)])
 
 
 def store_element(builder, binding, elem, index, value):
@@ -324,9 +335,9 @@ def store_element(builder, binding, elem, index, value):
     ----------
     builder : llvmlite.ir.IRBuilder
         Builder positioned where the code is emitted.
-    binding : int
-        Descriptor binding of the buffer. It must be a compile-time
-        constant.
+    binding : int or llvmlite.ir.Value
+        Descriptor binding of the buffer: a number, or a value that is a
+        constant once the kernel is inlined.
     elem : llvmlite.ir.Type
         Element type of the buffer.
     index : llvmlite.ir.Value
@@ -339,7 +350,7 @@ def store_element(builder, binding, elem, index, value):
     if fn is None:
         fnty = ir.FunctionType(ir.VoidType(), [i32, i32, elem])
         fn = ir.Function(builder.module, fnty, name=name)
-    builder.call(fn, [i32(binding), _index(builder, index), value])
+    builder.call(fn, [_binding(binding), _index(builder, index), value])
 
 
 # atomicrmw operations by the name used in placeholders.
@@ -368,8 +379,9 @@ def atomic_element(builder, binding, elem, index, op, value):
     ----------
     builder : llvmlite.ir.IRBuilder
         Builder positioned where the code is emitted.
-    binding : int
-        Descriptor binding of the buffer, or the binding of a shared array.
+    binding : int or llvmlite.ir.Value
+        Descriptor binding of the buffer (see `load_element`), or the
+        binding of a shared array.
     elem : llvmlite.ir.Type
         Element type: a 32-bit integer, or ``float`` for ``fadd``.
     index : llvmlite.ir.Value
@@ -388,7 +400,7 @@ def atomic_element(builder, binding, elem, index, op, value):
     fn = builder.module.globals.get(name)
     if fn is None:
         fn = ir.Function(builder.module, ir.FunctionType(elem, [i32, i32, elem]), name)
-    return builder.call(fn, [i32(binding), _index(builder, index), value])
+    return builder.call(fn, [_binding(binding), _index(builder, index), value])
 
 
 def compare_and_swap(builder, binding, index, expected, value):
@@ -401,8 +413,9 @@ def compare_and_swap(builder, binding, index, expected, value):
     ----------
     builder : llvmlite.ir.IRBuilder
         Builder positioned where the code is emitted.
-    binding : int
-        Descriptor binding of the buffer, or the binding of a shared array.
+    binding : int or llvmlite.ir.Value
+        Descriptor binding of the buffer (see `load_element`), or the
+        binding of a shared array.
     index : llvmlite.ir.Value
         Element index.
     expected, value : llvmlite.ir.Value
@@ -420,7 +433,9 @@ def compare_and_swap(builder, binding, index, expected, value):
         fn = ir.Function(
             builder.module, ir.FunctionType(i32, [i32, i32, i32, i32]), name
         )
-    return builder.call(fn, [i32(binding), _index(builder, index), expected, value])
+    return builder.call(
+        fn, [_binding(binding), _index(builder, index), expected, value]
+    )
 
 
 def barrier(builder):
@@ -620,7 +635,12 @@ def expand_buffer_access(text, push_types=()):
         text,
     )
     if re.search(rf'@"?{_PREFIX}\.', text):
-        raise SpirvCodegenError("a buffer access with a non-constant binding survived")
+        raise SpirvCodegenError(
+            "the kernel chooses between arrays while it runs (as in "
+            "`a = x if flag else y`), which Vulkan shaders cannot express: each "
+            "access must name its buffer. Index the arrays separately instead "
+            "(`x[i] if flag else y[i]`)"
+        )
 
     extra = []
     if pushed:

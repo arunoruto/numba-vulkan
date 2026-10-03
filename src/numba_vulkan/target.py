@@ -396,6 +396,8 @@ class VulkanTargetContext(BaseContext):
         proxy.shape = cgutils.pack_array(builder, [intp(n) for n in arr.shape], ty=intp)
         proxy.strides = cgutils.pack_array(builder, [intp(n) for n in strides], ty=intp)
         proxy.offset = intp(0)
+        # Read from the type; see numba_vulkan.vkimpl._binding_member.
+        proxy.binding = self.get_constant(types.int32, 0)
         return proxy._getvalue()
 
     def codegen(self):
