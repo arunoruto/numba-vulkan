@@ -2,6 +2,7 @@
 
 import dataclasses
 import functools
+import inspect
 import os
 import re
 import struct
@@ -17,8 +18,9 @@ from numba.core.target_extension import (
 )
 from numba.np import numpy_support
 
-from numba_vulkan import narrowing, runtime
-from numba_vulkan.buffers import STATUS_INDEX, arg_binding
+from numba_vulkan import kernelcache, narrowing, runtime
+from numba_vulkan.buffers import STATUS_INDEX, arg_binding, print_formats
+from numba_vulkan.codegen import CompiledKernel
 from numba_vulkan.compiler import compile_kernel, compile_vulkan
 from numba_vulkan.errors import (
     VulkanPerformanceWarning,
@@ -113,11 +115,13 @@ class VulkanDispatcher:
             )
         if self.narrow is None and os.environ.get("NUMBA_VULKAN_NARROW", "0") != "0":
             self.narrow = True
+        self.cache = bool(self.targetoptions.get("cache", False))
         self._overloads = {}
         self._kernels = {}
         # Kernels by the argument types of a launch, before binding.
         self._launched = {}
         self._compiling = 0
+        self._uncachable_warned = False
         functools.update_wrapper(self, py_func)
 
     def __repr__(self):
@@ -342,9 +346,23 @@ class VulkanDispatcher:
         local_size = _shape3(local_size) if local_size else None
         key = (tuple(bound), ndim, mode)
         if key not in self._kernels:
-            with narrowing.using(mode):
-                cres = self.compile_device(key[0])
-                kernel = compile_kernel(cres, ndim, exact=not self.fastmath)
+            name = self._cache_name(key) if self.cache else None
+            kernel = self._load(name) if name else None
+            if kernel is None:
+                counted = exception_table.counted
+                with narrowing.using(mode):
+                    cres = self.compile_device(key[0])
+                    kernel = compile_kernel(cres, ndim, exact=not self.fastmath)
+                # Exceptions with counted codes differ between processes.
+                if name and exception_table.counted == counted:
+                    kernelcache.store_kernel(
+                        name,
+                        {
+                            "kernel": kernel,
+                            "exceptions": exception_table.entries(),
+                            "prints": dict(print_formats),
+                        },
+                    )
             self._warn(kernel, bound)
             self._kernels[key] = kernel
         kernel = self._kernels[key]
@@ -356,6 +374,93 @@ class VulkanDispatcher:
         if variant not in self._kernels:
             self._kernels[variant] = dataclasses.replace(kernel, local_size=local_size)
         return self._kernels[variant]
+
+    def _cache_name(self, key):
+        """Name of the cache entry of a specialisation, if it can be cached.
+
+        Parameters
+        ----------
+        key : tuple
+            Bound argument types, grid dimensionality and narrowing mode.
+
+        Returns
+        -------
+        str or None
+            ``None`` if the kernel or a function it calls has no source
+            file, or the cache is off (``NUMBA_VULKAN_CACHE=0``).
+        """
+        if not kernelcache.enabled():
+            return None
+        stamps = [kernelcache.source_stamp(d.py_func) for d in self._dependencies()]
+        if None in stamps:
+            if not self._uncachable_warned:
+                self._uncachable_warned = True
+                warnings.warn(
+                    f"kernel '{self.py_func.__name__}' or a function it calls has no "
+                    "source file, so cache=True has no effect",
+                    errors.NumbaWarning,
+                    stacklevel=4,
+                )
+            return None
+        bound, ndim, mode = key
+        options = (
+            self.fastmath,
+            self.narrow_math,
+            self.boundscheck,
+            self.error_model,
+            os.environ.get("NUMBA_BOUNDSCHECK"),
+        )
+        return kernelcache.kernel_key(
+            stamps, tuple(map(repr, bound)), ndim, tuple(mode), options
+        )
+
+    def _dependencies(self):
+        """This dispatcher and the ``@nv.jit`` functions its code refers to.
+
+        Followed through globals, attributes of modules and closures, and
+        recursively.
+
+        Returns
+        -------
+        list of VulkanDispatcher
+        """
+        found, work, seen = [], [self], set()
+        while work:
+            dispatcher = work.pop()
+            if id(dispatcher) in seen:
+                continue
+            seen.add(id(dispatcher))
+            found.append(dispatcher)
+            function = dispatcher.py_func
+            names = _code_names(function.__code__)
+            scope = dict(function.__globals__)
+            for name, cell in zip(
+                function.__code__.co_freevars, function.__closure__ or ()
+            ):
+                try:
+                    scope[name] = cell.cell_contents
+                except ValueError:  # an empty cell
+                    pass
+            for name in names:
+                value = scope.get(name)
+                values = [value]
+                if inspect.ismodule(value):
+                    values += [getattr(value, other, None) for other in names]
+                work += [v for v in values if isinstance(v, VulkanDispatcher)]
+        return found
+
+    def _load(self, name):
+        """A cached kernel, or ``None`` if there is none that fits.
+
+        The exceptions and ``print`` formats it uses are registered again.
+        """
+        entry = kernelcache.load_kernel(name)
+        if entry is None or not isinstance(entry.get("kernel"), CompiledKernel):
+            return None
+        if not exception_table.restore(entry.get("exceptions", {})):
+            return None
+        print_formats.update(entry.get("prints", {}))
+        return entry["kernel"]
 
     def _warn(self, kernel, argtypes):
         """Point out float64 that costs precision or speed, once per kernel.
@@ -679,6 +784,15 @@ def _pack(kernel, hosts, shapes, groups):
     return struct.pack(kernel.push_format, *values)
 
 
+def _code_names(code):
+    """The global and attribute names a code object and its nested ones use."""
+    names = set(code.co_names)
+    for const in code.co_consts:
+        if inspect.iscode(const):
+            names |= _code_names(const)
+    return names
+
+
 def _shape3(shape):
     """A shape of up to three extents, padded with ones to three."""
     shape = (shape,) if np.isscalar(shape) else tuple(int(n) for n in shape)
@@ -703,6 +817,7 @@ def jit(
     boundscheck=False,
     error_model="numpy",
     narrow=None,
+    cache=False,
     **options,
 ):
     """Compile a Python function for Vulkan.
@@ -743,6 +858,14 @@ def jit(
         64-bit elements are converted on the host, and integers that do not
         fit raise ``OverflowError``. Only the setting of the kernel matters,
         not that of the functions it calls.
+    cache : bool
+        Keep compiled kernels on disk, so that later processes skip Numba's
+        compilation, as with Numba's ``cache=True``. A kernel is compiled
+        again when its source file or that of an ``@nv.jit`` function it
+        calls changes. Changes to other functions it uses (``@overload``,
+        functions of other targets) and to the values of global arrays are
+        not noticed, as in Numba. Functions without a source file
+        (interactive, ``exec``) are not cached.
     **options
         Accepted for compatibility with Numba's generic ``jit`` and ignored.
 
@@ -755,6 +878,7 @@ def jit(
     options["boundscheck"] = boundscheck
     options["error_model"] = error_model
     options["narrow"] = narrow
+    options["cache"] = cache
     if pyfunc is None:
         return lambda f: VulkanDispatcher(f, options)
     return VulkanDispatcher(pyfunc, options)

@@ -14,13 +14,13 @@ uv run pytest tests/test_known_issues.py -rxX
 ```
 
 Numbers are not reused: KI-02, KI-03, KI-05, KI-06, KI-07, KI-08, KI-13,
-KI-24, KI-25, KI-26, KI-30 and KI-31 (NumPy functions on scalars, missing `math`
-functions, allocating arrays in kernels, global constant arrays, complex
-numbers, `print`, all data copied on every call, nested loop exits that
-failed to compile, libclc linked in full for every kernel, libclc depending
-on an old NixOS release, `gamma` losing precision for large arguments,
-`float64` functions losing precision on Intel's and Mesa's drivers) have
-been fixed.
+KI-14, KI-24, KI-25, KI-26, KI-30 and KI-31 (NumPy functions on scalars,
+missing `math` functions, allocating arrays in kernels, global constant
+arrays, complex numbers, `print`, all data copied on every call, nested
+loop exits that failed to compile, Numba's compilation repeated in every
+process, libclc linked in full for every kernel, libclc depending on an old
+NixOS release, `gamma` losing precision for large arguments, `float64`
+functions losing precision on Intel's and Mesa's drivers) have been fixed.
 
 ## Language and library coverage
 
@@ -157,19 +157,6 @@ A `DeviceArray` supports basic indexing, views and NumPy's ufuncs, but
 there is no `__cuda_array_interface__` or DLPack equivalent for handing its
 memory to other Vulkan libraries, and no advanced indexing (arrays or
 lists as indices).
-
-### KI-14: Numba's part of compilation is repeated in every process
-
-The SPIR-V of a kernel is cached on disk (see {doc}`how_it_works`), but
-type inference and lowering run again in every process, because the cache
-is keyed by their output. That leaves about 0.05 s per kernel, and the
-first kernel of a process additionally pays some 0.2 s for Numba's own
-start-up. Driver pipelines are not cached by this package either; the
-drivers keep shader caches of their own.
-
-**Fix:** a second cache level keyed by source, like Numba's `cache=True`,
-which has to decide when a function, the functions it calls and the
-globals it reads have changed.
 
 ### KI-15: one specialisation per buffer binding
 
