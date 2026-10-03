@@ -326,7 +326,10 @@ def _push_members(context, argtypes):
         elem = buffer_element_type(context, ty)
         if isinstance(ty, types.Integer) and ty.bitwidth < 32:
             elem = i32
-        (wide if ty.bitwidth == 64 else narrow).append((("arg", index), elem))
+        # Sized as stored: a narrowed kernel holds float64 and int64 values in
+        # 32 bits (the IR is narrowed later; see `_push_dtype`).
+        stored = narrowing.stored_dtype(np.dtype(str(ty)), narrowing.current)
+        (wide if stored.itemsize == 8 else narrow).append((("arg", index), elem))
     members = wide + narrow + [(source, i32) for source in shapes]
     size = 8 * len(wide) + 4 * (len(narrow) + len(shapes))
     return members if size <= PUSH_CONSTANT_BYTES - _GRID_BYTES else None

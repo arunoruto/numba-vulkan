@@ -134,7 +134,8 @@ def test_too_many_arguments_fall_back_to_buffers(device):
     # 17 float32 values and an extent fit; 17 float64 values do not.
     assert _compiled(many_scalars).push_format
     out64 = np.zeros(1, np.float64)
-    with pytest.warns(nv.VulkanPerformanceWarning):
+    # A device without float64 computes the kernel in float32 instead.
+    with pytest.warns((nv.VulkanPerformanceWarning, nv.VulkanPrecisionWarning)):
         many_scalars.forall(1, device=device)(*[float(v) for v in values], out64)
     kernel = _compiled(many_scalars)
     if kernel.mode.floats:
