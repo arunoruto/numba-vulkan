@@ -49,6 +49,13 @@ RUN = """
 import json, sys
 import numpy as np
 from numba_vulkan import dispatcher
+keys = []
+original_name = dispatcher.VulkanDispatcher._cache_name
+def naming(self, key):
+    name = original_name(self, key)
+    keys.append([self.py_func.__name__, name, repr(key)])
+    return name
+dispatcher.VulkanDispatcher._cache_name = naming
 compiled = []
 original = dispatcher.VulkanDispatcher.compile_device
 def counting(self, *args, **kwargs):
@@ -65,7 +72,8 @@ try:
 except ValueError as exc:
     error = [str(exc), exc.__notes__]
 kernels.shout.forall(1)(x)
-print(json.dumps({"out": out.tolist(), "compiled": compiled, "error": error}))
+print(json.dumps({"out": out.tolist(), "compiled": compiled, "error": error,
+                  "keys": keys}))
 """
 
 
@@ -108,7 +116,9 @@ def test_later_processes_skip_compiling(project, tmp_path_factory):
     assert printed == ["first is 0.0"]
 
     second, printed = _run(project, cache)
-    assert second["compiled"] == []  # nothing went through Numba's pipeline
+    stored = sorted(p.name for p in cache.glob("functions/*/*"))
+    # nothing went through Numba's pipeline
+    assert second["compiled"] == [], (stored, first["keys"], second["keys"])
     assert second["out"] == _want(2)
     # Exceptions and print formats come back with the kernel.
     assert second["error"] == first["error"]
