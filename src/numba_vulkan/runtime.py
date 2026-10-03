@@ -1,5 +1,7 @@
 """Minimal Vulkan compute runtime: devices, device arrays and kernel launch."""
 
+import contextlib
+import ctypes
 import itertools
 import math
 import os
@@ -568,12 +570,37 @@ class Device:
         self.family = next(
             i for i, f in enumerate(families) if f.queueFlags & vk.VK_QUEUE_COMPUTE_BIT
         )
-        queue_info = vk.VkDeviceQueueCreateInfo(
-            sType=vk.VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
-            queueFamilyIndex=self.family,
-            queueCount=1,
-            pQueuePriorities=[1.0],
+        # Streams (see `Stream`) run kernels on a second compute queue where
+        # the family has one, and copies on a queue of a family that only
+        # transfers, which is a separate copy engine on discrete GPUs.
+        compute_queues = min(families[self.family].queueCount, 2)
+        graphics_or_compute = vk.VK_QUEUE_GRAPHICS_BIT | vk.VK_QUEUE_COMPUTE_BIT
+        self.transfer_family = next(
+            (
+                i
+                for i, f in enumerate(families)
+                if f.queueFlags & vk.VK_QUEUE_TRANSFER_BIT
+                and not f.queueFlags & graphics_or_compute
+            ),
+            None,
         )
+        queue_infos = [
+            vk.VkDeviceQueueCreateInfo(
+                sType=vk.VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
+                queueFamilyIndex=self.family,
+                queueCount=compute_queues,
+                pQueuePriorities=[1.0] * compute_queues,
+            )
+        ]
+        if self.transfer_family is not None:
+            queue_infos.append(
+                vk.VkDeviceQueueCreateInfo(
+                    sType=vk.VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
+                    queueFamilyIndex=self.transfer_family,
+                    queueCount=1,
+                    pQueuePriorities=[1.0],
+                )
+            )
         features = vk.VkPhysicalDeviceFeatures(
             shaderFloat64=info.float64,
             shaderInt64=info.int64,
@@ -599,6 +626,7 @@ class Device:
             shaderBufferInt64Atomics=info.int64_atomics,
             shaderSharedInt64Atomics=info.int64_atomics,
             shaderFloat16=info.float16,
+            timelineSemaphore=True,  # for streams; required by Vulkan 1.2
             **chain,
         )
         features11 = vk.VkPhysicalDeviceVulkan11Features(
@@ -609,14 +637,25 @@ class Device:
         create = vk.VkDeviceCreateInfo(
             sType=vk.VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
             pNext=features11,
-            queueCreateInfoCount=1,
-            pQueueCreateInfos=[queue_info],
+            queueCreateInfoCount=len(queue_infos),
+            pQueueCreateInfos=queue_infos,
             pEnabledFeatures=features,
             enabledExtensionCount=len(extensions),
             ppEnabledExtensionNames=extensions or None,
         )
         self.handle = vk.vkCreateDevice(phys, create, None)
         self.queue = vk.vkGetDeviceQueue(self.handle, self.family, 0)
+        self.stream_queue = vk.vkGetDeviceQueue(
+            self.handle, self.family, compute_queues - 1
+        )
+        if self.transfer_family is not None:
+            self.transfer_queue = vk.vkGetDeviceQueue(
+                self.handle, self.transfer_family, 0
+            )
+        else:
+            self.transfer_family, self.transfer_queue = self.family, self.stream_queue
+        # Buffers are used by both families without transfers of ownership.
+        self._families = sorted({self.family, self.transfer_family})
         self.memory = vk.vkGetPhysicalDeviceMemoryProperties(phys)
         pool = vk.VkCommandPoolCreateInfo(
             sType=vk.VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
@@ -624,6 +663,17 @@ class Device:
             queueFamilyIndex=self.family,
         )
         self.command_pool = vk.vkCreateCommandPool(self.handle, pool, None)
+        self._pools = {self.family: self.command_pool}
+        if self.transfer_family != self.family:
+            self._pools[self.transfer_family] = vk.vkCreateCommandPool(
+                self.handle,
+                vk.VkCommandPoolCreateInfo(
+                    sType=vk.VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+                    flags=vk.VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
+                    queueFamilyIndex=self.transfer_family,
+                ),
+                None,
+            )
         # One command buffer for transfers and one for kernels, so that the
         # recording of a kernel launch can be submitted again unchanged.
         self._transfer_commands, self._launch_commands = vk.vkAllocateCommandBuffers(
@@ -661,6 +711,14 @@ class Device:
         self._deferred = []
         # Exceptions of kernels launched asynchronously, as (kernel, code).
         self._errors = []
+        # Streams created on this device (see `Stream`), and those with work
+        # in flight, which are kept alive until it has finished.
+        self._streams = weakref.WeakSet()
+        self._busy_streams = set()
+        self._dead_semaphores = []
+        # Pinned host arrays by the address of their memory; see
+        # `pinned_array`.
+        self._pinned = {}
         # Timestamp queries for events, used in turn; created when needed.
         self._queries = None
         self._next_query = 0
@@ -931,7 +989,7 @@ class Device:
                 usage=vk.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
                 | vk.VK_BUFFER_USAGE_TRANSFER_SRC_BIT
                 | vk.VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-                sharingMode=vk.VK_SHARING_MODE_EXCLUSIVE,
+                **_sharing(self._families),
             ),
             None,
         )
@@ -985,6 +1043,10 @@ class Device:
         While asynchronous launches are pending, the buffer could still be
         in use by one of them; it joins the pool when they have finished.
         """
+        if _stream_pending(buffer):
+            # The stream gives it back once it has passed its last use.
+            buffer.stream._released.append(buffer)
+            return
         if self._pending or self._open:
             self._deferred.append((buffer, self._seq))
             return
@@ -1035,7 +1097,11 @@ class Device:
             _barrier(cmd)
             record(cmd)
             vk.vkEndCommandBuffer(cmd)
-        vk.vkQueueSubmit(self.queue, 1, self._submit_info[id(cmd)], vk.VK_NULL_HANDLE)
+        if self._streams:
+            self._submit_after_streams(cmd, vk.VK_NULL_HANDLE)
+        else:
+            submit = self._submit_info[id(cmd)]
+            vk.vkQueueSubmit(self.queue, 1, submit, vk.VK_NULL_HANDLE)
         vk.vkQueueWaitIdle(self.queue)
         # Waiting for the queue to be idle finished every pending launch.
         self._retire(len(self._pending))
@@ -1148,6 +1214,8 @@ class Device:
                         f"the array is on {array.device.info.name}, but the "
                         f"kernel runs on {self.info.name}"
                     )
+                if array._buffer.stream is not None:
+                    _settle(array._buffer)
                 parts.append((array._buffer.serial, array._nbytes))
             elif array is None:
                 parts.append(None)
@@ -1198,6 +1266,8 @@ class Device:
             oldest = min(state.slots.values(), key=lambda s: s.used)
             if oldest.used > self._retired_seq:
                 self.synchronize(report=False)
+            if oldest.stream is not None:
+                oldest.stream._wait(oldest.stream_value)
             del state.slots[oldest.key]
             for buffer in oldest.host_buffers:
                 self._pool(buffer)
@@ -1324,8 +1394,38 @@ class Device:
         if batch is None:
             return
         _check(_lib.vkEndCommandBuffer(batch.cmd))
-        _check(_lib.vkQueueSubmit(self.queue, 1, batch.submit[0], batch.fence))
+        if self._streams:
+            self._submit_after_streams(batch.cmd, batch.fence)
+        else:
+            _check(_lib.vkQueueSubmit(self.queue, 1, batch.submit[0], batch.fence))
         self._pending.append(batch)
+
+    def _submit_after_streams(self, cmd, fence):
+        """Submit to the default queue after what streams have finished.
+
+        Buffers that streams used, and that the host knows them to be done
+        with, may be used here. The order is already right, since the host
+        waited for the streams; waiting for the values they have reached
+        states it on the device as well, for tools that check it (such as
+        the validation layer's synchronization checks).
+        """
+        streams = [stream for stream in self._streams if stream._done]
+        timeline = vk.VkTimelineSemaphoreSubmitInfo(
+            sType=vk.VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO,
+            waitSemaphoreValueCount=len(streams),
+            pWaitSemaphoreValues=[stream._done for stream in streams] or None,
+        )
+        submit = vk.VkSubmitInfo(
+            sType=vk.VK_STRUCTURE_TYPE_SUBMIT_INFO,
+            pNext=timeline,
+            waitSemaphoreCount=len(streams),
+            pWaitSemaphores=[stream._semaphore for stream in streams] or None,
+            pWaitDstStageMask=[vk.VK_PIPELINE_STAGE_ALL_COMMANDS_BIT] * len(streams)
+            or None,
+            commandBufferCount=1,
+            pCommandBuffers=[cmd],
+        )
+        vk.vkQueueSubmit(self.queue, 1, [submit], fence)
 
     def _busy(self):
         """Whether submitted launches are still running."""
@@ -1359,6 +1459,10 @@ class Device:
                         slot.status.view[:4] = 0
         self._spare.extend(done)
         self._retired_seq = done[-1].seq
+        if self._dead_semaphores and not self._pending and self._open is None:
+            for semaphore in self._dead_semaphores:
+                vk.vkDestroySemaphore(self.handle, semaphore, None)
+            self._dead_semaphores = []
         # Buffers released while launches were pending join the pool once
         # every launch recorded before their release has finished.
         keep = []
@@ -1386,6 +1490,10 @@ class Device:
         """
         self._flush()
         self._retire(len(self._pending))
+        for stream in list(self._streams):
+            stream._wait(stream.value)
+            self._errors += stream._errors
+            stream._errors = []
         if report:
             self._report()
 
@@ -1407,6 +1515,7 @@ class Device:
         """
         # Whatever is recorded runs meanwhile.
         self._flush()
+        _settle(buffer)
         if buffer.used > self._retired_seq:
             self._retire(sum(batch.seq <= buffer.used for batch in self._pending))
         self._report()
@@ -1418,6 +1527,45 @@ class Device:
             from numba_vulkan.dispatcher import raise_kernel_error
 
             raise_kernel_error(kernel.name, code, asynchronous=True)
+
+    def launch_stream(self, stream, kernel, groups, arrays, push=b""):
+        """Enqueue ``kernel`` on a `Stream`; see `launch` for the arguments.
+
+        The arrays must be device arrays (and the host arrays that hold the
+        status and, without push constants, shapes and scalars).
+        """
+        state = self._pipeline(kernel)
+        parts, host, buffers = [], [], []
+        for array in arrays:
+            if isinstance(array, DeviceArray):
+                if array.device is not self:
+                    raise ValueError(
+                        f"the array is on {array.device.info.name}, but the "
+                        f"kernel runs on {self.info.name}"
+                    )
+                parts.append((array._buffer.serial, array._nbytes))
+                buffers.append(array._buffer)
+            elif array is None:
+                parts.append(None)
+            else:
+                parts.append(array.nbytes)
+                host.append(array.tobytes())
+        key = (tuple(parts), tuple(host))
+        slot = state.slots.get(key)
+        if slot is None:
+            slot = self._new_slot(state, key, arrays)
+        stream._submit(
+            self.family,
+            lambda cmd: self._record_dispatch(cmd, state, slot.desc_set, groups, push),
+            buffers,
+            checks=[slot] if slot.status is not None else (),
+        )
+        slot.stream, slot.stream_value = stream, stream.value
+
+    def _unpin(self, start):
+        """Give the buffer of a dropped pinned array back."""
+        _, buffer = self._pinned.pop(start)
+        self._release(buffer)
 
     def _record_dispatch(self, cmd, state, desc_set, groups, push):
         """Record binding a kernel, its push constants and its dispatch.
@@ -1485,6 +1633,7 @@ class Device:
                             f"the array is on {array.device.info.name}, but the "
                             f"kernel runs on {self.info.name}"
                         )
+                    _settle(array._buffer)
                     buffers.append((array._buffer, _words(array._nbytes)))
                     continue
                 if array is None:
@@ -1551,6 +1700,17 @@ class Device:
 
 
 _DISPATCH_BASE = 0x10  # VK_PIPELINE_CREATE_DISPATCH_BASE_BIT
+
+
+def _sharing(families):
+    """Sharing mode of buffers used by the given queue families."""
+    if len(families) == 1:
+        return {"sharingMode": vk.VK_SHARING_MODE_EXCLUSIVE}
+    return {
+        "sharingMode": vk.VK_SHARING_MODE_CONCURRENT,
+        "queueFamilyIndexCount": len(families),
+        "pQueueFamilyIndices": families,
+    }
 
 
 def _words(nbytes):
@@ -1742,6 +1902,8 @@ class _Slot:
     status: object = None
     kernel: object = None
     used: int = 0
+    stream: object = None
+    stream_value: int = 0
 
 
 @dataclass
@@ -1840,6 +2002,8 @@ class _Buffer:
     view: object
     serial: int = field(default_factory=itertools.count().__next__)
     used: int = 0
+    stream: object = None
+    stream_value: int = 0
 
 
 def _pool_size(nbytes):
@@ -2072,13 +2236,18 @@ class DeviceArray:
             strides=[step * size for step in self._steps],
         )
 
-    def copy_to_device(self, array):
+    def copy_to_device(self, array, stream=None):
         """Overwrite the contents with those of a host array.
 
         Parameters
         ----------
         array : array_like
             Values of the same shape; converted to the element type.
+        stream : Stream, optional
+            Enqueue the copy on a stream and return at once; see `Stream`.
+            The array (if it is not pinned, its converted copy) must not
+            change before the stream has done the copy. Needs a contiguous
+            view.
 
         Returns
         -------
@@ -2093,6 +2262,8 @@ class DeviceArray:
             One that a kernel launched asynchronously raised; see
             `Device.synchronize`.
         """
+        if stream is not None:
+            return self._copy_in_stream(array, stream)
         self.device.wait_for(self._buffer)
         array = narrowing.convert(np.asarray(array), self._stored)
         if array.shape != self.shape:
@@ -2112,7 +2283,7 @@ class DeviceArray:
         self.device._upload(self._buffer, span.view(np.uint8), low * size)
         return self
 
-    def copy_to_host(self, out=None):
+    def copy_to_host(self, out=None, stream=None):
         """Copy the contents to a NumPy array.
 
         Parameters
@@ -2120,6 +2291,9 @@ class DeviceArray:
         out : numpy.ndarray, optional
             C-contiguous array of the same shape and element type to fill.
             A new array is created if omitted.
+        stream : Stream, optional
+            Enqueue the copy on a stream and return at once; `out` holds the
+            data after ``stream.synchronize()``. Needs a contiguous view.
 
         Returns
         -------
@@ -2133,6 +2307,8 @@ class DeviceArray:
             One that a kernel launched asynchronously raised; see
             `Device.synchronize`.
         """
+        if stream is not None:
+            return self._copy_out_stream(out, stream)
         self.device.wait_for(self._buffer)
         if out is None:
             out = np.empty(self.shape, dtype=self.dtype)
@@ -2161,6 +2337,78 @@ class DeviceArray:
             stored = self._elements(span, low)
         if stored is not out:
             out[...] = stored != 0 if self.dtype == np.bool_ else stored
+        return out
+
+    def _stream_check(self, stream):
+        """Check that a copy can go on a stream; its size in bytes."""
+        if stream.device is not self.device:
+            raise ValueError(
+                f"the stream belongs to {stream.device.info.name}, the array to "
+                f"{self.device.info.name}"
+            )
+        if not self.is_contiguous:
+            raise ValueError("copies on a stream need a contiguous view; copy() first")
+        return self.size * self._stored.itemsize
+
+    def _copy_in_stream(self, array, stream):
+        """`copy_to_device` on a stream."""
+        nbytes = self._stream_check(stream)
+        array = np.asarray(array)
+        if array.shape != self.shape:
+            raise ValueError(f"cannot copy shape {array.shape} into {self.shape}")
+        device = self.device
+        source, offset = (None, 0)
+        if array.dtype == self._stored:
+            source, offset = _pinned_place(device, array)
+        keep = []
+        if source is None:
+            data = narrowing.convert(array, self._stored)
+            source = device._acquire(max(nbytes, 4), host=True)
+            source.view[:nbytes] = data.reshape(-1).view(np.uint8)
+            keep.append(source)
+        target, at = self._buffer, self._offset * self._stored.itemsize
+        if nbytes:
+            stream._submit(
+                device.transfer_family,
+                lambda cmd: _copy(cmd, source, target, nbytes, offset, at),
+                [target] + ([] if keep else [source]),
+                keep=keep,
+            )
+        else:
+            for buffer in keep:
+                device._release(buffer)
+        return self
+
+    def _copy_out_stream(self, out, stream):
+        """`copy_to_host` on a stream."""
+        nbytes = self._stream_check(stream)
+        if out is None:
+            out = np.empty(self.shape, dtype=self.dtype)
+        elif out.shape != self.shape or out.dtype != self.dtype:
+            raise ValueError(f"out must be a {self.dtype} array of shape {self.shape}")
+        if not nbytes:
+            return out
+        device = self.device
+        target, offset, after, keep = None, 0, None, []
+        if self._stored == self.dtype:
+            target, offset = _pinned_place(device, out)
+        if target is None:
+            staging = target = device._acquire(max(nbytes, 4), host=True)
+            keep.append(staging)
+            stored, shape, dtype = self._stored, self.shape, self.dtype
+
+            def after():
+                data = staging.view[:nbytes].view(stored).reshape(shape)
+                out[...] = data != 0 if dtype == np.bool_ else data
+
+        source, at = self._buffer, self._offset * self._stored.itemsize
+        stream._submit(
+            device.transfer_family,
+            lambda cmd: _copy(cmd, source, target, nbytes, at, offset),
+            [source] + ([] if keep else [target]),
+            keep=keep,
+            after=after,
+        )
         return out
 
     def _index(self, key):
@@ -2417,7 +2665,7 @@ def _reshaped_steps(shape, steps, new):
     return tuple(out)
 
 
-def to_device(array, device=None):
+def to_device(array, device=None, stream=None):
     """Copy a NumPy array to a device.
 
     Parameters
@@ -2425,14 +2673,20 @@ def to_device(array, device=None):
     array : array_like
         The values.
     device : int, str, DeviceInfo, Device or None
-        The device; see `get_device`. Defaults to the selected device.
+        The device; see `get_device`. Defaults to the selected device, or
+        that of `stream`.
+    stream : Stream, optional
+        Enqueue the copy on a stream and return at once; see `Stream`.
 
     Returns
     -------
     DeviceArray
     """
     array = np.asarray(array)
-    return device_array(array.shape, array.dtype, device).copy_to_device(array)
+    if stream is not None and device is None:
+        device = stream.device
+    target = device_array(array.shape, array.dtype, device)
+    return target.copy_to_device(array, stream=stream)
 
 
 def device_array(shape, dtype=np.float64, device=None):
@@ -2518,6 +2772,344 @@ def get_device(which=None):
 
         device.mode = device.mode._replace(**probes.workarounds(device))
     return _devices[info.index]
+
+
+def _stream_pending(buffer):
+    """Whether a stream may still use a buffer."""
+    stream = buffer.stream
+    return stream is not None and buffer.stream_value > stream._done
+
+
+def _settle(buffer):
+    """Wait until no stream uses a buffer any more."""
+    if _stream_pending(buffer):
+        buffer.stream._wait(buffer.stream_value)
+
+
+@dataclass
+class _StreamOp:
+    """One submission of a stream; see `Stream`.
+
+    Attributes
+    ----------
+    value : int
+        The value of the stream's semaphore once it has finished.
+    cmd, family : object
+        Its command buffer and the queue family it was submitted to.
+    keep : list of _Buffer
+        Staging buffers it uses, pooled when it has finished.
+    after : callable or None
+        Runs when it has finished: the host's part of a copy to the host.
+    checks : list of _Slot
+        Slots whose error status is checked when it has finished.
+    """
+
+    value: int
+    cmd: object
+    family: int
+    keep: list
+    after: object = None
+    checks: list = field(default_factory=list)
+
+
+class Stream:
+    """An ordered sequence of copies and launches on a device.
+
+    Work on different streams can run at the same time: copies to and from
+    the device on a copy engine, kernels on the device, as with streams in
+    ``numba.cuda``. Work on one stream runs in the order it was enqueued.
+    Create streams with `stream`, and pass them as ``stream=`` to
+    `to_device`, `DeviceArray.copy_to_device` and
+    `DeviceArray.copy_to_host`, and as the third element of
+    ``kernel[groups, local_size, stream]`` or as ``forall(n, stream=...)``.
+
+    All of these return at once. Data copied to the host is there after
+    `synchronize`; an exception a kernel raised is raised by it. Copies
+    from and to arrays created with `pinned_array` go directly between that
+    memory and the device; other host arrays go through a staging buffer,
+    and the data of a copy to the host is copied out of it by `synchronize`.
+
+    Each stream has a timeline semaphore: every submission waits for the
+    previous one of its stream, and for the streams that last used its
+    buffers. Copies go to a queue of a transfer-only queue family where the
+    device has one, kernels to a second compute queue where there is one.
+    Work enqueued without a stream waits on the host for streams that still
+    use its buffers, and the other way round.
+
+    Parameters
+    ----------
+    device : Device
+        The device.
+    """
+
+    def __init__(self, device):
+        self.device = device
+        kind = vk.VkSemaphoreTypeCreateInfo(
+            sType=vk.VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO,
+            semaphoreType=vk.VK_SEMAPHORE_TYPE_TIMELINE,
+            initialValue=0,
+        )
+        self._semaphore = vk.vkCreateSemaphore(
+            device.handle,
+            vk.VkSemaphoreCreateInfo(
+                sType=vk.VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO, pNext=kind
+            ),
+            None,
+        )
+        # The value the last submission signals, and one known to be reached.
+        self.value = 0
+        self._done = 0
+        self._ops = []
+        self._spare = {}
+        self._released = []
+        self._errors = []
+        device._streams.add(self)
+        # Only an idle stream can be dropped (see _submit), so its semaphore
+        # is no longer used then.
+        # Submissions without a stream may still wait for the semaphore when
+        # the stream is dropped; the device destroys it once they are done.
+        cleanup = weakref.finalize(
+            self, device._dead_semaphores.append, self._semaphore
+        )
+        # At exit the process lets go of everything; the device may be gone.
+        cleanup.atexit = False
+
+    def __repr__(self):
+        return f"<Stream on {self.device.info.name}>"
+
+    def query(self):
+        """Whether all work enqueued on the stream has finished.
+
+        Returns
+        -------
+        bool
+        """
+        value = _ffi.new("uint64_t[1]")
+        _check(
+            _lib.vkGetSemaphoreCounterValue(self.device.handle, self._semaphore, value)
+        )
+        self._done = max(self._done, value[0])
+        self._retire()
+        return self._done >= self.value
+
+    def synchronize(self):
+        """Wait until all work enqueued on the stream has finished.
+
+        Raises
+        ------
+        Exception
+            The first exception that a kernel launched on the stream raised
+            since the last synchronisation.
+        """
+        self._wait(self.value)
+        if self._errors:
+            (kernel, code), self._errors = self._errors[0], []
+            from numba_vulkan.dispatcher import raise_kernel_error
+
+            raise_kernel_error(kernel.name, code, asynchronous=True)
+
+    @contextlib.contextmanager
+    def auto_synchronize(self):
+        """Wait for the stream when the block ends, as in ``numba.cuda``.
+
+        Yields
+        ------
+        Stream
+            The stream itself.
+        """
+        yield self
+        self.synchronize()
+
+    def _wait(self, value):
+        """Wait until the stream has finished its work up to a value."""
+        if value > self._done:
+            info = vk.VkSemaphoreWaitInfo(
+                sType=vk.VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO,
+                semaphoreCount=1,
+                pSemaphores=[self._semaphore],
+                pValues=[value],
+            )
+            vk.vkWaitSemaphores(self.device.handle, info, 0xFFFFFFFFFFFFFFFF)
+            self._done = value
+        self._retire()
+
+    def _retire(self):
+        """Finish the submissions that the stream has passed."""
+        done = [op for op in self._ops if op.value <= self._done]
+        if not done:
+            return
+        self._ops = [op for op in self._ops if op.value > self._done]
+        device = self.device
+        for op in done:
+            if op.after is not None:
+                op.after()
+            for slot in op.checks:
+                if slot.stream is self and slot.stream_value > op.value:
+                    continue  # used again later; checked then
+                code = int(slot.status.view[:4].view(np.int32)[0])
+                if code:
+                    self._errors.append((slot.kernel, code))
+                    slot.status.view[:4] = 0
+            for buffer in op.keep:
+                device._release(buffer)
+            self._spare.setdefault(op.family, []).append(op.cmd)
+        released, self._released = self._released, []
+        for buffer in released:
+            device._release(buffer)
+        if not self._ops:
+            device._busy_streams.discard(self)
+
+    def _submit(self, family, record, buffers, keep=(), after=None, checks=()):
+        """Enqueue one command buffer on the stream.
+
+        Parameters
+        ----------
+        family : int
+            Queue family: the device's compute or transfer family.
+        record : callable
+            Records the commands into a command buffer.
+        buffers : list of _Buffer
+            The buffers it reads or writes.
+        keep, after, checks
+            See `_StreamOp`.
+        """
+        device = self.device
+        # Work enqueued without a stream that uses the buffers goes first.
+        for buffer in buffers:
+            if buffer.used > device._retired_seq:
+                device._flush()
+                device._retire(
+                    sum(batch.seq <= buffer.used for batch in device._pending)
+                )
+        waits = {}
+        if self.value:
+            waits[self] = self.value
+        # The streams that last used the buffers, also those known to be done
+        # with them, so that the order is stated on the device as well.
+        for buffer in [*buffers, *keep]:
+            other = buffer.stream
+            if other is not None and other is not self:
+                waits[other] = max(waits.get(other, 0), buffer.stream_value)
+        spare = self._spare.get(family)
+        if spare:
+            cmd = spare.pop()
+        else:
+            cmd = vk.vkAllocateCommandBuffers(
+                device.handle,
+                vk.VkCommandBufferAllocateInfo(
+                    sType=vk.VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+                    commandPool=device._pools[family],
+                    level=vk.VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+                    commandBufferCount=1,
+                ),
+            )[0]
+        _check(_lib.vkBeginCommandBuffer(cmd, _BEGIN_INFO))
+        record(cmd)
+        _check(_lib.vkEndCommandBuffer(cmd))
+        self.value += 1
+        semaphores = [stream._semaphore for stream in waits]
+        timeline = vk.VkTimelineSemaphoreSubmitInfo(
+            sType=vk.VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO,
+            waitSemaphoreValueCount=len(waits),
+            pWaitSemaphoreValues=list(waits.values()) or None,
+            signalSemaphoreValueCount=1,
+            pSignalSemaphoreValues=[self.value],
+        )
+        submit = vk.VkSubmitInfo(
+            sType=vk.VK_STRUCTURE_TYPE_SUBMIT_INFO,
+            pNext=timeline,
+            waitSemaphoreCount=len(waits),
+            pWaitSemaphores=semaphores or None,
+            pWaitDstStageMask=[vk.VK_PIPELINE_STAGE_ALL_COMMANDS_BIT] * len(waits)
+            or None,
+            commandBufferCount=1,
+            pCommandBuffers=[cmd],
+            signalSemaphoreCount=1,
+            pSignalSemaphores=[self._semaphore],
+        )
+        queue = (
+            device.stream_queue if family == device.family else device.transfer_queue
+        )
+        vk.vkQueueSubmit(queue, 1, [submit], vk.VK_NULL_HANDLE)
+        for buffer in [*buffers, *keep]:
+            buffer.stream, buffer.stream_value = self, self.value
+        self._ops.append(
+            _StreamOp(self.value, cmd, family, list(keep), after, list(checks))
+        )
+        device._busy_streams.add(self)
+        if len(self._ops) > 64:
+            self.query()  # recycle what has finished
+
+
+def stream(device=None):
+    """Create a `Stream` on a device, like ``numba.cuda.stream``.
+
+    Parameters
+    ----------
+    device : int, str, Device or None
+        The device; the selected one by default.
+
+    Returns
+    -------
+    Stream
+
+    Examples
+    --------
+    >>> s = nv.stream()
+    >>> d = nv.to_device(chunk, stream=s)        # returns at once
+    >>> kernel[groups, 64, s](d, out)            # after the copy, on the device
+    >>> host = out.copy_to_host(stream=s)        # valid after synchronize
+    >>> s.synchronize()
+    """
+    return Stream(device if isinstance(device, Device) else get_device(device))
+
+
+def pinned_array(shape, dtype=np.float64, device=None):
+    """Allocate a host array that a device can copy to and from directly.
+
+    Like ``numba.cuda.pinned_array``: the memory belongs to the device and
+    is mapped into the process, so copies on a `Stream` need no staging
+    buffer and run while the host goes on. Use it for the host side of data
+    streamed in chunks.
+
+    Parameters
+    ----------
+    shape : int or tuple of int
+        Shape of the array.
+    dtype : numpy.dtype
+        Element type.
+    device : int, str, Device or None
+        The device; the selected one by default.
+
+    Returns
+    -------
+    numpy.ndarray
+        Uninitialised, C-contiguous.
+    """
+    device = device if isinstance(device, Device) else get_device(device)
+    dtype = np.dtype(dtype)
+    shape = (shape,) if np.isscalar(shape) else tuple(int(n) for n in shape)
+    nbytes = int(np.prod(shape, dtype=np.int64)) * dtype.itemsize
+    buffer = device._acquire(max(nbytes, 4), host=True)
+    start = buffer.view.ctypes.data
+    # A ctypes object over the mapped memory is the base of every view of
+    # the array, so its finalizer runs once none is left.
+    holder = (ctypes.c_ubyte * max(nbytes, 1)).from_address(start)
+    array = np.frombuffer(holder, dtype=np.uint8, count=nbytes)
+    device._pinned[start] = (start + max(nbytes, 1), buffer)
+    weakref.finalize(holder, device._unpin, start)
+    return array.view(dtype).reshape(shape)
+
+
+def _pinned_place(device, array):
+    """The pinned buffer and offset holding a host array's data, if any."""
+    if not device._pinned or not array.flags.c_contiguous:
+        return None, 0
+    start = array.__array_interface__["data"][0]
+    for base, (end, buffer) in device._pinned.items():
+        if base <= start and start + array.nbytes <= end:
+            return buffer, start - base
+    return None, 0
 
 
 class Event:

@@ -414,6 +414,7 @@ To continue the work, start with the
 - [x] Structured (record) arrays
 - [x] Autotuning of kernel variants (`nv.autotune`)
 - [x] Device-side timing with events (`nv.event`)
+- [x] Streams overlapping copies and kernels (`nv.stream`, `nv.pinned_array`)
 - [x] Scalars as push constants
 - [x] Slices, array views, iteration and reductions
 - [x] Array expressions and local arrays

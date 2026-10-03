@@ -183,6 +183,53 @@ measuring time. Launches with NumPy arrays wait for the kernel, since
 their results have to be copied back. `NUMBA_VULKAN_SYNC=1` makes every
 launch wait. Devices are not thread-safe.
 
+### Streams: overlapping copies and kernels
+
+Data that does not fit on the device at once, or that arrives in pieces,
+is best processed in chunks, and a chunk need not wait for the previous
+one to be copied back: while one is being computed, the next can be
+copied in and the last one out. Streams make this possible, as in
+`numba.cuda`:
+
+```python
+streams = [nv.stream() for _ in range(3)]
+host = nv.pinned_array(n, np.float32)       # host memory the device copies directly
+result = nv.pinned_array(n, np.float32)
+buffers = [(nv.device_array(size, np.float32), nv.device_array(size, np.float32))
+           for _ in streams]
+
+for c in range(n // size):
+    stream = streams[c % 3]
+    dx, dout = buffers[c % 3]
+    part = slice(c * size, (c + 1) * size)
+    dx.copy_to_device(host[part], stream=stream)     # returns at once
+    kernel.forall(size, stream=stream)(dx, dout)     # or kernel[groups, local, stream]
+    dout.copy_to_host(result[part], stream=stream)
+for stream in streams:
+    stream.synchronize()                             # result is complete now
+```
+
+Work on one stream runs in order; work on different streams can run at the
+same time. Copies run on a separate copy engine where the device has one
+(discrete GPUs), kernels on the compute units. `benchmarks/streams.py`
+processes 256 MB in 16 chunks this way: on a TITAN X it took 47 ms instead
+of 103 ms one chunk after another, close to what PCIe moves in and out.
+Integrated GPUs and llvmpipe, whose device memory is the host's, gain
+little or nothing.
+
+Copies to and from arrays created with `nv.pinned_array` go directly
+between that memory and the device. Other host arrays go through a staging
+buffer: data copied to the device is taken when the copy is enqueued, and
+data copied to the host is in the array after `synchronize()`.
+`stream.query()` tells whether a stream has finished, and
+`with stream.auto_synchronize():` waits for it when the block ends.
+Exceptions raised by kernels on a stream are raised by its `synchronize()`.
+
+Launches on a stream take device arrays only and cannot `print`, and only
+contiguous views can be copied on a stream. Work without a stream that uses
+an array that a stream still uses waits for that stream on the host, and the
+other way round, so mixing the two is correct but serialises them.
+
 To measure the time the device spends, rather than the time Python waits,
 record events around the work, as with `numba.cuda`:
 

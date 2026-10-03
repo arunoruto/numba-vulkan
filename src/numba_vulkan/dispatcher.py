@@ -509,7 +509,7 @@ class VulkanDispatcher:
                 stacklevel=5,
             )
 
-    def forall(self, extent, device=None, local_size=None):
+    def forall(self, extent, device=None, local_size=None, stream=None):
         """Bind a dispatch grid, like ``numba.cuda``'s ``kernel.forall``.
 
         Parameters
@@ -523,6 +523,9 @@ class VulkanDispatcher:
         local_size : int or tuple of int, optional
             Workgroup size. By default 64 invocations: ``(64,)``,
             ``(8, 8)`` or ``(4, 4, 4)`` depending on the grid.
+        stream : numba_vulkan.runtime.Stream, optional
+            Enqueue the launch on a stream (device arrays only); see
+            `numba_vulkan.runtime.Stream`.
 
         Returns
         -------
@@ -535,7 +538,9 @@ class VulkanDispatcher:
 
         def launch(*args):
             """Run the kernel over the bound grid with the given arguments."""
-            return self._launch(args, device, extent=extent, local_size=local_size)
+            return self._launch(
+                args, device, extent=extent, local_size=local_size, stream=stream
+            )
 
         return launch
 
@@ -548,7 +553,8 @@ class VulkanDispatcher:
             ``(groups, local_size)`` or ``(groups, local_size, device)``:
             the number of workgroups and the workgroup size, each an int or
             a tuple of up to three ints. Unlike `forall`, the grid is
-            exactly ``groups * local_size`` invocations.
+            exactly ``groups * local_size`` invocations. The third element
+            may also be a `numba_vulkan.runtime.Stream`, as in CUDA.
 
         Returns
         -------
@@ -561,6 +567,9 @@ class VulkanDispatcher:
             )
         groups, local_size = config[:2]
         device = config[2] if len(config) == 3 else None
+        stream = None
+        if isinstance(device, runtime.Stream):
+            stream, device = device, device.device
         groups = (groups,) if np.isscalar(groups) else tuple(groups)
         local = (local_size,) if np.isscalar(local_size) else tuple(local_size)
         if not (1 <= len(groups) <= 3 and 1 <= len(local) <= 3):
@@ -568,7 +577,9 @@ class VulkanDispatcher:
 
         def launch(*args):
             """Run the kernel with the bound configuration."""
-            return self._launch(args, device, groups=groups, local_size=local)
+            return self._launch(
+                args, device, groups=groups, local_size=local, stream=stream
+            )
 
         return launch
 
@@ -586,7 +597,9 @@ class VulkanDispatcher:
             f"{name}[groups, local_size](...)"
         )
 
-    def _launch(self, args, device, extent=None, groups=None, local_size=None):
+    def _launch(
+        self, args, device, extent=None, groups=None, local_size=None, stream=None
+    ):
         """Compile for the given arguments and run on a device.
 
         Parameters
@@ -602,6 +615,8 @@ class VulkanDispatcher:
             Number of workgroups along each axis, instead of `extent`.
         local_size : tuple of int, optional
             Workgroup size.
+        stream : numba_vulkan.runtime.Stream, optional
+            Enqueue on a stream instead.
 
         Raises
         ------
@@ -621,7 +636,12 @@ class VulkanDispatcher:
         booleans as int32, 64-bit types as 32-bit ones where the kernel is
         narrowed, and arrays that are not C-contiguous as contiguous copies.
         """
-        target = runtime.get_device(device)
+        if stream is not None:
+            if device is not None and runtime.get_device(device) is not stream.device:
+                raise ValueError("the stream belongs to another device")
+            target = stream.device
+        else:
+            target = runtime.get_device(device)
         mode = target.mode
         if self.narrow is not None:
             floats = self.narrow in (True, "floats") or (
@@ -707,6 +727,16 @@ class VulkanDispatcher:
         else:
             # Element 0 receives the status of the kernel, the shapes follow.
             meta = np.array([0, *shapes], dtype=np.int32)
+        if stream is not None:
+            if on_host or kernel.print_binding is not None:
+                raise TypeError(
+                    "launches on a stream take device arrays only and cannot print; "
+                    "copy NumPy arrays with to_device(..., stream=...)"
+                )
+            target.launch_stream(stream, kernel, tuple(groups), [meta, *hosts], push)
+            if not _ASYNC:
+                stream.synchronize()
+            return
         if _ASYNC and not on_host and kernel.print_binding is None:
             # Nothing to copy back: do not wait. Exceptions are reported by
             # the next synchronisation.
