@@ -194,3 +194,58 @@ class VulkanExpr(types.Type):
         tuple
         """
         return self.op, self.operands
+
+
+class VulkanRecord(types.Type):
+    """An element of a structured (record) array in a buffer.
+
+    Numba represents a record as a pointer to its bytes, which shaders do
+    not have. A Vulkan record is the binding of its buffer and the position
+    of its first byte there; its fields are read from and written to the
+    buffer's 32-bit words (see `numba_vulkan.vkimpl`). It is the element
+    type of record arrays, so indexing one gives a record.
+
+    Parameters
+    ----------
+    record : numba.types.Record
+        The layout: names, types and offsets of the fields, as the buffer
+        holds them.
+
+    Attributes
+    ----------
+    record : numba.types.Record
+        As given.
+    """
+
+    def __init__(self, record):
+        self.record = record
+        super().__init__(name=f"vkrecord({record})")
+
+    @property
+    def key(self):
+        """Identity of the type: the record layout.
+
+        Returns
+        -------
+        numba.types.Record
+        """
+        return self.record
+
+    @property
+    def size(self):
+        """Bytes per element.
+
+        Returns
+        -------
+        int
+        """
+        return self.record.size
+
+    def field(self, name):
+        """Type and byte offset of a field.
+
+        Returns
+        -------
+        tuple of (numba.types.Type, int)
+        """
+        return self.record.typeof(name), self.record.offset(name)

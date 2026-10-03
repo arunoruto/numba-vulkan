@@ -64,6 +64,9 @@ def convert(values, dtype, check=True):
         would silently change the data.
     """
     dtype = np.dtype(dtype)
+    if values.dtype.names is not None and dtype.names is not None and check:
+        for name, target in zip(values.dtype.names, dtype.names):
+            convert(values[name], dtype.fields[target][0], check)
     if (
         values.dtype.kind in "iu"
         and dtype.kind in "iu"
@@ -356,9 +359,12 @@ def stored_dtype(dtype, mode):
     numpy.dtype
         ``int32`` for booleans (SPIR-V has no storable bool), the 32-bit
         counterpart of a 64-bit type that the mode narrows, and ``dtype``
-        otherwise.
+        otherwise. For a structured dtype, the same with the type of each
+        field narrowed (booleans stay single bytes in records).
     """
     dtype = np.dtype(dtype)
+    if dtype.names is not None:
+        return _stored_record(dtype, mode)
     if dtype == np.bool_:
         return np.dtype(np.int32)
     if mode.floats and dtype == np.float64:
@@ -366,3 +372,25 @@ def stored_dtype(dtype, mode):
     if mode.ints and dtype in (np.int64, np.uint64):
         return np.dtype(np.int32 if dtype == np.int64 else np.uint32)
     return dtype
+
+
+def _stored_record(dtype, mode):
+    """A structured dtype with its 64-bit fields narrowed as `mode` says.
+
+    Returns
+    -------
+    numpy.dtype
+        `dtype` itself if nothing changes; nested and array fields are left
+        as they are, for the typing to reject.
+    """
+    fields, changed = [], False
+    for name in dtype.names:
+        field = dtype.fields[name][0]
+        stored = field
+        if field.names is None and field.subdtype is None and field != np.bool_:
+            stored = stored_dtype(field, mode)
+        changed |= stored != field
+        fields.append((name, stored))
+    if not changed:
+        return dtype
+    return np.dtype(fields, align=dtype.isalignedstruct)

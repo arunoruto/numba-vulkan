@@ -12,6 +12,13 @@ are tracked in {doc}`known_issues`.
   included), `.shape`, `.size`, `.ndim`, `.T` and `len()`
 - views: slices refer to the same data, can be passed to functions and
   written through; `a[1:3] = x` fills a slice from a scalar or an array
+- structured (record) arrays with fields of `bool`, integers, `float32`
+  and `float64`, packed or aligned: `a[i].x`, `a[i]["x"]`, assignment to
+  fields and of whole records, iteration and passing records to functions;
+  no nested or array fields
+- NumPy arrays that are not C-contiguous (strided, Fortran-ordered) are
+  copied to a contiguous array on the host for every call; device arrays
+  and their views are used in place
 - iteration over arrays (`for v in a`, `enumerate`, `zip`)
 - `float16` arrays (stored as halves, computed as `float32`)
 - `print()` of constant strings and numbers

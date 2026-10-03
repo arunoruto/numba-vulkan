@@ -1191,14 +1191,14 @@ class Device:
         buffers, host_buffers = [], []
         for array in arrays:
             if isinstance(array, DeviceArray):
-                buffers.append((array._buffer, max(array._nbytes, 4)))
+                buffers.append((array._buffer, _words(array._nbytes)))
             elif array is None:
                 buffers.append(None)
             else:
                 buffer = self._acquire(max(array.nbytes, 4), host=True)
                 buffer.view[: array.nbytes] = array.reshape(-1).view(np.uint8)
                 host_buffers.append(buffer)
-                buffers.append((buffer, max(array.nbytes, 4)))
+                buffers.append((buffer, _words(array.nbytes)))
         buffers += state.constants
         writes = [
             vk.VkWriteDescriptorSet(
@@ -1469,14 +1469,14 @@ class Device:
                             f"the array is on {array.device.info.name}, but the "
                             f"kernel runs on {self.info.name}"
                         )
-                    buffers.append((array._buffer, max(array._nbytes, 4)))
+                    buffers.append((array._buffer, _words(array._nbytes)))
                     continue
                 if array is None:
                     buffers.append(None)
                     continue
                 buffer = self._acquire(max(array.nbytes, 4), host=True)
                 transient.append(buffer)
-                buffers.append((buffer, max(array.nbytes, 4)))
+                buffers.append((buffer, _words(array.nbytes)))
                 self._upload(buffer, array.reshape(-1).view(np.uint8))
             buffers += state.constants
             if kernel.print_binding is not None:
@@ -1535,6 +1535,16 @@ class Device:
 
 
 _DISPATCH_BASE = 0x10  # VK_PIPELINE_CREATE_DISPATCH_BASE_BIT
+
+
+def _words(nbytes):
+    """Bytes of a buffer that a descriptor covers: whole 32-bit words.
+
+    Record arrays are read and written as words (see vkimpl), and may end
+    in the middle of one. Buffers come from the pool in sizes of at least
+    256 bytes, so the rounded range lies within them.
+    """
+    return max(-(-nbytes // 4) * 4, 4)
 
 
 def _host_arrays(arrays):

@@ -27,6 +27,7 @@ from numba_vulkan.buffers import (
 )
 from numba_vulkan.errors import VulkanUnsupportedError
 from numba_vulkan.vktypes import (
+    VulkanRecord,
     VulkanArray,
     VulkanArrayIterator,
     VulkanDispatcherType,
@@ -415,11 +416,22 @@ def storage_type(context, aryty):
     """
     if getattr(aryty, "half", False):
         return ir.HalfType()
+    if isinstance(aryty.dtype, VulkanRecord):
+        # Only the size matters: records are read as 32-bit words.
+        return ir.ArrayType(ir.IntType(8), aryty.dtype.size)
     return buffer_element_type(context, aryty.dtype)
 
 
 def _load(context, builder, aryty, position, binding):
-    """Read the element at a position of an array's buffer."""
+    """Read the element at a position of an array's buffer.
+
+    For a record array, the element is a record (see `VulkanRecord`).
+    """
+    if isinstance(aryty.dtype, VulkanRecord):
+        proxy = cgutils.create_struct_proxy(aryty.dtype)(context, builder)
+        proxy.binding = i32(binding) if isinstance(binding, int) else binding
+        proxy.position = builder.mul(position, i32(aryty.dtype.size))
+        return proxy._getvalue()
     elem = storage_type(context, aryty)
     val = load_element(builder, binding, elem, position)
     if isinstance(aryty.dtype, types.Boolean):
@@ -430,7 +442,16 @@ def _load(context, builder, aryty, position, binding):
 
 
 def _store(context, builder, aryty, position, val, valty, binding):
-    """Write a value, cast to the element type, at a position of a buffer."""
+    """Write a value, cast to the element type, at a position of a buffer.
+
+    For a record array, the value is a record, copied field by field.
+    """
+    if isinstance(aryty.dtype, VulkanRecord):
+        target = _load(context, builder, aryty, position, binding)
+        for name in aryty.dtype.record.fields:
+            field = _read_field(context, builder, valty, val, name)
+            _write_field(context, builder, aryty.dtype, target, name, field)
+        return
     val = context.cast(builder, val, valty, aryty.dtype)
     elem = storage_type(context, aryty)
     if isinstance(aryty.dtype, types.Boolean):
@@ -1642,3 +1663,181 @@ def lower_subgroup_ballot(context, builder, sig, args):
 def lower_subgroup_ballot_count(context, builder, sig, args):
     """Lower ``subgroup.ballot_count(predicate)``."""
     return _group_call(builder, "ballotcount.red", i32, [_ballot(builder, args[0])])
+
+
+# -- records ------------------------------------------------------------------
+
+
+def _record_place(context, builder, recty, rec):
+    """Binding and first byte of a record."""
+    proxy = cgutils.create_struct_proxy(recty)(context, builder, value=rec)
+    return proxy.binding, proxy.position
+
+
+def _alignment(recty, offset):
+    """Position of a field within its first word, if known when compiling.
+
+    Records whose size is a multiple of four start at word boundaries, so
+    the position of a field in its word follows from its offset.
+
+    Returns
+    -------
+    int or None
+    """
+    return offset % 4 if recty.size % 4 == 0 else None
+
+
+def _read_word(builder, binding, position, size, known):
+    """The `size` (1 to 4) bytes at a byte position, as the low part of an i32.
+
+    Only words that hold some of the bytes are read, so nothing beyond the
+    buffer is touched. The bits above the `size` bytes are undefined.
+    """
+    first = builder.lshr(position, i32(2))
+    low = load_element(builder, binding, i32, first)
+    if known == 0:
+        return low
+    last = builder.lshr(builder.add(position, i32(size - 1)), i32(2))
+    high = load_element(builder, binding, i32, last)
+    if known is not None:
+        shift = i32(8 * known)
+        return builder.or_(
+            builder.lshr(low, shift), builder.shl(high, i32(32 - 8 * known))
+        )
+    shift = builder.shl(builder.and_(position, i32(3)), i32(3))
+    joined = builder.or_(
+        builder.lshr(low, shift), builder.shl(high, builder.sub(i32(32), shift))
+    )
+    # A shift by 32 is undefined; then the bytes are the first word as it is.
+    return builder.select(builder.icmp_unsigned("==", shift, i32(0)), low, joined)
+
+
+def _write_word(builder, binding, position, size, bits, known):
+    """Write the low `size` (1 to 4) bytes of an i32 at a byte position.
+
+    Whole aligned words are stored. Anything else changes only its own
+    bytes, with atomic ``and`` and ``or`` on the words it covers, so that
+    invocations writing neighbouring fields do not undo each other.
+    """
+    first = builder.lshr(position, i32(2))
+    if known == 0 and size == 4:
+        store_element(builder, binding, i32, first, bits)
+        return
+    mask = i32((1 << (8 * size)) - 1)
+    bits = builder.and_(bits, mask)
+    if known is not None:
+        shift = i32(8 * known)
+    else:
+        shift = builder.shl(builder.and_(position, i32(3)), i32(3))
+    ones = i32(0xFFFFFFFF)
+    atomic_element(
+        builder, binding, i32, first, "and", builder.xor(builder.shl(mask, shift), ones)
+    )
+    atomic_element(builder, binding, i32, first, "or", builder.shl(bits, shift))
+    if known is not None and known + size <= 4:
+        return
+    # The bytes that spill into the next word, if any (none for shift 0).
+    last = builder.lshr(builder.add(position, i32(size - 1)), i32(2))
+    back = builder.sub(i32(32), shift)
+    aligned = builder.icmp_unsigned("==", shift, i32(0))
+    spill_mask = builder.select(aligned, i32(0), builder.lshr(mask, back))
+    spill = builder.select(aligned, i32(0), builder.lshr(bits, back))
+    atomic_element(builder, binding, i32, last, "and", builder.xor(spill_mask, ones))
+    atomic_element(builder, binding, i32, last, "or", spill)
+
+
+def _field_place(context, builder, recty, rec, name):
+    """Binding, first byte, type, size and known alignment of a field."""
+    fieldty, offset = recty.field(name)
+    if not isinstance(fieldty, (types.Integer, types.Float, types.Boolean)):
+        raise VulkanUnsupportedError(
+            f"record fields of type {fieldty} are not supported on Vulkan "
+            "(only booleans, integers and floats are)"
+        )
+    if isinstance(fieldty, types.Float) and fieldty.bitwidth == 16:
+        raise VulkanUnsupportedError("float16 record fields are not supported")
+    size = recty.record.dtype.fields[name][0].itemsize
+    binding, position = _record_place(context, builder, recty, rec)
+    position = builder.add(position, i32(offset))
+    return binding, position, fieldty, size, _alignment(recty, offset)
+
+
+def _read_field(context, builder, recty, rec, name):
+    """Read a field of a record.
+
+    Returns
+    -------
+    llvmlite.ir.Value
+        Of the field's type.
+    """
+    binding, position, fieldty, size, known = _field_place(
+        context, builder, recty, rec, name
+    )
+    llty = context.get_value_type(fieldty)
+    if size == 8:
+        halves = ir.Constant(ir.VectorType(i32, 2), None)
+        for k in range(2):
+            at = builder.add(position, i32(4 * k))
+            word = _read_word(builder, binding, at, 4, known)
+            halves = builder.insert_element(halves, word, i32(k))
+        return builder.bitcast(halves, llty)
+    word = _read_word(builder, binding, position, size, known)
+    if size < 4:
+        word = builder.trunc(word, ir.IntType(8 * size))
+    if isinstance(fieldty, types.Boolean):
+        return builder.icmp_unsigned("!=", word, word.type(0))
+    return builder.bitcast(word, llty) if isinstance(fieldty, types.Float) else word
+
+
+def _write_field(context, builder, recty, rec, name, value):
+    """Write a value of the field's type into a field of a record."""
+    binding, position, fieldty, size, known = _field_place(
+        context, builder, recty, rec, name
+    )
+    if size == 8:
+        halves = builder.bitcast(value, ir.VectorType(i32, 2))
+        for k in range(2):
+            at = builder.add(position, i32(4 * k))
+            word = builder.extract_element(halves, i32(k))
+            _write_word(builder, binding, at, 4, word, known)
+        return
+    if isinstance(fieldty, types.Float):
+        value = builder.bitcast(value, i32)
+    elif value.type != i32:
+        value = builder.zext(value, i32)
+    _write_word(builder, binding, position, size, value, known)
+
+
+@registry.lower_getattr_generic(VulkanRecord)
+def lower_record_getattr(context, builder, ty, value, attr):
+    """Lower ``record.field``."""
+    return _read_field(context, builder, ty, value, attr)
+
+
+@registry.lower_setattr_generic(VulkanRecord)
+def lower_record_setattr(context, builder, sig, args, attr):
+    """Lower ``record.field = value``."""
+    recty, valty = sig.args
+    fieldty = recty.field(attr)[0]
+    value = context.cast(builder, args[1], valty, fieldty)
+    _write_field(context, builder, recty, args[0], attr, value)
+
+
+@lower(operator.getitem, VulkanRecord, types.StringLiteral)
+@lower("static_getitem", VulkanRecord, types.StringLiteral)
+def lower_record_getitem(context, builder, sig, args):
+    """Lower ``record["field"]``."""
+    return _read_field(
+        context, builder, sig.args[0], args[0], sig.args[1].literal_value
+    )
+
+
+@lower(operator.setitem, VulkanRecord, types.StringLiteral, types.Any)
+@lower("static_setitem", VulkanRecord, types.StringLiteral, types.Any)
+def lower_record_setitem(context, builder, sig, args):
+    """Lower ``record["field"] = value``."""
+    recty, namety, valty = sig.args
+    name = namety.literal_value
+    value = context.cast(builder, args[2], valty, recty.field(name)[0])
+    _write_field(context, builder, recty, args[0], name, value)
+    return context.get_dummy_value()

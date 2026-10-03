@@ -13,10 +13,11 @@ the entry is removed from this page.
 uv run pytest tests/test_known_issues.py -rxX
 ```
 
-Numbers are not reused: KI-02, KI-03, KI-05, KI-06, KI-07, KI-08, KI-13,
-KI-14, KI-15, KI-24, KI-25, KI-26, KI-30 and KI-31 (NumPy functions on
+Numbers are not reused: KI-02, KI-03, KI-05, KI-06, KI-07, KI-08, KI-09,
+KI-13, KI-14, KI-15, KI-24, KI-25, KI-26, KI-30 and KI-31 (NumPy functions on
 scalars, missing `math` functions, allocating arrays in kernels, global
 constant arrays, complex numbers, `print`, all data copied on every call,
+structured arrays,
 nested loop exits that failed to compile, Numba's compilation repeated in
 every process, one specialisation per buffer binding, libclc linked in
 full for every kernel, libclc depending on an old NixOS release, `gamma`
@@ -68,20 +69,6 @@ time and raises `ValueError`, where NumPy would compute a temporary first.
 
 **Fix:** reductions along an axis can be added as `@overload`s on top of
 expressions, as `arrayfuncs.py` does for whole-array reductions.
-
-### KI-09: structured (record) arrays
-
-**Symptom:** `VulkanUnsupportedError: arrays of Record(...)`.
-
-Supported element types are `bool`, signed and unsigned integers of 8 to 64
-bits, `float16` (stored as halves, computed as `float32`), `float32` and
-`float64`. NumPy arrays that are not C-contiguous (strided,
-Fortran-ordered) work, but are copied to a contiguous array on the host
-for every call; device arrays are always contiguous.
-
-**Fix:** a record would map to a SPIR-V struct in the buffer, with field
-access as member access chains; Numba's record model assumes a data
-pointer, so this needs its own type, like `VulkanArray`.
 
 ### KI-34: slicing a reversed view in kernels with 32-bit integers
 
