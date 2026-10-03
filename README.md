@@ -425,6 +425,7 @@ To continue the work, start with the
 - [x] Shared memory, atomics, barriers and CUDA-style launch configuration
 - [x] Subgroup operations: reductions, scans, votes, ballots, shuffles
 - [x] On-disk caching of compiled kernels
+- [x] `cache=True`: compiled kernels reused without recompiling
 - [x] Testing on Apple (MoltenVK)
 - [ ] Testing on AMD and mobile GPUs
 

@@ -262,6 +262,19 @@ counter Numba appends to function names, and the placeholder numbers of
 constant arrays. The contents of constant arrays are not part of an entry;
 they are taken from the running process.
 
+Numba's type inference and lowering still run in every process, about
+0.1 s per kernel. Kernels decorated with `@nv.jit(cache=True)` are
+therefore also stored whole (the `CompiledKernel`, pickled) in
+`~/.cache/numba-vulkan/functions`, keyed by their bytecode and the name,
+size and modification time of their source file, as Numba's `cache=True`
+does, and in addition by those of every `@nv.jit` function they refer to,
+followed through globals, modules and closures. What a kernel registers in
+the process while it is compiled comes back with it: its exceptions, whose
+status codes are derived from the exception and its location so that they
+are the same in every process, and its `print` formats. As in Numba,
+changes that leave these files alone (the values of global arrays,
+`@overload` implementations elsewhere) are not noticed.
+
 ## Devices without 64-bit types
 
 `float64` and `int64` are optional device features, and Numba uses `int64`

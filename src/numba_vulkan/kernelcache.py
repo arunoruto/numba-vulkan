@@ -11,13 +11,22 @@ global it reads changes the IR and therefore the hash.
 Entries live in ``kernels/`` below `numba_vulkan.libclc.cache_directory`
 and can be deleted at any time. Setting ``NUMBA_VULKAN_CACHE=0`` turns the
 cache off.
+
+Kernels compiled with ``@nv.jit(cache=True)`` are stored whole as well, in
+``functions/``, which skips Numba's pipeline too. They are found by their
+bytecode, the timestamps of their source files and those of the ``@nv.jit``
+functions they call, as with Numba's ``cache=True``; see
+`numba_vulkan.dispatcher.VulkanDispatcher.compile`.
 """
 
 import hashlib
+import inspect
 import json
 import os
+import pickle
 import re
 import shutil
+import sys
 import tempfile
 import zipfile
 from functools import lru_cache
@@ -186,4 +195,119 @@ def store(name, entry):
                 archive.writestr("kernel.ll", entry["llvm_ir"])
         os.replace(fh.name, path)
     except OSError:
+        pass
+
+
+# -- whole kernels (cache=True) ------------------------------------------------
+
+
+def source_stamp(function):
+    """What identifies a Python function's code across processes.
+
+    Parameters
+    ----------
+    function : function
+        A Python function.
+
+    Returns
+    -------
+    bytes or None
+        Its bytecode with the name, size and modification time of its
+        source file, or ``None`` if it has no source file (it was defined
+        interactively or with ``exec``), and cannot be cached.
+    """
+    try:
+        path = inspect.getsourcefile(function)
+    except TypeError:
+        return None
+    if not path or not os.path.isfile(path):
+        return None
+    stat = os.stat(path)
+    head = f"{path} {stat.st_size} {stat.st_mtime_ns} {function.__qualname__}"
+    return head.encode() + _code_digest(function.__code__)
+
+
+def _code_digest(code):
+    """A digest of a code object that is the same in every process.
+
+    ``marshal`` output is not: it marks objects by their reference counts.
+
+    Returns
+    -------
+    bytes
+    """
+    digest = hashlib.sha256(code.co_code)
+    for part in (code.co_names, code.co_varnames, code.co_freevars):
+        digest.update(repr(part).encode())
+    for const in code.co_consts:
+        if inspect.iscode(const):
+            digest.update(_code_digest(const))
+        else:
+            digest.update(f"{type(const).__name__}:{const!r}".encode())
+    return digest.digest()
+
+
+def kernel_key(stamps, *settings):
+    """Name of the cache entry for a compiled kernel.
+
+    Parameters
+    ----------
+    stamps : list of bytes
+        `source_stamp` of the kernel and of every function it calls.
+    *settings
+        Argument types, grid, narrowing mode and options.
+
+    Returns
+    -------
+    str
+        A hexadecimal digest.
+    """
+    digest = hashlib.sha256(f"{fingerprint()} {sys.version}".encode())
+    for stamp in stamps:
+        digest.update(stamp)
+    digest.update(repr(settings).encode())
+    return digest.hexdigest()
+
+
+def _kernel_path(name):
+    """File of a cached kernel."""
+    return os.path.join(
+        libclc.cache_directory(), "functions", name[:2], name + ".pickle"
+    )
+
+
+def load_kernel(name):
+    """Read a cached kernel.
+
+    Returns
+    -------
+    dict or None
+        As passed to `store_kernel`, or ``None`` if there is none or it
+        cannot be read.
+    """
+    try:
+        with open(_kernel_path(name), "rb") as fh:
+            entry = pickle.load(fh)  # written by store_kernel
+    except Exception:  # noqa: BLE001 - any damage means: compile again
+        return None
+    return entry if isinstance(entry, dict) else None
+
+
+def store_kernel(name, entry):
+    """Write a cached kernel; failures to write are ignored.
+
+    Parameters
+    ----------
+    name : str
+        From `kernel_key`.
+    entry : dict
+        The compiled kernel and what it needs from the compiling process.
+    """
+    path = _kernel_path(name)
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with tempfile.NamedTemporaryFile(dir=os.path.dirname(path), delete=False) as fh:
+            pickle.dump(entry, fh)
+        os.replace(fh.name, path)
+    except (OSError, pickle.PicklingError, TypeError, AttributeError):
         pass

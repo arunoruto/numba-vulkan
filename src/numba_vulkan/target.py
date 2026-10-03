@@ -1,5 +1,6 @@
 """The Vulkan target, registered with Numba's target extension API."""
 
+import zlib
 from functools import cached_property
 
 import llvmlite.binding as llvm
@@ -97,11 +98,23 @@ class _ExceptionTable(_MinimalCallHelper):
     Numba numbers exceptions per function. Here all functions share one
     table, so that a code returned by a function called from a kernel
     still identifies its exception when it arrives at the kernel.
+
+    Codes are derived from the exception, its arguments and its location,
+    so that the same ``raise`` has the same code in every process, as
+    kernels loaded from the cache (``cache=True``) need. Exceptions with
+    arguments that cannot be hashed get counted codes instead, which make
+    the kernel uncachable.
+
+    Attributes
+    ----------
+    counted : int
+        Number of exceptions with counted codes so far.
     """
 
     def __init__(self):
         super().__init__()
         self._codes = {}
+        self.counted = 0
 
     def _add_exception(self, exc, exc_args, locinfo):
         """Register an exception and return its status code.
@@ -118,16 +131,59 @@ class _ExceptionTable(_MinimalCallHelper):
         Returns
         -------
         int
-            The status code; the same for equal exceptions.
+            The status code; the same for equal exceptions, also in other
+            processes.
         """
         key = (exc, exc_args, locinfo)
         try:
             known = self._codes.get(key)
         except TypeError:  # unhashable arguments
-            return super()._add_exception(exc, exc_args, locinfo)
+            self.counted += 1
+            code = len(self.exceptions) + 1
+            while code in self.exceptions:
+                code += 1
+            self.exceptions[code] = key
+            return code
         if known is None:
-            known = self._codes[key] = super()._add_exception(exc, exc_args, locinfo)
+            text = repr((exc.__module__, exc.__qualname__, exc_args, locinfo))
+            code = (1 << 20) + zlib.crc32(text.encode()) % (1 << 30)
+            while code in self.exceptions:  # another exception, by chance
+                code += 1
+            self.exceptions[code] = key
+            known = self._codes[key] = code
         return known
+
+    def entries(self):
+        """The exceptions with stable codes, for storing with a kernel.
+
+        Returns
+        -------
+        dict of int to tuple
+        """
+        return {code: key for key, code in self._codes.items()}
+
+    def restore(self, entries):
+        """Register exceptions with the codes a cached kernel uses.
+
+        Parameters
+        ----------
+        entries : dict of int to tuple
+            From `entries`, in the process that compiled the kernel.
+
+        Returns
+        -------
+        bool
+            False if a code stands for another exception here, in which
+            case the kernel must be compiled again.
+        """
+        for code, key in entries.items():
+            current = self.exceptions.get(code)
+            if current is not None and current != key:
+                return False
+        for code, key in entries.items():
+            self.exceptions[code] = key
+            self._codes[key] = code
+        return True
 
 
 exception_table = _ExceptionTable()

@@ -189,6 +189,26 @@ or when something waits. A program that launches work and then computes on
 the CPU for a while should call `nv.synchronize()` only when it needs the
 results; the launches are submitted by then at the latest.
 
+## Caching compiled kernels
+
+Compiled SPIR-V is kept on disk (`~/.cache/numba-vulkan`) and reused by
+later processes; `NUMBA_VULKAN_CACHE=0` turns that off. Numba's own
+compilation still runs in every process, about 0.1 s per kernel, unless
+the kernel asks for more:
+
+```python
+@nv.jit(cache=True)
+def kernel(x, out):
+    ...
+```
+
+Then the whole compiled kernel is stored, and a later process uses it
+without compiling anything. It is compiled again when its source file, or
+the source file of an `@nv.jit` function it calls, changes. As with
+Numba's `cache=True`, changes to the values of global arrays are not
+noticed, and functions defined interactively or with `exec` are not
+cached (with a warning).
+
 ## Functions called from kernels
 
 A function decorated with `@nv.jit` can also be called from a kernel. It may
