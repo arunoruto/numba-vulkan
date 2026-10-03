@@ -1,0 +1,485 @@
+{
+ "schema": 1,
+ "user": "arunoruto",
+ "machine": "tensa",
+ "date": "2026-10-03T12:26:45Z",
+ "git": {
+  "commit": "18a18fb5a0b5c46cc1c777e55d07ddf3846f554e",
+  "branch": "main",
+  "dirty": false
+ },
+ "software": {
+  "python": "3.14.7",
+  "os": "macOS 27.0.1 (arm64)",
+  "numba-vulkan": "0.0.1",
+  "numba": "0.68.0",
+  "llvmlite": "0.50.0",
+  "numpy": "2.4.6",
+  "numba-cuda": null,
+  "vulkan": "1.3.275.1",
+  "libclc": "22.1.8 (nix)",
+  "llc": "22.1.8"
+ },
+ "hardware": {
+  "cpu": {
+   "model": "Apple M3 Pro",
+   "threads": 11
+  },
+  "memory_gib": 18.0,
+  "vulkan": [
+   {
+    "name": "Apple M3 Pro",
+    "kind": "integrated",
+    "vendor_id": "106b",
+    "device_id": "1b000209",
+    "driver": "MoltenVK",
+    "driver_info": "1.4.2",
+    "driver_version": "28a2",
+    "api_version": "1.2.357",
+    "float64": false,
+    "float32_atomic_add": true,
+    "workarounds": []
+   }
+  ],
+  "cuda": []
+ },
+ "settings": {
+  "apps": {
+   "size": 2048,
+   "maxiter": 200,
+   "repeat": 5
+  },
+  "kernels": {
+   "size": 16777216,
+   "matrix": 1024,
+   "repeat": 10
+  },
+  "quick": false,
+  "kernel_cache": false
+ },
+ "results": [
+  {
+   "suite": "apps",
+   "workload": "mandelbrot",
+   "description": "2048x2048, 200 iterations",
+   "backend": "cpu",
+   "device": null,
+   "variant": "1 thread",
+   "label": "numba cpu (1 thread)",
+   "first_s": 0.9185077919973992,
+   "samples_s": [
+    0.5510579159890767,
+    0.5505132919934113,
+    0.5503718330000993,
+    0.5504486249992624,
+    0.5508817499940051
+   ],
+   "check": "100.00% equal"
+  },
+  {
+   "suite": "apps",
+   "workload": "mandelbrot",
+   "description": "2048x2048, 200 iterations",
+   "backend": "cpu",
+   "device": null,
+   "variant": "parallel",
+   "label": "numba cpu (parallel)",
+   "first_s": 0.4115254579955945,
+   "samples_s": [
+    0.15732404199661687,
+    0.15276195800106507,
+    0.15254308299336117,
+    0.15183045899902936,
+    0.15175087501120288
+   ],
+   "check": "100.00% equal"
+  },
+  {
+   "suite": "apps",
+   "workload": "mandelbrot",
+   "description": "2048x2048, 200 iterations",
+   "backend": "vulkan",
+   "device": "Apple M3 Pro",
+   "variant": "numpy arrays",
+   "label": "vulkan: Apple M3 Pro",
+   "first_s": 0.4866940419888124,
+   "samples_s": [
+    0.012152791998232715,
+    0.01108137499250006,
+    0.011532333010109141,
+    0.0107194579904899,
+    0.010682374995667487
+   ],
+   "check": "99.90% equal"
+  },
+  {
+   "suite": "apps",
+   "workload": "mandelbrot",
+   "description": "2048x2048, 200 iterations",
+   "backend": "vulkan",
+   "device": "Apple M3 Pro",
+   "variant": "device arrays",
+   "label": "vulkan: Apple M3 Pro, device arrays",
+   "first_s": 0.010592417005682364,
+   "samples_s": [
+    0.010017209002398886,
+    0.009653041008277796,
+    0.00855904100171756,
+    0.008409540998400189,
+    0.007887291998486035
+   ],
+   "check": "99.90% equal"
+  },
+  {
+   "suite": "apps",
+   "workload": "option",
+   "description": "4,194,304 options",
+   "backend": "cpu",
+   "device": null,
+   "variant": "1 thread",
+   "label": "numba cpu (1 thread)",
+   "first_s": 0.16018062499642838,
+   "samples_s": [
+    0.045549542002845556,
+    0.04558275001181755,
+    0.04558050000923686,
+    0.04554141699918546,
+    0.04583808300958481
+   ],
+   "check": "max err 0.0e+00"
+  },
+  {
+   "suite": "apps",
+   "workload": "option",
+   "description": "4,194,304 options",
+   "backend": "cpu",
+   "device": null,
+   "variant": "parallel",
+   "label": "numba cpu (parallel)",
+   "first_s": 0.2734204580046935,
+   "samples_s": [
+    0.008369040995603427,
+    0.00799195900617633,
+    0.008336790997418575,
+    0.0082592079997994,
+    0.008316959007061087
+   ],
+   "check": "max err 0.0e+00"
+  },
+  {
+   "suite": "apps",
+   "workload": "option",
+   "description": "4,194,304 options",
+   "backend": "vulkan",
+   "device": "Apple M3 Pro",
+   "variant": "numpy arrays",
+   "label": "vulkan: Apple M3 Pro",
+   "first_s": 0.2545928330073366,
+   "samples_s": [
+    0.009948041988536716,
+    0.0065557500056456774,
+    0.006214832988916896,
+    0.0058825000014621764,
+    0.004666582986828871
+   ],
+   "check": "max err 2.5e-07"
+  },
+  {
+   "suite": "apps",
+   "workload": "option",
+   "description": "4,194,304 options",
+   "backend": "vulkan",
+   "device": "Apple M3 Pro",
+   "variant": "device arrays",
+   "label": "vulkan: Apple M3 Pro, device arrays",
+   "first_s": 0.003591790999053046,
+   "samples_s": [
+    0.0027070840005762875,
+    0.0026479160005692393,
+    0.002678707998711616,
+    0.0027368339942768216,
+    0.0026507499860599637
+   ],
+   "check": "max err 2.5e-07"
+  },
+  {
+   "suite": "apps",
+   "workload": "saxpy",
+   "description": "4,194,304 elements",
+   "backend": "cpu",
+   "device": null,
+   "variant": "1 thread",
+   "label": "numba cpu (1 thread)",
+   "first_s": 0.09077795900520869,
+   "samples_s": [
+    0.0016192079929169267,
+    0.0009094169945456088,
+    0.0007169169984990731,
+    0.0006927079957677051,
+    0.0007115410116966814
+   ],
+   "check": "max err 0.0e+00"
+  },
+  {
+   "suite": "apps",
+   "workload": "saxpy",
+   "description": "4,194,304 elements",
+   "backend": "cpu",
+   "device": null,
+   "variant": "parallel",
+   "label": "numba cpu (parallel)",
+   "first_s": 0.18741299999237526,
+   "samples_s": [
+    0.0007847500091884285,
+    0.0007491660071536899,
+    0.0007361249881796539,
+    0.0007449590048054233,
+    0.0008058749954216182
+   ],
+   "check": "max err 0.0e+00"
+  },
+  {
+   "suite": "apps",
+   "workload": "saxpy",
+   "description": "4,194,304 elements",
+   "backend": "vulkan",
+   "device": "Apple M3 Pro",
+   "variant": "numpy arrays",
+   "label": "vulkan: Apple M3 Pro",
+   "first_s": 0.0867617500043707,
+   "samples_s": [
+    0.004549542005406693,
+    0.0031045419891597703,
+    0.002853250000043772,
+    0.0030175419960869476,
+    0.0031667500006733462
+   ],
+   "check": "max err 0.0e+00"
+  },
+  {
+   "suite": "apps",
+   "workload": "saxpy",
+   "description": "4,194,304 elements",
+   "backend": "vulkan",
+   "device": "Apple M3 Pro",
+   "variant": "device arrays",
+   "label": "vulkan: Apple M3 Pro, device arrays",
+   "first_s": 0.00234416700550355,
+   "samples_s": [
+    0.0009152919956250116,
+    0.0008360000065295026,
+    0.0007335420086747035,
+    0.0006427500047720969,
+    0.0006094999989727512
+   ],
+   "check": "max err 0.0e+00"
+  },
+  {
+   "suite": "kernels",
+   "workload": "reduce",
+   "description": "16,777,216 float32 values",
+   "backend": "cpu",
+   "device": null,
+   "variant": "parallel",
+   "label": "numba cpu (parallel)",
+   "first_s": null,
+   "samples_s": [
+    0.002132957990397699,
+    0.0019924579974031076,
+    0.001874458001111634,
+    0.0023395000025629997,
+    0.002206000004662201,
+    0.003235833006328903,
+    0.002353583011426963,
+    0.0018988330120919272,
+    0.0018674580060178414,
+    0.002223291012342088
+   ],
+   "check": "rel. err 2.5e-06"
+  },
+  {
+   "suite": "kernels",
+   "workload": "histogram",
+   "description": "16,777,216 int32 values into 256 bins",
+   "backend": "cpu",
+   "device": null,
+   "variant": "1 thread",
+   "label": "numba cpu (1 thread)",
+   "first_s": null,
+   "samples_s": [
+    0.005764750007074326,
+    0.005522332998225465,
+    0.005517457990208641,
+    0.005527291999896988,
+    0.005520624996279366,
+    0.0055330420000245795,
+    0.0055675000039627776,
+    0.005529333997401409,
+    0.005521958009921946,
+    0.0055198750051204115
+   ],
+   "check": "exact"
+  },
+  {
+   "suite": "kernels",
+   "workload": "matmul",
+   "description": "1024x1024 float32",
+   "backend": "cpu",
+   "device": null,
+   "variant": "parallel",
+   "label": "numba cpu (parallel)",
+   "first_s": null,
+   "samples_s": [
+    0.017440832991269417,
+    0.016617834000498988,
+    0.01649754100071732,
+    0.016049375000875443,
+    0.015539458996499889,
+    0.015988707993528806,
+    0.015235416998621076,
+    0.01737458301067818,
+    0.01514837499416899,
+    0.015543374989647418
+   ],
+   "check": "max rel. err 1.9e-06"
+  },
+  {
+   "suite": "kernels",
+   "workload": "reduce",
+   "description": "16,777,216 float32 values",
+   "backend": "vulkan",
+   "device": "Apple M3 Pro",
+   "variant": "32-bit integers",
+   "label": "vulkan: Apple M3 Pro",
+   "first_s": null,
+   "samples_s": [
+    0.0008534579974366352,
+    0.0007855829899199307,
+    0.0007930419960757717,
+    0.0007328750070882961,
+    0.0007367079961113632,
+    0.0006804169970564544,
+    0.0007690000056754798,
+    0.0007192499906523153,
+    0.0007406670047203079,
+    0.0007389999955194071
+   ],
+   "check": "rel. err 1.1e-07"
+  },
+  {
+   "suite": "kernels",
+   "workload": "histogram",
+   "description": "16,777,216 int32 values into 256 bins",
+   "backend": "vulkan",
+   "device": "Apple M3 Pro",
+   "variant": "32-bit integers",
+   "label": "vulkan: Apple M3 Pro",
+   "first_s": null,
+   "samples_s": [
+    0.001476375007769093,
+    0.0007007499953033403,
+    0.0007395839929813519,
+    0.0007485420064767823,
+    0.0007681249990127981,
+    0.000713790999725461,
+    0.0007001670019235462,
+    0.0006987499946262687,
+    0.0006785419973311946,
+    0.0007073750020936131
+   ],
+   "check": "exact"
+  },
+  {
+   "suite": "kernels",
+   "workload": "matmul",
+   "description": "1024x1024 float32",
+   "backend": "vulkan",
+   "device": "Apple M3 Pro",
+   "variant": "32-bit integers",
+   "label": "vulkan: Apple M3 Pro",
+   "first_s": null,
+   "samples_s": [
+    0.01170700001239311,
+    0.011650500004179776,
+    0.011701833995175548,
+    0.011689791004755534,
+    0.011698417001753114,
+    0.011711832994478755,
+    0.011722500014002435,
+    0.011716458000591956,
+    0.011672124994220212,
+    0.011672416003420949
+   ],
+   "check": "max rel. err 1.9e-06"
+  },
+  {
+   "suite": "kernels",
+   "workload": "reduce",
+   "description": "16,777,216 float32 values",
+   "backend": "vulkan",
+   "device": "Apple M3 Pro",
+   "variant": "64-bit integers",
+   "label": "vulkan: Apple M3 Pro, 64-bit integers",
+   "first_s": null,
+   "samples_s": [
+    0.0012684579996857792,
+    0.0007489580020774156,
+    0.0008065000001806766,
+    0.0007967499986989424,
+    0.0008198750001611188,
+    0.000772083003539592,
+    0.0007221249979920685,
+    0.0007095829932950437,
+    0.0007370419916696846,
+    0.0007428749959217384
+   ],
+   "check": "rel. err 2.3e-07"
+  },
+  {
+   "suite": "kernels",
+   "workload": "histogram",
+   "description": "16,777,216 int32 values into 256 bins",
+   "backend": "vulkan",
+   "device": "Apple M3 Pro",
+   "variant": "64-bit integers",
+   "label": "vulkan: Apple M3 Pro, 64-bit integers",
+   "first_s": null,
+   "samples_s": [
+    0.0014558340044459328,
+    0.0006828749901615083,
+    0.0007625419966643676,
+    0.0007338750001508743,
+    0.000738957998692058,
+    0.000721583011909388,
+    0.000696916991728358,
+    0.0007060000061756,
+    0.0007369590020971373,
+    0.0006960000027902424
+   ],
+   "check": "exact"
+  },
+  {
+   "suite": "kernels",
+   "workload": "matmul",
+   "description": "1024x1024 float32",
+   "backend": "vulkan",
+   "device": "Apple M3 Pro",
+   "variant": "64-bit integers",
+   "label": "vulkan: Apple M3 Pro, 64-bit integers",
+   "first_s": null,
+   "samples_s": [
+    0.012880334004876204,
+    0.01285949999873992,
+    0.01298008399317041,
+    0.012969542003702372,
+    0.012872249993961304,
+    0.012858416012022644,
+    0.012910249992273748,
+    0.01286604200140573,
+    0.012836207999498583,
+    0.012921332992846146
+   ],
+   "check": "max rel. err 1.9e-06"
+  }
+ ]
+}

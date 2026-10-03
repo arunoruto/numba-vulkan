@@ -308,9 +308,9 @@ with data on the device:
 - The compute-bound Mandelbrot set takes 7 to 9 ms, about level with the
   TITAN X; within a full run the GPU shares the chip's power budget with
   the CPU benchmarks before it, which costs up to 20 %.
-- Every launch costs about 0.2 ms, so the small workloads mostly measure
-  that: `saxpy` takes 0.67 ms, about the same as the CPU.
-- The tiled matrix product reaches only about 180 GFLOP/s (11.8 ms), the
+- A launch that waits for its result costs about 0.2 ms, so the small
+  workloads mostly measure that: `saxpy` takes 0.61 ms, about the same as the CPU.
+- The tiled matrix product reaches only about 185 GFLOP/s (11.7 ms), the
   clearest candidate for tuning.
 
 Please add a run from your machine; it takes a few minutes:
