@@ -120,3 +120,15 @@ def test_prepared_libclc_works_without_a_writable_cache(monkeypatch):
         assert "addrspace(2)" not in text
     finally:
         libclc.prepared_bitcode.cache_clear()
+
+
+def test_failures_are_saved_for_reproducing(tmp_path, monkeypatch):
+    monkeypatch.setenv("NUMBA_VULKAN_CACHE_DIR", str(tmp_path))
+    with pytest.raises(SpirvCodegenError) as info:
+        codegen.emit_spirv("this is not LLVM IR")
+    (note,) = info.value.__notes__
+    assert note.startswith("to reproduce: ")
+    saved = tmp_path / "failures"
+    (ll,) = saved.glob("*.ll")
+    assert ll.read_text() == "this is not LLVM IR"
+    assert str(ll) in note

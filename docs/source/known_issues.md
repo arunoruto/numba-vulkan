@@ -118,15 +118,13 @@ driver's.
 ### KI-27: very large functions are not restructured
 
 SPIR-V needs structured control flow, and `structurize.py` rearranges the
-graph to provide it (see {doc}`how_it_works`). Kernels with more than 4000
-basic blocks after inlining are passed on unchanged, because restructuring
-them would take minutes; LLVM's own structurizer then usually fails with
-`SpirvCodegenError`. Random programs with five levels of nested loops and
-conditions stay well below a thousand blocks.
-
-Without `spirv-val` (`NUMBA_VULKAN_VALIDATE=1`), a structurally invalid
-module would reach the driver unchecked. A built-in structural check of the
-generated module would be worth having.
+graph to provide it (see {doc}`how_it_works`). Kernels with more than 20000
+basic blocks after inlining are passed on unchanged; LLVM's own
+structurizer then usually fails with `SpirvCodegenError`, and a module it
+gets wrong is rejected by `codegen.check_structure`. A kernel of 5700
+blocks (sixty random programs with nested loops, inlined one after the
+other) is restructured in about 2 s, but takes some 90 s to compile in all,
+mostly in LLVM.
 
 ## Performance
 
@@ -258,7 +256,12 @@ untested or missing.
 
 The `srem` rewrite and the pointer-select check exist because of behaviour
 observed with NVIDIA driver 580.x and llvmlite 0.50 (LLVM 22). They should
-be re-evaluated when either changes. The benchmark dependency group pins
+be re-evaluated when either changes. For the rewrites that work around LLVM's
+SPIR-V backend, `tests/test_backend_limits.py` hands the backend each
+construct unrewritten and checks that it still fails; after an LLVM upgrade,
+a failing test there names a rewrite that may have become unnecessary. With
+LLVM 22.1, `llvm.fmuladd` no longer needs rewriting for the backend's sake;
+it is still split, so that results do not depend on whether a driver fuses. The benchmark dependency group pins
 `numpy<2.5`, because numba-cuda 0.30.4 does not import with NumPy 2.5.
 
 ### KI-22: lint warnings

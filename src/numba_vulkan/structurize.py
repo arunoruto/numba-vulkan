@@ -56,8 +56,8 @@ _CONDITIONAL = re.compile(rf"\s*br i1 (\S+), label ({_NAME}), label ({_NAME})")
 _PLAIN = re.compile(r"[-a-zA-Z$._][-a-zA-Z$._0-9]*|[0-9]+")
 _DEF = re.compile(rf"^\s*({_NAME}) = ")
 # Beyond this size the graph is handed to LLVM as it is, which then usually
-# reports an error; restructuring it would take minutes.
-_MAX_BLOCKS = 4000
+# reports an error; restructuring it would take a while.
+_MAX_BLOCKS = 20000
 _DEFINE = re.compile(r"^define [^\n]*\{\n(.*?)^\}", re.MULTILINE | re.DOTALL)
 
 
@@ -78,10 +78,15 @@ class _Block:
         -------
         list of str
         """
+        term = tuple(self.term)
+        cached = getattr(self, "_successors", None)
+        if cached is not None and cached[0] == term:
+            return cached[1]
         seen = []
-        for ref in _LABEL_REF.findall(" ".join(self.term)):
+        for ref in _LABEL_REF.findall(" ".join(term)):
             if ref[1:].strip('"') not in seen:
                 seen.append(ref[1:].strip('"'))
+        self._successors = (term, seen)
         return seen
 
     def retarget(self, old, new):
@@ -259,7 +264,43 @@ def _dominates(idom, a, b):
         b = idom[b]
 
 
-def _innermost_loops(names, succs, preds, idom):
+def _intervals(idom, entry):
+    """Number the dominator tree for constant-time dominance queries.
+
+    Parameters
+    ----------
+    idom : dict of str to str
+        Immediate dominators; the root maps to itself.
+    entry : str
+        The root.
+
+    Returns
+    -------
+    spans : dict of str to tuple of int
+        For each node, the positions at which a depth-first walk of the
+        tree enters and leaves it: `a` dominates `b` exactly when the
+        interval of `a` contains that of `b`.
+    children : dict of str to list of str
+        The children of each node in the tree.
+    """
+    children = {}
+    for node, parent in idom.items():
+        if node != parent:
+            children.setdefault(parent, []).append(node)
+    spans, clock, stack = {}, 0, [(entry, False)]
+    while stack:
+        node, leaving = stack.pop()
+        if leaving:
+            spans[node] = (spans[node], clock)
+        else:
+            spans[node] = clock
+            stack.append((node, True))
+            stack.extend((child, False) for child in children.get(node, ()))
+        clock += 1
+    return spans, children
+
+
+def _innermost_loops(names, succs, preds, dominates):
     """Find the innermost natural loop of every block.
 
     Parameters
@@ -268,8 +309,8 @@ def _innermost_loops(names, succs, preds, idom):
         All blocks.
     succs, preds : dict of str to list of str
         The control-flow graph.
-    idom : dict of str to str
-        Immediate dominators.
+    dominates : callable
+        Whether one block dominates another; false for unreachable ones.
 
     Returns
     -------
@@ -283,7 +324,7 @@ def _innermost_loops(names, succs, preds, idom):
     bodies, latches = {}, set()
     for node in names:
         for succ in succs[node]:
-            if node in idom and _dominates(idom, succ, node):  # back edge
+            if dominates(succ, node):  # back edge
                 latches.add(node)
                 body = bodies.setdefault(succ, {succ})
                 work = [node]
@@ -292,12 +333,12 @@ def _innermost_loops(names, succs, preds, idom):
                     if current not in body:
                         body.add(current)
                         work.extend(preds[current])
-    loop_of = {}
-    for node in names:
-        containing = [h for h, body in bodies.items() if node in body]
-        loop_of[node] = (
-            min(containing, key=lambda h: len(bodies[h])) if containing else None
-        )
+    # Natural loops nest, so assigning the largest first leaves each block
+    # with the innermost loop that contains it.
+    loop_of = dict.fromkeys(names)
+    for header in sorted(bodies, key=lambda h: -len(bodies[h])):
+        for node in bodies[header]:
+            loop_of[node] = header
     return loop_of, latches, bodies
 
 
@@ -328,9 +369,10 @@ class _Graph:
         self.ipdom = _dominators(
             _reverse_post_order(rsuccs, self.exit), rpreds, self.exit
         )
+        self.spans, self.children = _intervals(self.idom, self.entry)
 
         self.loop_of, self.latches, self.loops = _innermost_loops(
-            self.names, self.succs, self.preds, self.idom
+            self.names, self.succs, self.preds, self.dominates
         )
         self.headers = {h for h in self.loop_of.values() if h is not None}
         self.depth = {}
@@ -343,8 +385,45 @@ class _Graph:
         Returns
         -------
         bool
+            False if either is unreachable.
         """
-        return _dominates(self.idom, a, b)
+        span_a, span_b = self.spans.get(a), self.spans.get(b)
+        if span_a is None or span_b is None:
+            return False
+        return span_a[0] <= span_b[0] and span_b[1] <= span_a[1]
+
+    def footprint(self, join):
+        """The blocks that resolving an unstructured join reads or changes.
+
+        `_guard_join` works on the blocks on paths from the join's
+        immediate dominator to the join, and changes their terminators and
+        the predecessors of their successors; `_copy_join` works on the
+        blocks the join dominates, which it copies only when there are at
+        most `_COPY_LIMIT`, and on their successors. Dominance among blocks
+        outside these sets stays as it was, so joins with disjoint
+        footprints can be resolved one after the other on one analysis.
+
+        Returns
+        -------
+        set of str
+        """
+        dominator = self.idom[join]
+        heads = {h for h, body in self.loops.items() if join in body}
+        between, work = {dominator, join}, [join]
+        while work:
+            for pred in self.preds[work.pop()]:
+                if pred not in between and self.dominates(dominator, pred):
+                    between.add(pred)
+                    if pred not in heads:
+                        work.append(pred)
+        region, work = {join}, [join]
+        while work and len(region) <= _COPY_LIMIT:
+            for child in self.children.get(work.pop(), ()):
+                region.add(child)
+                work.append(child)
+        if len(region) <= _COPY_LIMIT:
+            between |= region
+        return between | {s for n in between for s in self.succs[n]}
 
 
 def _fresh(blocks, name):
@@ -422,11 +501,18 @@ def _unify_loop_exits(blocks):
     changed, done, counter = False, set(), 0
     while len(blocks) < _MAX_BLOCKS:
         graph = _Graph(blocks)
+        # Loops whose footprints (body, the targets of its exits and the
+        # blocks in front of it) are disjoint are rewritten on one analysis.
+        touched, rewritten = set(), False
         for header in sorted(graph.loops, key=lambda h: len(graph.loops[h])):
             if header in done:
                 continue
-            done.add(header)
             body = graph.loops[header]
+            area = body | set(graph.preds[header])
+            area |= {s for n in body for s in graph.succs[n]}
+            if area & touched:
+                continue
+            done.add(header)
             exits = [
                 (b, t)
                 for b in graph.order
@@ -445,40 +531,52 @@ def _unify_loop_exits(blocks):
                 and all(p in body for p in graph.preds[targets[0]])
             ):
                 continue
-            break
-        else:
+            counter += 1
+            done.add(_rewrite_loop(blocks, graph, header, body, exits, counter))
+            touched |= area
+            rewritten = changed = True
+            if len(blocks) >= _MAX_BLOCKS:
+                break
+        if not rewritten:
             return changed
-
-        counter += 1
-        slot = f"%nv.exit{counter}"
-        blocks[graph.entry].body.insert(0, f"  {slot} = alloca i32")
-        head = _fresh(blocks, f"{header}.head")
-        latch = _fresh(blocks, f"{header}.latch")
-        merge = _fresh(blocks, f"{header}.exit")
-        done.add(head)
-
-        for pred in graph.preds[header]:
-            blocks[pred].retarget(header, latch if pred in body else head)
-        for n, (block, target) in enumerate(dict.fromkeys(exits)):
-            leave = _Block(_fresh(blocks, f"{header}.leave{n}"))
-            leave.body = [f"  store i32 {targets.index(target) + 1}, ptr {slot}"]
-            leave.term = [f"  br label {_ref(latch)}"]
-            blocks[block].retarget(target, leave.name)
-            blocks[leave.name] = leave
-
-        new = blocks[head] = _Block(head)
-        new.body = [f"  store i32 0, ptr {slot}"]
-        new.term = [f"  br label {_ref(header)}"]
-        new = blocks[latch] = _Block(latch)
-        new.body = [
-            f"  {slot}.l = load i32, ptr {slot}",
-            f"  {slot}.d = icmp ne i32 {slot}.l, 0",
-        ]
-        new.term = [f"  br i1 {slot}.d, label {_ref(merge)}, label {_ref(head)}"]
-
-        _dispatch(blocks, merge, slot, targets)
-        changed = True
     return changed
+
+
+def _rewrite_loop(blocks, graph, header, body, exits, counter):
+    """Make one loop leave through its latch; see `_unify_loop_exits`.
+
+    Returns
+    -------
+    str
+        The name of the loop's new header.
+    """
+    targets = list(dict.fromkeys(t for _, t in exits))
+    slot = f"%nv.exit{counter}"
+    blocks[graph.entry].body.insert(0, f"  {slot} = alloca i32")
+    head = _fresh(blocks, f"{header}.head")
+    latch = _fresh(blocks, f"{header}.latch")
+    merge = _fresh(blocks, f"{header}.exit")
+
+    for pred in graph.preds[header]:
+        blocks[pred].retarget(header, latch if pred in body else head)
+    for n, (block, target) in enumerate(dict.fromkeys(exits)):
+        leave = _Block(_fresh(blocks, f"{header}.leave{n}"))
+        leave.body = [f"  store i32 {targets.index(target) + 1}, ptr {slot}"]
+        leave.term = [f"  br label {_ref(latch)}"]
+        blocks[block].retarget(target, leave.name)
+        blocks[leave.name] = leave
+
+    new = blocks[head] = _Block(head)
+    new.body = [f"  store i32 0, ptr {slot}"]
+    new.term = [f"  br label {_ref(header)}"]
+    new = blocks[latch] = _Block(latch)
+    new.body = [
+        f"  {slot}.l = load i32, ptr {slot}",
+        f"  {slot}.d = icmp ne i32 {slot}.l, 0",
+    ]
+    new.term = [f"  br i1 {slot}.d, label {_ref(merge)}, label {_ref(head)}"]
+    _dispatch(blocks, merge, slot, targets)
+    return head
 
 
 def _unstructured_joins(graph):
@@ -509,6 +607,11 @@ def _unstructured_joins(graph):
 # Joins are copied while that stays cheap, and guarded by a flag otherwise.
 _COPY_LIMIT = 6
 _COPY_BUDGET = 200
+# A join that is one tiny block, such as the one that stores the status of
+# a kernel that raised, is copied for up to this many entries: then each
+# place that raises leaves on its own path, which never rejoins.
+_TINY_LINES = 3
+_TINY_ENTRIES = 64
 
 
 def _copy_join(blocks, graph, join, tag):
@@ -520,12 +623,18 @@ def _copy_join(blocks, graph, join, tag):
     -------
     bool
         Whether the join was copied; it is left alone when that would be
-        expensive, would give a loop a second latch, or would copy a
+        expensive (unless it is one block of at most `_TINY_LINES`
+        instructions), would give a loop a second latch, or would copy a
         barrier.
     """
     region = {n for n in graph.order if graph.dominates(join, n)}
     extra = len(region) * (len(graph.preds[join]) - 1)
-    if extra > _COPY_LIMIT or len(blocks) + extra > _COPY_BUDGET:
+    tiny = (
+        region == {join}
+        and len(blocks[join].body) <= _TINY_LINES
+        and len(graph.preds[join]) <= _TINY_ENTRIES
+    )
+    if not tiny and (extra > _COPY_LIMIT or len(blocks) + extra > _COPY_BUDGET):
         return False
     if any(
         s in graph.headers and s not in region for n in region for s in graph.succs[n]
@@ -655,13 +764,22 @@ def _resolve_joins(blocks):
     changed, tag = False, 0
     while len(blocks) < _MAX_BLOCKS:
         graph = _Graph(blocks)
+        # Every join whose footprint no earlier one of this round touched
+        # is resolved on the same analysis (see `_Graph.footprint`).
+        touched, resolved = set(), False
         for join in _unstructured_joins(graph):
+            area = graph.footprint(join)
+            if area & touched:
+                continue
             tag += 1
             if _copy_join(blocks, graph, join, tag) or _guard_join(
                 blocks, graph, join, tag
             ):
+                touched |= area
+                resolved = True
+            if len(blocks) >= _MAX_BLOCKS:
                 break
-        else:
+        if not resolved:
             break
         changed = True
     return changed

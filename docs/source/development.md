@@ -126,8 +126,9 @@ Where a failure comes from tells you where to look:
 | `TypingError` | Numba type inference | `vkdecl.py`, `target.VulkanTypingContext` |
 | `No definition for lowering ...` | lowering lookup | `vkimpl.py`, `mathimpl.py` |
 | `VulkanUnsupportedError` | lowering | the message names the construct |
-| `SpirvCodegenError: LLVM's SPIR-V backend failed` | LLVM | `compiled.llvm_ir`; reduce the kernel |
-| `SpirvCodegenError: generated SPIR-V is invalid` | LLVM or the passes | `spirv-dis` output around the reported line; for control flow, `structurize.py` |
+| `SpirvCodegenError: LLVM's SPIR-V backend failed` | LLVM | the `.ll` file named in the note "to reproduce" (`llc` or a reduced kernel) |
+| `SpirvCodegenError: generated SPIR-V is invalid` | LLVM or the passes | the saved `.spv` with `spirv-dis`, around the reported line; for control flow, `structurize.py` |
+| `SpirvCodegenError: unstructured control flow` | `structurize.py` or LLVM's structurizer | `codegen.check_structure`; the saved `.ll` and `.spv` |
 | `VulkanSupportError` | device features | `runtime.DeviceInfo`, `compiled.capabilities` |
 | `VkError...` or a crash in the driver | driver | run on llvmpipe; validate the shader; run with `NUMBA_VULKAN_DEBUG=2` |
 | `VulkanValidationWarning` | the runtime's use of Vulkan | the message names the call and the rule (a `VUID`) |

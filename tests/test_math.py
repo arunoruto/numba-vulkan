@@ -367,3 +367,41 @@ def test_binary_ufunc_on_scalars(run, name):
 @pytest.mark.parametrize("name", INTEGER_UFUNCS)
 def test_integer_ufunc_on_scalars(run, name):
     _ufunc_case(run, "integer", name, INTEGER_UFUNCS[name])
+
+
+_NAN = np.float32("nan")
+_PAIRS = (
+    np.array([_NAN, 1, _NAN, 2, -0.0, 0.0, -np.inf], np.float32),
+    np.array([1, _NAN, _NAN, 3, 0.0, -0.0, _NAN], np.float32),
+)
+
+
+@pytest.mark.parametrize(
+    "expression",
+    [
+        "min(x, y)",
+        "max(x, y)",
+        "np.minimum(x, y)",
+        "np.maximum(x, y)",
+        "np.fmin(x, y)",
+        "np.fmax(x, y)",
+    ],  # fmt: skip
+)
+def test_min_and_max_keep_nan_and_signed_zero_as_numba_does(run, expression):
+    import numba
+
+    scope = {"np": np, "nv": nv}
+    exec(f"def op(x, y):\n    return {expression}\n", scope)  # noqa: S102
+    want = np.array([numba.njit(scope["op"])(x, y) for x, y in zip(*_PAIRS)])
+    op = nv.jit(scope["op"])
+
+    @nv.jit
+    def kernel(x, y, out):
+        i = nv.global_id(0)
+        if i < x.shape[0]:
+            out[i] = op(x[i], y[i])
+
+    out = np.zeros_like(_PAIRS[0])
+    run(kernel, out.size, *_PAIRS, out)
+    np.testing.assert_array_equal(out, want)  # NaN where NaN is wanted
+    np.testing.assert_array_equal(np.signbit(out), np.signbit(want))

@@ -521,6 +521,7 @@ def compile_kernel(cres, ndim, exact=True, local_size=None):
         push_format=push_format,
         push_sources=push_sources,
         args_pushed=members is not None,
+        exact=exact,
     )
 
 

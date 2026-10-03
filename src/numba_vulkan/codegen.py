@@ -1,6 +1,7 @@
 """Code libraries for the Vulkan target: LLVM IR in, SPIR-V out."""
 
 import atexit
+import hashlib
 import os
 import re
 import select
@@ -338,18 +339,66 @@ def emit_spirv(llvm_ir, exact=True, narrow_ints=False):
     Raises
     ------
     SpirvCodegenError
-        If the backend fails or the module does not pass `check_spirv`.
+        If the backend fails or the module does not pass `check_spirv`. A
+        note names the files the LLVM IR and the module were saved to, to
+        reproduce the failure (see `save_failure`).
     """
-    spirv = fix_barrier_semantics(fix_compare_exchange(emitter.emit(llvm_ir)))
-    spirv = half_storage(spirv)
-    if narrow_ints:
-        spirv = narrow_index_constants(spirv)
-    spirv = storage8_capability(null_int_constants(strip_unused(spirv)))
-    spirv = specialize_local_size(spirv)
-    if exact:
-        spirv = mark_exact(spirv)
-    check_spirv(spirv)
+    spirv = None
+    try:
+        spirv = fix_barrier_semantics(fix_compare_exchange(emitter.emit(llvm_ir)))
+        spirv = half_storage(spirv)
+        if narrow_ints:
+            spirv = narrow_index_constants(spirv)
+        spirv = storage8_capability(null_int_constants(strip_unused(spirv)))
+        spirv = specialize_local_size(spirv)
+        if exact:
+            spirv = mark_exact(spirv)
+        check_spirv(spirv)
+    except SpirvCodegenError as exc:
+        saved = save_failure(llvm_ir, spirv)
+        if saved:
+            exc.add_note(f"to reproduce: {' and '.join(saved)}")
+        raise
     return spirv
+
+
+def save_failure(llvm_ir, spirv=None):
+    """Keep the input of a failed code generation for reproducing it.
+
+    The files are named by a hash of the IR, in the ``failures`` folder of
+    the cache directory (``~/.cache/numba-vulkan``), or of the system's
+    temporary directory if that cannot be written. ``llc -mtriple=`` with
+    the triple in the IR, and ``spirv-val``, reproduce the failure outside
+    of Python.
+
+    Parameters
+    ----------
+    llvm_ir : str
+        The LLVM IR handed to the backend.
+    spirv : bytes, optional
+        The module, if the backend produced one.
+
+    Returns
+    -------
+    list of str
+        The files written; empty if none could be.
+    """
+    name = hashlib.sha256(llvm_ir.encode()).hexdigest()[:16]
+    for directory in (libclc.cache_directory(), tempfile.gettempdir()):
+        folder = os.path.join(directory, "failures")
+        try:
+            os.makedirs(folder, exist_ok=True)
+            written = [os.path.join(folder, f"{name}.ll")]
+            with open(written[0], "w") as fh:
+                fh.write(llvm_ir)
+            if spirv is not None:
+                written.append(os.path.join(folder, f"{name}.spv"))
+                with open(written[1], "wb") as fh:
+                    fh.write(spirv)
+        except OSError:
+            continue
+        return written
+    return []
 
 
 @dataclass
@@ -385,6 +434,9 @@ class CompiledKernel:
         workgroups of the whole grid along an axis.
     args_pushed : bool
         Whether scalars and extents are push constants rather than buffers.
+    exact : bool
+        Whether the kernel was compiled without ``fastmath``, so that floats
+        follow IEEE rules, NaN included (see `preserve_nan`).
     """
 
     name: str
@@ -404,6 +456,7 @@ class CompiledKernel:
     push_format: str = ""
     push_sources: tuple = ()
     args_pushed: bool = False
+    exact: bool = True
 
     @property
     def push_size(self):
@@ -1229,6 +1282,125 @@ def mark_exact(spirv):
     return struct.pack(f"<{len(words)}I", *words)
 
 
+_OP_ENTRY_POINT = 15
+_CAP_NAN_PRESERVE, _MODE_NAN_PRESERVE = 4466, 4461
+
+
+def preserve_nan(spirv, widths):
+    """Require the driver to keep NaN, infinity and signed zero.
+
+    Without the ``SignedZeroInfNanPreserve`` execution mode, a Vulkan
+    driver may compile as if no float were NaN or infinite, and NVIDIA's
+    does: it turns ``y < x ? y : x`` (Python's ``min``) into an instruction
+    that ignores NaN. Kernels compiled without ``fastmath`` therefore ask
+    for these values to be kept, for the float widths they compute with.
+
+    Parameters
+    ----------
+    spirv : bytes
+        A SPIR-V module with one entry point.
+    widths : tuple of int
+        The float widths the device can keep them for.
+
+    Returns
+    -------
+    bytes
+        The module with the capability and an execution mode per width it
+        uses; `spirv` itself if there is none.
+    """
+    header, instructions = _instructions(spirv)
+    used = {
+        i[2] for i in instructions if i[0] & 0xFFFF == _OP_TYPE_FLOAT and i[2] != 16
+    }
+    wanted = sorted(used & set(widths))
+    if not wanted:
+        return spirv
+    entry = next(i[2] for i in instructions if i[0] & 0xFFFF == _OP_ENTRY_POINT)
+    out, added = [], False
+    for inst in instructions:
+        out.append(inst)
+        opcode = inst[0] & 0xFFFF
+        if opcode == _OP_CAPABILITY and not added:
+            out.append(((2 << 16) | _OP_CAPABILITY, _CAP_NAN_PRESERVE))
+            added = True
+        elif opcode == _OP_ENTRY_POINT:
+            for width in wanted:
+                out.append(
+                    ((4 << 16) | _OP_EXECUTION_MODE, entry, _MODE_NAN_PRESERVE, width)
+                )
+    return _assemble(header, out)
+
+
+_OP_FUNCTION, _OP_FUNCTION_END, _OP_LABEL = 54, 56, 248
+_OP_LOOP_MERGE, _OP_SELECTION_MERGE = 246, 247
+_OP_BRANCH, _OP_BRANCH_CONDITIONAL, _OP_SWITCH = 249, 250, 251
+
+
+def check_structure(spirv):
+    """Check the rules of structured control flow that drivers rely on.
+
+    A cheap subset of what ``spirv-val`` checks, applied to every module,
+    so that a graph that neither `numba_vulkan.structurize` nor LLVM's
+    backend brought into shape is caught here rather than by a driver:
+
+    * a conditional branch or switch is preceded by a merge instruction,
+      unless it leaves or continues a loop;
+    * a branch back to an earlier block goes to a loop header;
+    * no block is the merge block of two headers.
+
+    Parameters
+    ----------
+    spirv : bytes
+        A SPIR-V module.
+
+    Raises
+    ------
+    SpirvCodegenError
+        If a rule is broken.
+    """
+    _, instructions = _instructions(spirv)
+    position, headers, merges, exits = {}, set(), {}, set()
+    for inst in instructions:
+        opcode = inst[0] & 0xFFFF
+        if opcode == _OP_LABEL:
+            position[inst[1]] = len(position)
+        elif opcode in (_OP_LOOP_MERGE, _OP_SELECTION_MERGE):
+            if inst[1] in merges:
+                raise SpirvCodegenError(
+                    "unstructured control flow: a block is the merge block of "
+                    "two constructs"
+                )
+            merges[inst[1]] = opcode
+            if opcode == _OP_LOOP_MERGE:
+                exits.update(inst[1:3])  # merge block and continue target
+    block, previous = None, None
+    for inst in instructions:
+        opcode = inst[0] & 0xFFFF
+        if opcode == _OP_LABEL:
+            block = inst[1]
+        elif opcode == _OP_LOOP_MERGE:
+            headers.add(block)
+        if opcode in (_OP_BRANCH, _OP_BRANCH_CONDITIONAL, _OP_SWITCH):
+            if opcode == _OP_BRANCH:
+                targets = inst[1:2]
+            elif opcode == _OP_BRANCH_CONDITIONAL:
+                targets = inst[2:4]
+            else:
+                targets = inst[2:3] + inst[4::2]
+            merged = previous in (_OP_LOOP_MERGE, _OP_SELECTION_MERGE)
+            if opcode != _OP_BRANCH and not merged and not exits & set(targets):
+                raise SpirvCodegenError(
+                    "unstructured control flow: a branch without a merge block"
+                )
+            for target in targets:
+                if position[target] <= position[block] and target not in headers:
+                    raise SpirvCodegenError(
+                        "unstructured control flow: a branch back to a block "
+                        "that is no loop header"
+                    )
+        previous = opcode
+
+
 def check_spirv(spirv):
     """Reject modules that are known to crash or confuse drivers.
 
@@ -1241,9 +1413,11 @@ def check_spirv(spirv):
     ------
     SpirvCodegenError
         If the module selects between pointers (invalid without the
-        VariablePointers capability), or, with ``NUMBA_VULKAN_VALIDATE=1``
+        VariablePointers capability), breaks a rule of structured control
+        flow (see `check_structure`), or, with ``NUMBA_VULKAN_VALIDATE=1``
         in the environment, if ``spirv-val`` rejects it.
     """
+    check_structure(spirv)
     words = struct.unpack(f"<{len(spirv) // 4}I", spirv)
     pointer_types, pos = set(), 5
     while pos < len(words):
