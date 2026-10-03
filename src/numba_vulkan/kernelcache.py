@@ -22,7 +22,6 @@ functions they call, as with Numba's ``cache=True``; see
 import hashlib
 import inspect
 import json
-import marshal
 import os
 import pickle
 import re
@@ -225,7 +224,27 @@ def source_stamp(function):
         return None
     stat = os.stat(path)
     head = f"{path} {stat.st_size} {stat.st_mtime_ns} {function.__qualname__}"
-    return head.encode() + marshal.dumps(function.__code__)
+    return head.encode() + _code_digest(function.__code__)
+
+
+def _code_digest(code):
+    """A digest of a code object that is the same in every process.
+
+    ``marshal`` output is not: it marks objects by their reference counts.
+
+    Returns
+    -------
+    bytes
+    """
+    digest = hashlib.sha256(code.co_code)
+    for part in (code.co_names, code.co_varnames, code.co_freevars):
+        digest.update(repr(part).encode())
+    for const in code.co_consts:
+        if inspect.iscode(const):
+            digest.update(_code_digest(const))
+        else:
+            digest.update(f"{type(const).__name__}:{const!r}".encode())
+    return digest.digest()
 
 
 def kernel_key(stamps, *settings):

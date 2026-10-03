@@ -80,6 +80,8 @@ print(json.dumps({"out": out.tolist(), "compiled": compiled, "error": error,
 def _run(directory, cache):
     """Run the script in a fresh process; its report and printed lines."""
     env = dict(os.environ, NUMBA_VULKAN_CACHE="1", NUMBA_VULKAN_CACHE_DIR=str(cache))
+    # Python would reuse stale bytecode of a file rewritten within a second.
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
     env["PYTHONPATH"] = os.pathsep.join([str(directory), env.get("PYTHONPATH", "")])
     proc = subprocess.run(
         [sys.executable, "-c", RUN],
@@ -118,7 +120,8 @@ def test_later_processes_skip_compiling(project, tmp_path_factory):
     second, printed = _run(project, cache)
     stored = sorted(p.name for p in cache.glob("functions/*/*"))
     # nothing went through Numba's pipeline
-    assert second["compiled"] == [], (stored, first["keys"], second["keys"])
+    same = [(a[0], a[1] == b[1]) for a, b in zip(first["keys"], second["keys"])]
+    assert second["compiled"] == [], (len(stored), same)
     assert second["out"] == _want(2)
     # Exceptions and print formats come back with the kernel.
     assert second["error"] == first["error"]
