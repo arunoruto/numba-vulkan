@@ -20,6 +20,8 @@ from numba.core.codegen import Codegen, CodeLibrary
 
 from numba_vulkan import _emit, kernelcache, libclc, narrowing
 from numba_vulkan.buffers import (
+    PUSH_BINDING,
+    arg_binding,
     constant_data,
     constant_order,
     expand_buffer_access,
@@ -343,6 +345,7 @@ def emit_spirv(llvm_ir, exact=True, narrow_ints=False):
     if narrow_ints:
         spirv = narrow_index_constants(spirv)
     spirv = storage8_capability(null_int_constants(strip_unused(spirv)))
+    spirv = specialize_local_size(spirv)
     if exact:
         spirv = mark_exact(spirv)
     check_spirv(spirv)
@@ -372,6 +375,16 @@ class CompiledKernel:
         ``"int64"``, ``"int16"`` and ``"int8"``.
     written_bindings : set of int
         Bindings whose buffers the shader stores to.
+    push_format : str
+        `struct` format of the push-constant block; empty if the kernel
+        has none and takes its scalars and extents from buffers.
+    push_sources : tuple of tuple
+        What each value in the block is: ``("arg", index)`` for a scalar
+        argument, ``("shape", k)`` for the `k`-th extent of all array
+        arguments together, ``("groups", axis)`` for the number of
+        workgroups of the whole grid along an axis.
+    args_pushed : bool
+        Whether scalars and extents are push constants rather than buffers.
     """
 
     name: str
@@ -388,6 +401,29 @@ class CompiledKernel:
     constants: dict = field(default_factory=dict)
     mode: narrowing.Mode = narrowing.Mode()
     narrowed: narrowing.Mode = narrowing.Mode()
+    push_format: str = ""
+    push_sources: tuple = ()
+    args_pushed: bool = False
+
+    @property
+    def push_size(self):
+        """Size of the push-constant block in bytes; 0 without one.
+
+        Returns
+        -------
+        int
+        """
+        return struct.calcsize(self.push_format) if self.push_format else 0
+
+    @property
+    def unbound(self):
+        """Bindings of arguments that are passed as push constants instead.
+
+        Returns
+        -------
+        set of int
+        """
+        return {arg_binding(s[1]) for s in self.push_sources if s[0] == "arg"}
 
     @property
     def num_bindings(self):
@@ -405,6 +441,53 @@ class CompiledKernel:
             + len(self.constants)
             + (self.print_binding is not None)
         )
+
+
+_SC_PUSH_CONSTANT, _DECORATION_OFFSET, _OP_MEMBER_DECORATE = 9, 35, 72
+
+
+def push_constant_layout(spirv):
+    """Offsets and sizes of the members of a module's push-constant block.
+
+    Parameters
+    ----------
+    spirv : bytes
+        A SPIR-V module.
+
+    Returns
+    -------
+    list of tuple of int
+        ``(offset, size)`` in bytes per member, in member order; empty if
+        the module declares no push constants.
+
+    Raises
+    ------
+    SpirvCodegenError
+        If a member is not a scalar or has no offset.
+    """
+    _, instructions = _instructions(spirv)
+    widths, pointers, block = {}, {}, None
+    offsets, structs = {}, {}
+    for inst in instructions:
+        opcode = inst[0] & 0xFFFF
+        if opcode in (_OP_TYPE_INT, _OP_TYPE_FLOAT):
+            widths[inst[1]] = inst[2] // 8
+        elif opcode == _OP_TYPE_STRUCT:
+            structs[inst[1]] = inst[2:]
+        elif opcode == _OP_TYPE_POINTER:
+            pointers[inst[1]] = (inst[2], inst[3])
+        elif opcode == _OP_VARIABLE and inst[3] == _SC_PUSH_CONSTANT:
+            block = pointers[inst[1]][1]
+        elif opcode == _OP_MEMBER_DECORATE and inst[3] == _DECORATION_OFFSET:
+            offsets[inst[1], inst[2]] = inst[4]
+    if block is None:
+        return []
+    layout = []
+    for k, member in enumerate(structs[block]):
+        if member not in widths or (block, k) not in offsets:
+            raise SpirvCodegenError(f"push constant {k} is not a scalar with an offset")
+        layout.append((offsets[block, k], widths[member]))
+    return layout
 
 
 def spirv_capabilities(spirv):
@@ -737,6 +820,143 @@ def storage8_capability(spirv):
     )
     out = list(instructions)
     out.insert(first + 1, ((2 << 16) | _OP_CAPABILITY, _CAP_STORAGE8))
+    return _assemble(header, out)
+
+
+_OP_NAME, _OP_EXECUTION_MODE, _MODE_LOCAL_SIZE = 5, 16, 17
+_OP_CONSTANT_COMPOSITE, _OP_SPEC_CONSTANT, _OP_SPEC_CONSTANT_COMPOSITE = 44, 50, 51
+_DECORATION_SPEC_ID, _DECORATION_BUILTIN, _BUILTIN_WORKGROUP_SIZE = 1, 11, 25
+# Private array the workgroup size is read from; see `local_size_array`.
+LOCAL_SIZE_ARRAY = "nv.local_size"
+
+
+def _string(words):
+    """Decode a nul-terminated SPIR-V string literal."""
+    raw = struct.pack(f"<{len(words)}I", *words)
+    return raw[: raw.index(0)].decode()
+
+
+def specialize_local_size(spirv):
+    """Make the workgroup size of a kernel a specialization constant.
+
+    One module then serves every workgroup size: the runtime sets
+    specialization constants 0, 1 and 2 to its extents when it creates the
+    pipeline. Their defaults are the size the module was compiled with.
+    The size is declared as clspv declares it: three ``OpSpecConstant``
+    combined into an ``OpSpecConstantComposite`` decorated ``BuiltIn
+    WorkgroupSize``, which takes precedence over the ``LocalSize``
+    execution mode. Reads of the size in the kernel come from the private
+    array `LOCAL_SIZE_ARRAY`, whose initializer becomes a composite of the
+    same constants.
+
+    Parameters
+    ----------
+    spirv : bytes
+        A SPIR-V module with one ``LocalSize`` execution mode.
+
+    Returns
+    -------
+    bytes
+        The module with the constants added.
+    """
+    header, instructions = _instructions(spirv)
+    local = next(
+        i[3:6]
+        for i in instructions
+        if i[0] & 0xFFFF == _OP_EXECUTION_MODE and i[2] == _MODE_LOCAL_SIZE
+    )
+    named = {
+        i[1]
+        for i in instructions
+        if i[0] & 0xFFFF == _OP_NAME and _string(i[2:]).startswith(LOCAL_SIZE_ARRAY)
+    }
+    initializers = {
+        i[4]
+        for i in instructions
+        if i[0] & 0xFFFF == _OP_VARIABLE and i[2] in named and len(i) > 4
+    }
+
+    def new_id():
+        """A fresh result id."""
+        header[3] += 1
+        return header[3] - 1
+
+    uint = next(
+        (
+            i[1]
+            for i in instructions
+            if i[0] & 0xFFFF == _OP_TYPE_INT and i[2] == 32 and i[3] == 0
+        ),
+        None,
+    )
+    vector = next(
+        (
+            i[1]
+            for i in instructions
+            if i[0] & 0xFFFF == _OP_TYPE_VECTOR and i[2] == uint and i[3] == 3
+        ),
+        None,
+    )
+    extents, composite = [new_id(), new_id(), new_id()], new_id()
+    missing = []
+    if uint is None:
+        uint = new_id()
+        missing.append(((4 << 16) | _OP_TYPE_INT, uint, 32, 0))
+    pending = [
+        ((4 << 16) | _OP_SPEC_CONSTANT, uint, result, value)
+        for result, value in zip(extents, local)
+    ]
+    if vector is None:
+        vector = new_id()
+        pending.insert(0, ((4 << 16) | _OP_TYPE_VECTOR, vector, uint, 3))
+    pending.append(
+        ((6 << 16) | _OP_SPEC_CONSTANT_COMPOSITE, vector, composite, *extents)
+    )
+    decorations = [
+        ((4 << 16) | _OP_DECORATE, result, _DECORATION_SPEC_ID, k)
+        for k, result in enumerate(extents)
+    ]
+    decorations.append(
+        (
+            (4 << 16) | _OP_DECORATE,
+            composite,
+            _DECORATION_BUILTIN,
+            _BUILTIN_WORKGROUP_SIZE,
+        )
+    )
+    out, defined = [], set()
+
+    def emit(inst):
+        """Append an instruction, then whatever new ones it makes possible."""
+        out.append(inst)
+        if inst[0] & 0xFFFF in _FIRST_DECLARATIONS and len(inst) > 2:
+            defined.add(inst[1] if inst[0] & 0xFFFF in range(19, 40) else inst[2])
+        # Types and constants interleave (array types take constant
+        # lengths), so each new one goes right after what it uses.
+        while pending:
+            opcode = pending[0][0] & 0xFFFF
+            if opcode == _OP_TYPE_VECTOR:
+                uses = {pending[0][2]}  # the component type
+            else:
+                uses = {pending[0][1]}  # the type
+            if opcode == _OP_SPEC_CONSTANT_COMPOSITE:
+                uses.update(pending[0][3:])
+            if not uses <= defined:
+                break
+            emit(pending.pop(0))
+
+    for inst in instructions:
+        opcode = inst[0] & 0xFFFF
+        if decorations and opcode in _FIRST_DECLARATIONS:
+            out.extend(decorations)  # annotations end where declarations begin
+            decorations = []
+            for definition in missing:
+                emit(definition)
+        if opcode == _OP_CONSTANT_COMPOSITE and inst[2] in initializers:
+            inst = ((6 << 16) | _OP_SPEC_CONSTANT_COMPOSITE, inst[1], inst[2], *extents)
+        emit(inst)
+    if pending:
+        raise SpirvCodegenError("could not declare the workgroup size")
     return _assemble(header, out)
 
 
@@ -1109,6 +1329,85 @@ _LOCAL_SIZE = re.compile(
 )
 
 
+_NUM_GROUPS = re.compile(
+    r'^(\s*%\S+) = (?:tail )?call i32 @"?numba_vulkan\.num_groups"?\(i32 (\d)\).*$',
+    re.MULTILINE,
+)
+
+
+def num_groups_members(text, first):
+    """Read the size of the grid from the push-constant block.
+
+    Parameters
+    ----------
+    text : str
+        Textual LLVM IR after optimisation, with ``numba_vulkan.num_groups``
+        placeholder calls.
+    first : int
+        Number of the first member to use; the size takes three, after
+        the arguments.
+
+    Returns
+    -------
+    text : str
+        The IR, with the calls turned into placeholder loads from the block.
+    used : bool
+        Whether the kernel reads the size of the grid.
+    """
+    text, count = _NUM_GROUPS.subn(
+        lambda m: (
+            f"{m.group(1)} = call i32 @numba_vulkan.load.i32"
+            f"(i32 {PUSH_BINDING}, i32 {first + int(m.group(2))})"
+        ),
+        text,
+    )
+    return text, count > 0
+
+
+def local_size_array(text, local):
+    """Read the workgroup size from a private array instead of placeholders.
+
+    ``numba_vulkan.local_size`` calls stand for the workgroup size until
+    optimisation is over, so that LLVM does not fold it into the code. They
+    become loads from `LOCAL_SIZE_ARRAY`, whose initializer
+    `specialize_local_size` turns into specialization constants.
+
+    Parameters
+    ----------
+    text : str
+        Textual LLVM IR after optimisation.
+    local : tuple of int
+        The workgroup size the module is compiled with, the default of the
+        constants.
+
+    Returns
+    -------
+    str
+        The rewritten IR; `text` itself if it does not read the size.
+    """
+    if "numba_vulkan.local_size" not in text:
+        return text
+    counter = iter(range(1 << 30))
+
+    def load(match):
+        """Replacement text for one placeholder call."""
+        n = next(counter)
+        result = match.group(1).lstrip()
+        indent = match.group(1)[: -len(result)]
+        return (
+            f"{indent}%nv.ls{n} = getelementptr inbounds [3 x i32], "
+            f"ptr addrspace(10) @{LOCAL_SIZE_ARRAY}, i32 0, i32 {match.group(2)}\n"
+            f"{indent}{result} = load i32, ptr addrspace(10) %nv.ls{n}"
+        )
+
+    text = _LOCAL_SIZE.sub(load, text)
+    values = ", ".join(f"i32 {n}" for n in local)
+    return (
+        text
+        + f"\n@{LOCAL_SIZE_ARRAY} = internal addrspace(10) global [3 x i32] [{values}]\n"
+    )
+
+
 class VulkanCodeLibrary(CodeLibrary):
     """Holds LLVM IR modules; only kernel libraries are turned into SPIR-V.
 
@@ -1146,6 +1445,8 @@ class VulkanCodeLibrary(CodeLibrary):
         self.mode = self.narrowed = narrowing.Mode()
         # Workgroup size of the kernel this library holds the entry point of.
         self.local_size = None
+        # LLVM types of its push constants, before narrowing.
+        self.push_types = []
 
     def add_ir_module(self, module):
         """Add a module to the library.
@@ -1293,15 +1594,6 @@ class VulkanCodeLibrary(CodeLibrary):
                     linked = parsed
                 else:
                     linked.link_in(parsed)
-        if self.local_size is not None and "numba_vulkan.local_size" in str(linked):
-            linked = llvm.parse_assembly(
-                _LOCAL_SIZE.sub(
-                    lambda m: (
-                        f"{m.group(1)} = add i32 0, {self.local_size[int(m.group(2))]}"
-                    ),
-                    str(linked),
-                )
-            )
         machine = target_machine()
         pto = llvm.create_pipeline_tuning_options(speed_level=0)
         builder = llvm.create_pass_builder(machine, pto)
@@ -1365,7 +1657,19 @@ class VulkanCodeLibrary(CodeLibrary):
         if constant_order(text):
             # A placeholder binding in a shader crashes drivers.
             raise SpirvCodegenError("a constant array was not given a binding")
-        text, self.written_bindings, self.read_bindings = expand_buffer_access(text)
+        if self.local_size is not None:
+            text = local_size_array(text, self.local_size)
+        text, grid = num_groups_members(text, len(self.push_types))
+        push_types = [
+            {
+                "double": "float" if self.mode.floats else "double",
+                "i64": "i32" if self.mode.ints else "i64",
+            }.get(ty, ty)
+            for ty in self.push_types
+        ] + ["i32"] * (3 * grid)
+        text, self.written_bindings, self.read_bindings = expand_buffer_access(
+            text, push_types
+        )
         linked = llvm.parse_assembly(text)
         linked.verify()
         self._linked = linked

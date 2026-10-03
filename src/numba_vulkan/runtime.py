@@ -3,6 +3,7 @@
 import itertools
 import math
 import os
+import struct
 import sys
 import warnings
 import weakref
@@ -25,7 +26,7 @@ except OSError as exc:  # the `vulkan` package could not open the loader
     raise ImportError(f"numba-vulkan needs a Vulkan loader: {exc}.{hint}") from exc
 
 from numba_vulkan import narrowing
-from numba_vulkan.buffers import print_formats
+from numba_vulkan.buffers import META_BINDING, print_formats
 from numba_vulkan.errors import VulkanSupportError, VulkanValidationWarning
 
 _DEVICE_TYPES = {
@@ -542,11 +543,17 @@ class Device:
         }
         # What the kernel command buffer currently holds: (pipeline, groups).
         self._recorded = None
-        # Asynchronous launches not known to have finished, oldest first,
-        # and buffers released while they may still use them.
+        # Asynchronous launches: the command buffer being recorded, those
+        # submitted but not known to have finished (oldest first), and
+        # finished ones for reuse. Each is numbered; buffers released while
+        # launches may still use them wait for the batch of that number.
+        self._open = None
         self._pending = []
+        self._spare = []
+        self._seq = self._retired_seq = 0
         self._deferred = []
-        self._submitted = self._retired = 0
+        # Exceptions of kernels launched asynchronously, as (kernel, code).
+        self._errors = []
         self._pipelines = {}
         # 64-bit types this device cannot use and kernels must do without.
         # How kernels are compiled for this device unless they say otherwise.
@@ -637,6 +644,7 @@ class Device:
                 stageFlags=vk.VK_SHADER_STAGE_COMPUTE_BIT,
             )
             for i in range(kernel.num_bindings)
+            if i not in kernel.unbound
         ]
         set_layout = vk.vkCreateDescriptorSetLayout(
             dev,
@@ -647,20 +655,42 @@ class Device:
             ),
             None,
         )
+        ranges = [
+            vk.VkPushConstantRange(
+                stageFlags=vk.VK_SHADER_STAGE_COMPUTE_BIT,
+                offset=0,
+                size=kernel.push_size,
+            )
+        ]
         layout = vk.vkCreatePipelineLayout(
             dev,
             vk.VkPipelineLayoutCreateInfo(
                 sType=vk.VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
                 setLayoutCount=1,
                 pSetLayouts=[set_layout],
+                pushConstantRangeCount=1 if kernel.push_size else 0,
+                pPushConstantRanges=ranges if kernel.push_size else None,
             ),
             None,
+        )
+        # The workgroup size is a specialization constant of the module
+        # (see numba_vulkan.codegen.specialize_local_size).
+        sizes = struct.pack("<3I", *kernel.local_size)
+        specialization = vk.VkSpecializationInfo(
+            mapEntryCount=3,
+            pMapEntries=[
+                vk.VkSpecializationMapEntry(constantID=k, offset=4 * k, size=4)
+                for k in range(3)
+            ],
+            dataSize=len(sizes),
+            pData=vk.ffi.from_buffer(sizes),
         )
         stage = vk.VkPipelineShaderStageCreateInfo(
             sType=vk.VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
             stage=vk.VK_SHADER_STAGE_COMPUTE_BIT,
             module=module,
             pName="main",
+            pSpecializationInfo=specialization,
         )
         pipeline = vk.vkCreateComputePipelines(
             dev,
@@ -838,8 +868,8 @@ class Device:
         While asynchronous launches are pending, the buffer could still be
         in use by one of them; it joins the pool when they have finished.
         """
-        if self._pending:
-            self._deferred.append((buffer, self._submitted))
+        if self._pending or self._open:
+            self._deferred.append((buffer, self._seq))
             return
         self._pool(buffer)
 
@@ -882,6 +912,7 @@ class Device:
             The command buffer; the one for transfers by default.
         """
         cmd = self._transfer_commands if cmd is None else cmd
+        self._flush()  # in order after asynchronous launches
         if record is not None:
             vk.vkBeginCommandBuffer(cmd, self._begin_info)
             _barrier(cmd)
@@ -939,18 +970,32 @@ class Device:
 
     # -- asynchronous launches ----------------------------------------------
 
-    MAX_PENDING = 32
+    # Launches recorded into one command buffer before it is submitted, and
+    # command buffers submitted but not known to have finished.
+    MAX_BATCH = 16
+    MAX_IN_FLIGHT = 4
+    # Descriptor sets per kernel for asynchronous launches.
+    MAX_SLOTS = 32
 
-    def launch(self, kernel, groups, arrays):
+    def launch(self, kernel, groups, arrays, push=b""):
         """Start ``kernel`` over ``groups`` workgroups without waiting for it.
 
-        Used for kernels that cannot raise and whose arrays are all device
-        arrays, so that nothing has to be read back. A launch takes a slot
-        of the kernel: a descriptor set, a recorded command buffer, a fence
-        and buffers for the small host arrays. A slot is reused unchanged by
-        a later launch with the same device arrays, argument sizes and grid,
-        which then only copies the argument values and submits. Every launch
-        begins with a memory barrier, so it sees the writes of earlier ones.
+        Used for launches whose arrays are all device arrays, so that
+        nothing has to be read back. Launches are recorded into a command
+        buffer, which is submitted at once if the device has nothing else
+        to do, and otherwise when it holds `MAX_BATCH` launches or at the
+        next synchronisation, whichever comes first. A barrier precedes
+        each launch, so it sees the writes of earlier ones.
+
+        A launch uses a slot of the kernel: a descriptor set and buffers
+        for its small host arrays. Launches with the same buffers and the
+        same host arrays share one, so repeated launches neither write
+        descriptors nor copy data; their scalars and shapes are push
+        constants, recorded with each launch.
+
+        An exception raised by the kernel is reported by the next
+        `synchronize`, which happens before any copy from or to the device
+        and before any launch that waits.
 
         Parameters
         ----------
@@ -958,20 +1003,20 @@ class Device:
             The compiled kernel.
         groups : tuple of int
             Workgroup counts along x, y and z.
-        arrays : list of numpy.ndarray or DeviceArray
-            One per binding: device arrays, and small host arrays (shapes,
-            scalars) whose values are copied at once.
+        arrays : list of numpy.ndarray, DeviceArray or None
+            One per binding: device arrays, and small host arrays (the
+            status and, for kernels without push constants, shapes and
+            scalars). ``None`` for the bindings in ``kernel.unbound``.
+        push : bytes, optional
+            The kernel's push constants, ``kernel.push_size`` bytes.
 
         Raises
         ------
         ValueError
             If a device array belongs to another device.
         """
-        if len(self._pending) >= self.MAX_PENDING:
-            # Retire half at once: waiting has a fixed cost per call.
-            self._retire(self.MAX_PENDING // 2)
         state = self._pipeline(kernel)
-        parts = []
+        parts, host = [], []
         for array in arrays:
             if isinstance(array, DeviceArray):
                 if array.device is not self:
@@ -980,54 +1025,70 @@ class Device:
                         f"kernel runs on {self.info.name}"
                     )
                 parts.append((array._buffer.serial, array._nbytes))
+            elif array is None:
+                parts.append(None)
             else:
-                parts.append((None, array.nbytes))
-        key = (tuple(parts), groups)
-        slot = next((s for s in state.free_slots if s.key == key), None)
-        if slot is not None:
-            state.free_slots.remove(slot)
-        else:
-            slot = self._build_slot(state, key, arrays, groups)
-        for buffer, array in zip(
-            slot.host_buffers, (a for a in arrays if not isinstance(a, DeviceArray))
-        ):
-            buffer.view[: array.nbytes] = array.reshape(-1).view(np.uint8)
-        vk.vkQueueSubmit(self.queue, 1, slot.submit, slot.fence)
-        self._submitted += 1
-        self._pending.append((slot, state))
-
-    def _build_slot(self, state, key, arrays, groups):
-        """Set up a slot for an asynchronous launch; see `launch`."""
-        # The pool of descriptor sets holds MAX_PENDING; beyond that, the
-        # oldest unused slot is rebuilt.
-        if state.slots >= self.MAX_PENDING and state.free_slots:
-            old = state.free_slots.pop(0)
-            for buffer in old.host_buffers:
-                self._pool(buffer)
-            desc_set, cmd, fence = old.desc_set, old.cmd, old.fence
-        else:
-            state.slots += 1
-            desc_set = self._async_set(state)
-            cmd = vk.vkAllocateCommandBuffers(
-                self.handle,
-                vk.VkCommandBufferAllocateInfo(
-                    sType=vk.VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
-                    commandPool=self.command_pool,
-                    level=vk.VK_COMMAND_BUFFER_LEVEL_PRIMARY,
-                    commandBufferCount=1,
-                ),
-            )[0]
-            fence = vk.vkCreateFence(
-                self.handle,
-                vk.VkFenceCreateInfo(sType=vk.VK_STRUCTURE_TYPE_FENCE_CREATE_INFO),
-                None,
+                parts.append(array.nbytes)
+                host.append(array.tobytes())
+        key = (tuple(parts), tuple(host))
+        slot = state.slots.get(key)
+        if slot is None:
+            slot = self._new_slot(state, key, arrays)
+        batch = self._open or self._open_batch()
+        cmd = batch.cmd
+        _barrier(cmd)
+        compute = vk.VK_PIPELINE_BIND_POINT_COMPUTE
+        if batch.state is not state:
+            _lib.vkCmdBindPipeline(cmd, compute, state.pipeline)
+            batch.state, batch.desc_set = state, None
+        if batch.desc_set is not slot.desc_set:
+            _lib.vkCmdBindDescriptorSets(
+                cmd, compute, state.layout, 0, 1, slot.sets, 0, _ffi.NULL
             )
+            batch.desc_set = slot.desc_set
+        if push:
+            _lib.vkCmdPushConstants(
+                cmd,
+                state.layout,
+                vk.VK_SHADER_STAGE_COMPUTE_BIT,
+                0,
+                len(push),
+                _ffi.from_buffer(push),
+            )
+        _dispatch(cmd, groups, self.info.max_groups)
+        slot.used = batch.seq
+        for array in arrays:
+            if isinstance(array, DeviceArray):
+                array._buffer.used = batch.seq
+        if slot.status is not None and slot not in batch.checks:
+            batch.checks.append(slot)
+        batch.launches += 1
+        if batch.launches >= self.MAX_BATCH or not self._busy():
+            self._flush()
+
+    def _new_slot(self, state, key, arrays):
+        """Set up a slot for asynchronous launches; see `launch`."""
+        if len(state.slots) >= self.MAX_SLOTS:
+            # The descriptor pool is full: reuse the set of the slot used
+            # longest ago, once no launch can use it any more.
+            oldest = min(state.slots.values(), key=lambda s: s.used)
+            if oldest.used > self._retired_seq:
+                self.synchronize(report=False)
+            del state.slots[oldest.key]
+            for buffer in oldest.host_buffers:
+                self._pool(buffer)
+            desc_set = oldest.desc_set
+        else:
+            desc_set = self._async_set(state)
         buffers, host_buffers = [], []
         for array in arrays:
             if isinstance(array, DeviceArray):
                 buffers.append((array._buffer, max(array._nbytes, 4)))
+            elif array is None:
+                buffers.append(None)
             else:
                 buffer = self._acquire(max(array.nbytes, 4), host=True)
+                buffer.view[: array.nbytes] = array.reshape(-1).view(np.uint8)
                 host_buffers.append(buffer)
                 buffers.append((buffer, max(array.nbytes, 4)))
         buffers += state.constants
@@ -1044,52 +1105,39 @@ class Device:
                     )
                 ],
             )
-            for i, (buffer, nbytes) in enumerate(buffers)
+            for i, (buffer, nbytes) in _bound(buffers)
         ]
         vk.vkUpdateDescriptorSets(self.handle, len(writes), writes, 0, None)
-        vk.vkBeginCommandBuffer(
-            cmd,
-            vk.VkCommandBufferBeginInfo(
-                sType=vk.VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO
-            ),
+        kernel = state.keep[3]
+        writes_status = META_BINDING in kernel.written_bindings and isinstance(
+            arrays[META_BINDING], np.ndarray
         )
-        _barrier(cmd)
-        vk.vkCmdBindPipeline(cmd, vk.VK_PIPELINE_BIND_POINT_COMPUTE, state.pipeline)
-        vk.vkCmdBindDescriptorSets(
-            cmd,
-            vk.VK_PIPELINE_BIND_POINT_COMPUTE,
-            state.layout,
-            0,
-            1,
-            [desc_set],
-            0,
-            None,
+        slot = _Slot(
+            key,
+            desc_set,
+            _ffi.new("VkDescriptorSet[1]", [desc_set]),
+            host_buffers,
+            status=host_buffers[0] if writes_status else None,
+            kernel=kernel,
         )
-        _dispatch(cmd, groups, self.info.max_groups)
-        vk.vkEndCommandBuffer(cmd)
-        submit = [
-            vk.VkSubmitInfo(
-                sType=vk.VK_STRUCTURE_TYPE_SUBMIT_INFO,
-                commandBufferCount=1,
-                pCommandBuffers=[cmd],
-            )
-        ]
-        return _Slot(key, desc_set, cmd, fence, submit, host_buffers)
+        state.slots[key] = slot
+        return slot
 
     def _async_set(self, state):
         """A new descriptor set of a kernel for asynchronous launches."""
         if state.async_pool is None:
-            count = len(state.keep[3].argtypes) + 1 + len(state.constants)
+            kernel = state.keep[3]
+            count = kernel.num_bindings - len(kernel.unbound)
             state.async_pool = vk.vkCreateDescriptorPool(
                 self.handle,
                 vk.VkDescriptorPoolCreateInfo(
                     sType=vk.VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
-                    maxSets=self.MAX_PENDING,
+                    maxSets=self.MAX_SLOTS,
                     poolSizeCount=1,
                     pPoolSizes=[
                         vk.VkDescriptorPoolSize(
                             type=vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                            descriptorCount=count * self.MAX_PENDING,
+                            descriptorCount=count * self.MAX_SLOTS,
                         )
                     ],
                 ),
@@ -1105,34 +1153,182 @@ class Device:
             ),
         )[0]
 
-    def _retire(self, count):
-        """Wait for the oldest `count` pending launches and recycle them."""
-        done, self._pending = self._pending[:count], self._pending[count:]
-        if done:
-            fences = [slot.fence for slot, _ in done]
-            vk.vkWaitForFences(
-                self.handle, len(fences), fences, vk.VK_TRUE, 0xFFFFFFFFFFFFFFFF
+    def _open_batch(self):
+        """Start recording a command buffer for asynchronous launches."""
+        if len(self._pending) >= self.MAX_IN_FLIGHT:
+            # All at once if all have finished: retiring has a fixed cost.
+            self._retire(1 if self._busy() else len(self._pending))
+        if self._spare:
+            batch = self._spare.pop()
+        else:
+            cmd = vk.vkAllocateCommandBuffers(
+                self.handle,
+                vk.VkCommandBufferAllocateInfo(
+                    sType=vk.VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+                    commandPool=self.command_pool,
+                    level=vk.VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+                    commandBufferCount=1,
+                ),
+            )[0]
+            fence = vk.vkCreateFence(
+                self.handle,
+                vk.VkFenceCreateInfo(sType=vk.VK_STRUCTURE_TYPE_FENCE_CREATE_INFO),
+                None,
             )
-            vk.vkResetFences(self.handle, len(fences), fences)
-        for slot, state in done:
-            state.free_slots.append(slot)
-        self._retired += len(done)
+            # cffi frees what nothing refers to, so the batch keeps the
+            # array of command buffers that the submit info points to.
+            commands = _ffi.new("VkCommandBuffer[1]", [cmd])
+            submit = _ffi.new(
+                "VkSubmitInfo*",
+                {
+                    "sType": vk.VK_STRUCTURE_TYPE_SUBMIT_INFO,
+                    "commandBufferCount": 1,
+                    "pCommandBuffers": commands,
+                },
+            )
+            batch = _Batch(cmd, fence, (submit, commands))
+        self._seq += 1
+        batch.seq, batch.launches, batch.checks = self._seq, 0, []
+        batch.state = batch.desc_set = None
+        _check(_lib.vkBeginCommandBuffer(batch.cmd, _BEGIN_INFO))
+        self._open = batch
+        return batch
+
+    def _flush(self):
+        """Submit the launches recorded so far."""
+        batch, self._open = self._open, None
+        if batch is None:
+            return
+        _check(_lib.vkEndCommandBuffer(batch.cmd))
+        _check(_lib.vkQueueSubmit(self.queue, 1, batch.submit[0], batch.fence))
+        self._pending.append(batch)
+
+    def _busy(self):
+        """Whether submitted launches are still running."""
+        return bool(
+            self._pending
+            and _lib.vkGetFenceStatus(self.handle, self._pending[-1].fence)
+        )  # VK_NOT_READY rather than VK_SUCCESS
+
+    def _retire(self, count):
+        """Wait for the oldest `count` submitted batches and recycle them.
+
+        Kernels that raised are recorded, for `synchronize` to report.
+        """
+        done, self._pending = self._pending[:count], self._pending[count:]
+        if not done:
+            return
+        fences = _ffi.new("VkFence[]", [batch.fence for batch in done])
+        _check(
+            _lib.vkWaitForFences(
+                self.handle, len(done), fences, vk.VK_TRUE, 0xFFFFFFFFFFFFFFFF
+            )
+        )
+        _check(_lib.vkResetFences(self.handle, len(done), fences))
+        for batch in done:
+            for slot in batch.checks:
+                # A slot used again later is checked when that finishes.
+                if slot.used == batch.seq:
+                    code = int(slot.status.view[:4].view(np.int32)[0])
+                    if code:
+                        self._errors.append((slot.kernel, code))
+                        slot.status.view[:4] = 0
+        self._spare.extend(done)
+        self._retired_seq = done[-1].seq
         # Buffers released while launches were pending join the pool once
-        # every launch submitted before their release has finished.
+        # every launch recorded before their release has finished.
         keep = []
-        for buffer, submitted in self._deferred:
-            if submitted <= self._retired:
+        for buffer, seq in self._deferred:
+            if seq <= self._retired_seq:
                 self._pool(buffer)
             else:
-                keep.append((buffer, submitted))
+                keep.append((buffer, seq))
         self._deferred = keep
 
-    def synchronize(self):
-        """Wait until every kernel launched on this device has finished."""
-        if self._pending:
-            self._retire(len(self._pending))
+    def synchronize(self, report=True):
+        """Wait until every kernel launched on this device has finished.
 
-    def run(self, kernel, groups, arrays):
+        Parameters
+        ----------
+        report : bool
+            Whether to raise the exception of a kernel that raised one
+            since the last synchronisation.
+
+        Raises
+        ------
+        Exception
+            The first exception that a kernel launched asynchronously
+            raised since then; see `numba_vulkan.dispatcher`.
+        """
+        self._flush()
+        self._retire(len(self._pending))
+        if report:
+            self._report()
+
+    def wait_for(self, buffer):
+        """Wait until no launch uses a buffer any more.
+
+        Launches that do not use it may go on running; with memory that the
+        host can map, copies to and from the buffer then overlap with them.
+
+        Parameters
+        ----------
+        buffer : _Buffer
+            The buffer.
+
+        Raises
+        ------
+        Exception
+            As `synchronize` does.
+        """
+        # Whatever is recorded runs meanwhile.
+        self._flush()
+        if buffer.used > self._retired_seq:
+            self._retire(sum(batch.seq <= buffer.used for batch in self._pending))
+        self._report()
+
+    def _report(self):
+        """Raise the first exception of a kernel launched asynchronously."""
+        if self._errors:
+            (kernel, code), self._errors = self._errors[0], []
+            from numba_vulkan.dispatcher import raise_kernel_error
+
+            raise_kernel_error(kernel.name, code, asynchronous=True)
+
+    def _record_dispatch(self, cmd, state, desc_set, groups, push):
+        """Record binding a kernel, its push constants and its dispatch.
+
+        Parameters
+        ----------
+        cmd : object
+            The command buffer, being recorded.
+        state : _Pipeline
+            The kernel.
+        desc_set : object
+            Its descriptor set.
+        groups : tuple of int
+            Workgroups along x, y and z.
+        push : bytes
+            Its push constants; empty if it has none.
+        """
+        compute = vk.VK_PIPELINE_BIND_POINT_COMPUTE
+        _lib.vkCmdBindPipeline(cmd, compute, state.pipeline)
+        sets = _ffi.new("VkDescriptorSet[1]", [desc_set])
+        _lib.vkCmdBindDescriptorSets(
+            cmd, compute, state.layout, 0, 1, sets, 0, _ffi.NULL
+        )
+        if push:
+            _lib.vkCmdPushConstants(
+                cmd,
+                state.layout,
+                vk.VK_SHADER_STAGE_COMPUTE_BIT,
+                0,
+                len(push),
+                _ffi.from_buffer(push),
+            )
+        _dispatch(cmd, groups, self.info.max_groups)
+
+    def run(self, kernel, groups, arrays, push=b""):
         """Dispatch ``kernel`` over ``groups`` workgroups.
 
         Parameters
@@ -1141,10 +1337,13 @@ class Device:
             The compiled kernel.
         groups : tuple of int
             Workgroup counts along x, y and z.
-        arrays : list of numpy.ndarray or DeviceArray
+        arrays : list of numpy.ndarray, DeviceArray or None
             One array per binding. C-contiguous host arrays are uploaded,
             and those the kernel writes to are copied back afterwards;
-            device arrays are used in place.
+            device arrays are used in place. ``None`` for the bindings in
+            ``kernel.unbound``.
+        push : bytes, optional
+            The kernel's push constants, ``kernel.push_size`` bytes.
 
         Raises
         ------
@@ -1164,6 +1363,9 @@ class Device:
                         )
                     buffers.append((array._buffer, max(array._nbytes, 4)))
                     continue
+                if array is None:
+                    buffers.append(None)
+                    continue
                 buffer = self._acquire(max(array.nbytes, 4), host=True)
                 transient.append(buffer)
                 buffers.append((buffer, max(array.nbytes, 4)))
@@ -1180,7 +1382,7 @@ class Device:
 
             # Repeated launches mostly see the same buffers, and then neither
             # the descriptor set nor the recorded commands have to change.
-            bound = tuple((buffer.serial, nbytes) for buffer, nbytes in buffers)
+            bound = tuple(b and (b[0].serial, b[1]) for b in buffers)
             if bound != state.bound:
                 writes = [
                     vk.VkWriteDescriptorSet(
@@ -1195,7 +1397,7 @@ class Device:
                             )
                         ],
                     )
-                    for i, (buffer, nbytes) in enumerate(buffers)
+                    for i, (buffer, nbytes) in _bound(buffers)
                 ]
                 vk.vkUpdateDescriptorSets(self.handle, len(writes), writes, 0, None)
                 state.bound = bound
@@ -1203,27 +1405,14 @@ class Device:
 
             def record(cmd):
                 """Bind the kernel and dispatch it."""
-                vk.vkCmdBindPipeline(
-                    cmd, vk.VK_PIPELINE_BIND_POINT_COMPUTE, state.pipeline
-                )
-                vk.vkCmdBindDescriptorSets(
-                    cmd,
-                    vk.VK_PIPELINE_BIND_POINT_COMPUTE,
-                    state.layout,
-                    0,
-                    1,
-                    [state.desc_set],
-                    0,
-                    None,
-                )
-                _dispatch(cmd, groups, self.info.max_groups)
+                self._record_dispatch(cmd, state, state.desc_set, groups, push)
 
-            fresh = self._recorded != (id(state), groups)
+            fresh = self._recorded != (id(state), groups, push)
             self._recorded = None  # stays unset if recording fails
             self._submit(record if fresh else None, self._launch_commands)
-            self._recorded = (id(state), groups)
+            self._recorded = (id(state), groups, push)
 
-            for binding, (array, (buffer, _)) in enumerate(zip(arrays, buffers)):
+            for binding, (array, (buffer, _)) in _bound(zip(arrays, buffers)):
                 if isinstance(array, DeviceArray):
                     continue
                 if binding in kernel.written_bindings:
@@ -1240,11 +1429,35 @@ class Device:
 _DISPATCH_BASE = 0x10  # VK_PIPELINE_CREATE_DISPATCH_BASE_BIT
 
 
+def _host_arrays(arrays):
+    """The host arrays among the arrays of a launch, in order."""
+    return (a for a in arrays if a is not None and not isinstance(a, DeviceArray))
+
+
+def _bound(items):
+    """Number the bindings of a launch, leaving out those without a buffer.
+
+    Parameters
+    ----------
+    items : iterable
+        One item per binding; ``None``, or a pair whose second element
+        is ``None``, for a binding that has no buffer.
+
+    Yields
+    ------
+    tuple
+        The binding and its item.
+    """
+    for binding, item in enumerate(items):
+        if item is not None and not (isinstance(item, tuple) and item[1] is None):
+            yield binding, item
+
+
 def _dispatch(cmd, groups, limit):
     """Record a dispatch, split into several where the grid exceeds `limit`.
 
     Each part starts at a base workgroup, so ``global_id`` and ``group_id``
-    are those of the whole grid; ``num_groups`` is that of the part.
+    are those of the whole grid; ``num_groups`` comes from push constants.
 
     Parameters
     ----------
@@ -1256,7 +1469,7 @@ def _dispatch(cmd, groups, limit):
         The device's largest number of workgroups along each axis.
     """
     if all(n <= m for n, m in zip(groups, limit)):
-        vk.vkCmdDispatch(cmd, *groups)
+        _lib.vkCmdDispatch(cmd, *groups)
         return
     gx, gy, gz = groups
     lx, ly, lz = limit
@@ -1320,40 +1533,111 @@ def _barrier(cmd):
     submissions to the queue.
     """
     stages = vk.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | vk.VK_PIPELINE_STAGE_TRANSFER_BIT
-    barrier = vk.VkMemoryBarrier(
-        sType=vk.VK_STRUCTURE_TYPE_MEMORY_BARRIER,
-        srcAccessMask=vk.VK_ACCESS_SHADER_WRITE_BIT | vk.VK_ACCESS_TRANSFER_WRITE_BIT,
-        dstAccessMask=vk.VK_ACCESS_SHADER_READ_BIT
+    _lib.vkCmdPipelineBarrier(
+        cmd, stages, stages, 0, 1, _MEMORY_BARRIER, 0, _ffi.NULL, 0, _ffi.NULL
+    )
+
+
+# The C functions behind the ``vulkan`` package, for the commands recorded
+# per launch; the wrappers of the package convert every argument anew and
+# take several times as long. The structures they take are built once,
+# which costs more than recording them.
+_lib, _ffi = vk.lib, vk.ffi
+_MEMORY_BARRIER = _ffi.new(
+    "VkMemoryBarrier*",
+    {
+        "sType": vk.VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+        "srcAccessMask": vk.VK_ACCESS_SHADER_WRITE_BIT
+        | vk.VK_ACCESS_TRANSFER_WRITE_BIT,
+        "dstAccessMask": vk.VK_ACCESS_SHADER_READ_BIT
         | vk.VK_ACCESS_SHADER_WRITE_BIT
         | vk.VK_ACCESS_TRANSFER_READ_BIT
         | vk.VK_ACCESS_TRANSFER_WRITE_BIT,
-    )
-    vk.vkCmdPipelineBarrier(cmd, stages, stages, 0, 1, [barrier], 0, None, 0, None)
+    },
+)
+_BEGIN_INFO = _ffi.new(
+    "VkCommandBufferBeginInfo*",
+    {"sType": vk.VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO},
+)
+
+
+def _check(result):
+    """Raise for a ``VkResult`` other than success.
+
+    Parameters
+    ----------
+    result : int
+        What a Vulkan function returned.
+
+    Raises
+    ------
+    vulkan.VkError
+        If `result` is not ``VK_SUCCESS``.
+    """
+    if result != vk.VK_SUCCESS:
+        raise vk.VkError(f"Vulkan call failed with VkResult {result}")
 
 
 @dataclass
 class _Slot:
-    """What one asynchronous launch of a kernel needs; see `Device.launch`.
+    """Descriptor set and host buffers for asynchronous launches of a kernel.
 
     Attributes
     ----------
     key : tuple
-        The device arrays (by serial number), argument sizes and grid it
-        was set up for.
-    desc_set, cmd, fence : object
-        Its descriptor set, recorded command buffer and fence.
-    submit : list
-        The ``VkSubmitInfo`` for the command buffer.
+        The buffers (by serial number) and the contents of the host arrays
+        it was set up for.
+    desc_set : object
+        Its descriptor set.
+    sets : object
+        The set as a C array, for binding it.
     host_buffers : list of _Buffer
-        Mapped buffers for the host arrays, in argument order.
+        Mapped buffers holding the host arrays, in argument order.
+    status : _Buffer or None
+        The buffer the kernel leaves its error status in, if it can raise.
+    kernel : CompiledKernel
+        The kernel.
+    used : int
+        Number of the last batch that uses it.
     """
 
     key: tuple
     desc_set: object
+    sets: object
+    host_buffers: list
+    status: object = None
+    kernel: object = None
+    used: int = 0
+
+
+@dataclass
+class _Batch:
+    """A command buffer of asynchronous launches; see `Device.launch`.
+
+    Attributes
+    ----------
+    cmd, fence : object
+        The command buffer and the fence its submission signals.
+    submit : tuple
+        Its ``VkSubmitInfo`` and the array of command buffers it points to.
+    seq : int
+        Its number, counting up per device.
+    launches : int
+        Number of launches recorded into it.
+    checks : list of _Slot
+        Slots whose error status is checked when it has finished.
+    state, desc_set : object
+        Pipeline and descriptor set last bound, to skip binding them again.
+    """
+
     cmd: object
     fence: object
-    submit: list
-    host_buffers: list
+    submit: object
+    seq: int = 0
+    launches: int = 0
+    checks: list = field(default_factory=list)
+    state: object = None
+    desc_set: object = None
 
 
 @dataclass
@@ -1374,10 +1658,8 @@ class _Pipeline:
         descriptor set, as last written.
     print_buffer : _Buffer or None
         Where the kernel's ``print`` calls write, if it has any.
-    free_slots : list of _Slot
-        Slots for asynchronous launches that are not in use.
-    slots : int
-        Number of slots created.
+    slots : dict
+        Slots for asynchronous launches, by their key.
     async_pool : object or None
         The ``VkDescriptorPool`` those sets come from.
     """
@@ -1389,8 +1671,7 @@ class _Pipeline:
     keep: tuple
     bound: tuple = None
     print_buffer: object = None
-    free_slots: list = field(default_factory=list)
-    slots: int = 0
+    slots: dict = field(default_factory=dict)
     async_pool: object = None
 
 
@@ -1414,6 +1695,8 @@ class _Buffer:
     serial : int
         A number that identifies the buffer for good; unlike ``id()`` it is
         not reused after the buffer has been destroyed.
+    used : int
+        Number of the last batch of asynchronous launches that uses it.
     """
 
     handle: object
@@ -1422,6 +1705,7 @@ class _Buffer:
     host: bool
     view: object
     serial: int = field(default_factory=itertools.count().__next__)
+    used: int = 0
 
 
 def _pool_size(nbytes):
@@ -1568,8 +1852,11 @@ class DeviceArray:
         ------
         ValueError
             If the shapes differ.
+        Exception
+            One that a kernel launched asynchronously raised; see
+            `Device.synchronize`.
         """
-        self.device.synchronize()
+        self.device.wait_for(self._buffer)
         array = narrowing.convert(np.asarray(array), self._stored)
         if array.shape != self.shape:
             raise ValueError(f"cannot copy shape {array.shape} into {self.shape}")
@@ -1593,8 +1880,11 @@ class DeviceArray:
         ------
         ValueError
             If `out` does not match the array.
+        Exception
+            One that a kernel launched asynchronously raised; see
+            `Device.synchronize`.
         """
-        self.device.synchronize()
+        self.device.wait_for(self._buffer)
         if out is None:
             out = np.empty(self.shape, dtype=self.dtype)
         elif (

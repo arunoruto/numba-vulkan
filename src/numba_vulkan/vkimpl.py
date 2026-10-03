@@ -694,10 +694,37 @@ def lower_local_size(context, builder, sig, args):
         fn = ir.Function(builder.module, ir.FunctionType(i32, [i32]), name)
         fn.attributes.add("readnone")
         fn.attributes.add("nounwind")
-    return builder.call(fn, [i32(sig.args[0].literal_value)])
+    size = builder.call(fn, [i32(sig.args[0].literal_value)])
+    # The size is only known at launch, so LLVM learns that it is positive:
+    # signed arithmetic on it, such as ``local_size(0) // 2``, then needs
+    # no sign checks.
+    size.set_metadata("range", builder.module.add_metadata([i32(1), i32(65537)]))
+    return size
 
 
-_register_axis(stubs.num_groups, "llvm.spv.num.workgroups")
+@lower(stubs.num_groups, types.IntegerLiteral)
+def lower_num_groups(context, builder, sig, args):
+    """Lower ``num_groups(axis)``.
+
+    Grids larger than the device allows are dispatched in parts, for which
+    the ``NumWorkgroups`` built-in gives the size of the part. The size of
+    the whole grid is passed as push constants instead; a placeholder call
+    stands for it until the push-constant block is laid out (see
+    `numba_vulkan.codegen.num_groups_members`).
+
+    Returns
+    -------
+    llvmlite.ir.Value
+    """
+    name = "numba_vulkan.num_groups"
+    fn = builder.module.globals.get(name)
+    if fn is None:
+        fn = ir.Function(builder.module, ir.FunctionType(i32, [i32]), name)
+        fn.attributes.add("readnone")
+        fn.attributes.add("nounwind")
+    count = builder.call(fn, [i32(sig.args[0].literal_value)])
+    count.set_metadata("range", builder.module.add_metadata([i32(1), i32(1 << 31)]))
+    return count
 
 
 @lower(stubs.barrier)

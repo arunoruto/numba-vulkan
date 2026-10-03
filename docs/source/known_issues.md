@@ -89,7 +89,8 @@ pointer, so this needs its own type, like `VulkanArray`.
 An exception raised with `raise`, an index out of bounds with
 `boundscheck=True`, and an integer division by zero with
 `error_model="python"` are raised by the launch once the kernel has
-finished (see {doc}`usage`). The invocation that raised stops; the others
+finished, or by the next synchronisation for launches on device arrays,
+which do not wait (see {doc}`usage`). The invocation that raised stops; the others
 run to completion. There is no `try`/`except`. By default, indices are not
 checked and divisions by zero give NumPy's results, as in `numba.cuda`.
 
@@ -131,17 +132,14 @@ generated module would be worth having.
 
 ### KI-28: launch overhead and synchronous launches with NumPy arrays
 
-Launches whose arrays are all device arrays return at once, and a repeated
-launch costs about 50 µs of Python time. Launches with NumPy arrays, and
-of kernels that can raise, still wait for the kernel, because results and
-the error status have to be read back. Scalars and array shapes travel as
-small buffers rather than push constants. If a grid needs more workgroups
-than the device allows, it is dispatched in parts, and `num_groups` then
-reports the workgroups of the part, which breaks grid-stride loops over
-`num_groups`.
+Launches whose arrays are all device arrays return at once, but a launch
+still costs some 45–50 µs of Python time (typing the arguments, packing push
+constants, recording the commands), which limits small kernels to about
+20 000 launches per second. Launches with NumPy arrays wait for the kernel,
+because their results have to be copied back.
 
-**Fix:** push constants for scalars and shapes; reporting errors of
-asynchronous launches at the next synchronisation, as CUDA does.
+**Fix:** a launch plan cached per argument types, so that a repeated launch
+only packs values and records; or recording in C.
 
 ### KI-29: device arrays are bare buffers
 

@@ -92,6 +92,7 @@ def test_exception_with_device_arrays(run, device):
     out = nv.device_array_like(a)
     with pytest.raises(ValueError, match="negative input"):
         run(uses_both, 3, a, out)
+        nv.synchronize(device)  # reported here unless NUMBA_VULKAN_SYNC=1
 
 
 def test_status_is_only_read_back_from_kernels_that_can_raise(run):
