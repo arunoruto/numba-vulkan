@@ -196,6 +196,7 @@ To make the matching NumPy ufunc work as well, add it to the tables in
 uv run python tests/fuzz_control_flow.py 0 100          # seeds 0..99, all devices
 uv run python tests/fuzz_control_flow.py 0 100 --cpu    # llvmpipe only
 uv run python tests/fuzz_control_flow.py 0 100 --rich   # also while loops, deeper
+uv run python tests/fuzz_control_flow.py 0 20 --rich --depth 6   # thousands of lines
 uv run python tests/fuzz_control_flow.py --show 42      # print one program
 ```
 
