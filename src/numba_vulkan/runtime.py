@@ -79,6 +79,11 @@ class DeviceInfo:
     nan_preserve : tuple of int
         Float widths for which shaders can require NaN, infinity and signed
         zero to be kept (``SignedZeroInfNanPreserve``).
+    timestamp_bits : int
+        Valid bits of the timestamps the compute queue writes; 0 if it
+        writes none (see `event`).
+    timestamp_period : float
+        Nanoseconds per timestamp tick.
     subgroup_size : int
         Invocations per subgroup (``subgroup.size()`` in kernels).
     subgroup_basic, subgroup_vote, subgroup_arithmetic, subgroup_ballot, \
@@ -105,6 +110,8 @@ subgroup_shuffle, subgroup_shuffle_relative : bool
     max_groups: tuple = (65535, 65535, 65535)
     max_shared_memory: int = 16384
     nan_preserve: tuple = ()
+    timestamp_bits: int = 0
+    timestamp_period: float = 1.0
     subgroup_size: int = 1
     subgroup_basic: bool = False
     subgroup_vote: bool = False
@@ -483,6 +490,10 @@ def list_devices(refresh=False):
         float_atomics = _float_atomic_features(handle)
         props11, props12 = _vulkan_properties(handle)
         limits = props.limits
+        families = vk.vkGetPhysicalDeviceQueueFamilyProperties(handle)
+        compute = next(
+            (f for f in families if f.queueFlags & vk.VK_QUEUE_COMPUTE_BIT), None
+        )
         found.append(
             DeviceInfo(
                 index=len(found),
@@ -509,6 +520,8 @@ def list_devices(refresh=False):
                 max_local_invocations=limits.maxComputeWorkGroupInvocations,
                 max_groups=tuple(limits.maxComputeWorkGroupCount),
                 max_shared_memory=limits.maxComputeSharedMemorySize,
+                timestamp_bits=compute.timestampValidBits if compute else 0,
+                timestamp_period=limits.timestampPeriod,
                 nan_preserve=_nan_preserving_widths(props12),
                 subgroup_size=props11.subgroupSize,
                 **_subgroup_features(props11),
@@ -648,6 +661,9 @@ class Device:
         self._deferred = []
         # Exceptions of kernels launched asynchronously, as (kernel, code).
         self._errors = []
+        # Timestamp queries for events, used in turn; created when needed.
+        self._queries = None
+        self._next_query = 0
         self._pipelines = {}
         # 64-bit types this device cannot use and kernels must do without.
         # How kernels are compiled for this device unless they say otherwise.
@@ -2502,6 +2518,151 @@ def get_device(which=None):
 
         device.mode = device.mode._replace(**probes.workarounds(device))
     return _devices[info.index]
+
+
+class Event:
+    """A point in the work submitted to a device, like a CUDA event.
+
+    `record` marks the point after all work launched so far; the device
+    writes the time at which it gets there. `elapsed_time` gives the time
+    between two events on the device, which excludes the cost of launching
+    and waiting in Python, as long as the device has work: as with CUDA's
+    events, time in which it waits for the host between two events counts.
+    Create events with `event`.
+
+    Parameters
+    ----------
+    device : Device
+        The device.
+
+    Raises
+    ------
+    VulkanSupportError
+        If the device's compute queue writes no timestamps.
+    """
+
+    QUERIES = 1024
+
+    def __init__(self, device):
+        if not device.info.timestamp_bits:
+            raise VulkanSupportError(f"{device.info.name} cannot measure time")
+        self.device = device
+        self._query = None
+        self._seq = None
+
+    def record(self):
+        """Mark the point after all work launched on the device so far.
+
+        Returns
+        -------
+        Event
+            The event itself.
+        """
+        device = self.device
+        if device._queries is None:
+            device._queries = vk.vkCreateQueryPool(
+                device.handle,
+                vk.VkQueryPoolCreateInfo(
+                    sType=vk.VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO,
+                    queryType=vk.VK_QUERY_TYPE_TIMESTAMP,
+                    queryCount=self.QUERIES,
+                ),
+                None,
+            )
+        # Queries are used in turn; an event recorded QUERIES events ago is
+        # overwritten.
+        self._query = device._next_query
+        device._next_query = (device._next_query + 1) % self.QUERIES
+        batch = device._open or device._open_batch()
+        _lib.vkCmdResetQueryPool(batch.cmd, device._queries, self._query, 1)
+        _lib.vkCmdWriteTimestamp(
+            batch.cmd,
+            vk.VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+            device._queries,
+            self._query,
+        )
+        # Not submitted on its own: it goes with the next launch, so that a
+        # start event and the work after it share a submission.
+        self._seq = batch.seq
+        return self
+
+    def synchronize(self):
+        """Wait until the device has passed the event."""
+        if self._seq is None:
+            raise RuntimeError("the event was not recorded")
+        device = self.device
+        device._flush()
+        if self._seq > device._retired_seq:
+            device._retire(sum(b.seq <= self._seq for b in device._pending))
+
+    def _ticks(self):
+        """The timestamp the device wrote."""
+        self.synchronize()
+        value = _ffi.new("uint64_t[1]")
+        _check(
+            _lib.vkGetQueryPoolResults(
+                self.device.handle,
+                self.device._queries,
+                self._query,
+                1,
+                8,
+                value,
+                8,
+                vk.VK_QUERY_RESULT_64_BIT | vk.VK_QUERY_RESULT_WAIT_BIT,
+            )
+        )
+        return value[0]
+
+    def elapsed_time(self, end):
+        """Milliseconds the device took from this event to `end`.
+
+        Parameters
+        ----------
+        end : Event
+            A later event on the same device.
+
+        Returns
+        -------
+        float
+        """
+        if end.device is not self.device:
+            raise ValueError("the events belong to different devices")
+        bits = self.device.info.timestamp_bits
+        ticks = (end._ticks() - self._ticks()) & ((1 << bits) - 1)
+        return ticks * self.device.info.timestamp_period / 1e6
+
+
+def event(device=None):
+    """Create an `Event` on a device.
+
+    Parameters
+    ----------
+    device : int, str, Device or None
+        The device; the selected one by default.
+
+    Returns
+    -------
+    Event
+
+    Examples
+    --------
+    >>> start, end = nv.event(), nv.event()
+    >>> start.record()
+    >>> kernel.forall(n)(x, out)      # device arrays: does not wait
+    >>> end.record()
+    >>> start.elapsed_time(end)       # milliseconds on the device
+    """
+    return Event(device if isinstance(device, Device) else get_device(device))
+
+
+def event_elapsed_time(start, end):
+    """Milliseconds between two events, as ``numba.cuda`` names it.
+
+    Returns
+    -------
+    float
+    """
+    return start.elapsed_time(end)
 
 
 def synchronize(device=None):

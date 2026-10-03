@@ -37,11 +37,22 @@ terms.
 | `reduce` | sum: shared memory, barriers, one float atomic per workgroup |
 | `histogram` | 256 bins: integer atomics in shared memory |
 | `matmul` | matrix product in 16×16 shared-memory tiles |
+| `matmul_blocked` | the same with 64×64 tiles and a 4×4 block per invocation, accumulated in registers |
 
 On Vulkan they run twice: with 32-bit integers, the default, and with
 Numba's 64-bit integers (`narrow=False`).
 
-Every result keeps all timed calls; the charts show the best of them.
+The kernel suite measures every call three ways: until the launch returns
+(the cost of launching from Python), until the device has finished (end to
+end), and between two events recorded before and after it (`device_s`,
+the time the device spent; `nv.event` on Vulkan, `cuda.event` on CUDA).
+For a small kernel the difference is the launch overhead: summing 4 M
+floats took 0.07 ms on a TITAN X's clock and 0.28 ms end to end. The
+backends take turns, round by round, so that changes in clock speed or
+temperature during a run affect all of them alike.
+
+Every result keeps all timed calls; the charts show the best end-to-end
+time.
 
 ## Results
 

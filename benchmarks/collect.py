@@ -35,7 +35,11 @@ float64 support, workarounds applied by numba-vulkan), ``cuda``
     label        the backend as the scripts print it
     first_s      the first call in seconds, including compilation (the kernel
                  cache is off during a run), or null
-    samples_s    the timed calls after it, in seconds
+    samples_s    the timed calls after it, in seconds, end to end
+    enqueue_s    optional (kernels suite): the same calls until they
+                 returned, before the device finished
+    device_s     optional (kernels suite): the time the device spent between
+                 events recorded before and after each call
     check        agreement with the CPU result, as text
 """
 

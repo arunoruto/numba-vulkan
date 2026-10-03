@@ -412,6 +412,8 @@ To continue the work, start with the
 - [x] Asynchronous launches on device arrays (`nv.synchronize()`)
 - [x] Indexing, views and NumPy ufuncs on device arrays
 - [x] Structured (record) arrays
+- [x] Autotuning of kernel variants (`nv.autotune`)
+- [x] Device-side timing with events (`nv.event`)
 - [x] Scalars as push constants
 - [x] Slices, array views, iteration and reductions
 - [x] Array expressions and local arrays

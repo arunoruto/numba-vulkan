@@ -39,6 +39,7 @@ API = {
         "BLOCK": "nv.local_size(0)",
         "NGROUPS": "nv.num_groups(0)",
         "SHARED": "nv.shared.array",
+        "LOCAL": "nv.local.array",
         "SYNC": "nv.barrier()",
         "ATOMIC_ADD": "nv.atomic.add",
     },
@@ -50,6 +51,7 @@ API = {
         "BLOCK": "cuda.blockDim.x",
         "NGROUPS": "cuda.gridDim.x",
         "SHARED": "cuda.shared.array",
+        "LOCAL": "cuda.local.array",
         "SYNC": "cuda.syncthreads()",
         "ATOMIC_ADD": "cuda.atomic.add",
     },
@@ -109,6 +111,50 @@ def matmul(a, b, c):
         {SYNC}
     if row < c.shape[0] and col < c.shape[1]:
         c[row, col] = acc
+
+
+def matmul_blocked(a, b, c):
+    # A 64x64 tile of c per workgroup of 16x16, a 4x4 block per invocation,
+    # accumulated in registers; a and b pass through shared memory in slices
+    # of 16 along k, each invocation loading four values of each.
+    ta = {SHARED}((16, 64), float32)  # a's slice, transposed: [k, row]
+    tb = {SHARED}((16, 64), float32)  # b's slice: [k, column]
+    tx = {LID}
+    ty = {LID_Y}
+    t = ty * 16 + tx
+    row0 = {GROUP_Y} * 64
+    col0 = {GROUP} * 64
+    acc = {LOCAL}((4, 4), float32)
+    for i in range(4):
+        for j in range(4):
+            acc[i, j] = float32(0)
+    n = a.shape[1]
+    for k0 in range(0, n, 16):
+        for q in range(4):
+            e = q * 256 + t
+            r = row0 + e // 16
+            k = k0 + e % 16
+            ta[e % 16, e // 16] = a[r, k] if r < a.shape[0] and k < n else float32(0)
+            k = k0 + e // 64
+            col = col0 + e % 64
+            tb[e // 64, e % 64] = b[k, col] if k < n and col < b.shape[1] else float32(0)
+        {SYNC}
+        for k in range(16):
+            ra = {LOCAL}(4, float32)
+            rb = {LOCAL}(4, float32)
+            for i in range(4):
+                ra[i] = ta[k, ty * 4 + i]
+                rb[i] = tb[k, tx * 4 + i]
+            for i in range(4):
+                for j in range(4):
+                    acc[i, j] += ra[i] * rb[j]
+        {SYNC}
+    for i in range(4):
+        for j in range(4):
+            row = row0 + ty * 4 + i
+            col = col0 + tx * 4 + j
+            if row < c.shape[0] and col < c.shape[1]:
+                c[row, col] = acc[i, j]
 """
 
 
@@ -120,7 +166,8 @@ def build(backend, **options):
     exec(SOURCE.format(**API[backend]), scope)  # noqa: S102
     decorate = cuda.jit if backend == "cuda" else nv.jit(**options)
     return {
-        name: decorate(scope[name]) for name in ("reduce_sum", "histogram", "matmul")
+        name: decorate(scope[name])
+        for name in ("reduce_sum", "histogram", "matmul", "matmul_blocked")
     }
 
 
@@ -175,6 +222,40 @@ class Backend:
         else:
             nv.synchronize()
 
+    def events(self):
+        """Two events for timing on the device."""
+        if self.name == "cuda":
+            return cuda.event(timing=True), cuda.event(timing=True)
+        return nv.event(), nv.event()
+
+    def elapsed(self, start, end):
+        """Seconds on the device between two recorded events."""
+        if self.name == "cuda":
+            return cuda.event_elapsed_time(start, end) / 1e3
+        return start.elapsed_time(end) / 1e3
+
+
+def measure(backend, launch, before=None):
+    """Time one launch: until it returns, until it is done, and on the device.
+
+    Returns
+    -------
+    tuple of float
+        Enqueue, end-to-end and device time in seconds.
+    """
+    if before is not None:
+        before()
+    backend.sync()
+    start, end = backend.events()
+    start.record()
+    begin = time.perf_counter()
+    launch()
+    queued = time.perf_counter()
+    end.record()
+    backend.sync()
+    done = time.perf_counter()
+    return queued - begin, done - begin, backend.elapsed(start, end)
+
 
 def timings(function, repeat, before=None):
     """Wall-clock times of `repeat` calls of `function` in seconds.
@@ -195,6 +276,7 @@ DESCRIPTIONS = {
     "reduce": "{n:,} float32 values",
     "histogram": "{n:,} int32 values into 256 bins",
     "matmul": "{m}x{m} float32",
+    "matmul_blocked": "{m}x{m} float32, 4x4 per invocation",
 }
 
 
@@ -321,6 +403,11 @@ def run(size=1 << 24, matrix=1024, repeat=10, all_devices=False, verbose=True):
 
     zero1 = np.zeros(1, dtype=np.float32)
     zero256 = np.zeros(256, dtype=np.int32)
+    exact = x.sum(dtype=np.float64)
+    reference_scale = np.abs(reference_c).max()
+    # (backend label, info, workload, backend, device index, launch, before,
+    #  check, samples)
+    runs = []
     for label, backend, index, info in backends:
         if index is not None:
             nv.select_device(index)
@@ -328,39 +415,77 @@ def run(size=1 << 24, matrix=1024, repeat=10, all_devices=False, verbose=True):
         out = backend.zeros(1, np.float32)
         dbins = backend.zeros(256, np.int32)
         dc = backend.zeros((m, m), np.float32)
-
-        def reduce(backend=backend, dx=dx, out=out):
-            backend.launch("reduce_sum", groups_1d, 256, dx, out)
-            backend.sync()
-
-        def hist(backend=backend, dkeys=dkeys, dbins=dbins):
-            backend.launch("histogram", groups_1d, 256, dkeys, dbins)
-            backend.sync()
-
         tiles = (-(-m // 16), -(-m // 16))
+        blocks = (-(-m // 64), -(-m // 64))
+        workloads = [
+            (
+                "reduce",
+                lambda b=backend, dx=dx, out=out: b.launch(
+                    "reduce_sum", groups_1d, 256, dx, out
+                ),
+                lambda out=out: out.copy_to_device(zero1),
+                lambda out=out: (
+                    f"rel. err {abs(out.copy_to_host()[0] - exact) / exact:.1e}"
+                ),
+            ),
+            (
+                "histogram",
+                lambda b=backend, dk=dkeys, db_=dbins: b.launch(
+                    "histogram", groups_1d, 256, dk, db_
+                ),
+                lambda db_=dbins: db_.copy_to_device(zero256),
+                lambda db_=dbins: (
+                    "exact" if (db_.copy_to_host() == reference_bins).all() else "WRONG"
+                ),
+            ),
+            (
+                "matmul",
+                lambda b=backend, da=da, db=db, dc=dc: b.launch(
+                    "matmul", tiles, (16, 16), da, db, dc
+                ),
+                None,
+                lambda dc=dc: (
+                    "max rel. err "
+                    f"{np.abs(dc.copy_to_host() - reference_c).max() / reference_scale:.1e}"
+                ),
+            ),
+            (
+                "matmul_blocked",
+                lambda b=backend, da=da, db=db, dc=dc: b.launch(
+                    "matmul_blocked", blocks, (16, 16), da, db, dc
+                ),
+                None,
+                lambda dc=dc: (
+                    "max rel. err "
+                    f"{np.abs(dc.copy_to_host() - reference_c).max() / reference_scale:.1e}"
+                ),
+            ),
+        ]
+        for workload, launch, before, check in workloads:
+            measure(backend, launch, before)  # compiles
+            runs.append(
+                (label, info, workload, backend, index, launch, before, check, [])
+            )
 
-        def mm(backend=backend, da=da, db=db, dc=dc, tiles=tiles):
-            backend.launch("matmul", tiles, (16, 16), da, db, dc)
-            backend.sync()
-
-        for function in (reduce, hist, mm):  # compile
-            function()
-
-        samples = timings(reduce, repeat, lambda out=out: out.copy_to_device(zero1))
-        got = out.copy_to_host()[0]
-        exact = x.sum(dtype=np.float64)
-        record(
-            "reduce", label, info, samples, f"rel. err {abs(got - exact) / exact:.1e}"
-        )
-
-        samples = timings(hist, repeat, lambda d=dbins: d.copy_to_device(zero256))
-        ok = (dbins.copy_to_host() == reference_bins).all()
-        record("histogram", label, info, samples, "exact" if ok else "WRONG")
-
-        samples = timings(mm, repeat)
-        got = dc.copy_to_host()
-        err = np.abs(got - reference_c).max() / np.abs(reference_c).max()
-        record("matmul", label, info, samples, f"max rel. err {err:.1e}")
+    # Round by round, so that every backend sees the same conditions (clock
+    # boosts, thermal state, other load) as often as the others.
+    for _ in range(repeat):
+        for _, _, _, backend, index, launch, before, _, samples in runs:
+            if index is not None:
+                nv.select_device(index)
+            samples.append(measure(backend, launch, before))
+    for label, info, workload, backend, index, launch, before, check, samples in runs:
+        if index is not None:
+            nv.select_device(index)
+        # The results of the last round of this workload are checked; a later
+        # workload on the same backend may have overwritten them, so run once more.
+        if before is not None:
+            before()
+        launch()
+        backend.sync()
+        record(workload, label, info, [s[1] for s in samples], check())
+        records[-1]["enqueue_s"] = [s[0] for s in samples]
+        records[-1]["device_s"] = [s[2] for s in samples]
     return records
 
 
@@ -373,6 +498,8 @@ def to_markdown(records, opts):
         "(shared-memory integer atomics)",
         "matmul": f"{opts.matrix}x{opts.matrix} float32 matrix product "
         "(16x16 shared-memory tiles)",
+        "matmul_blocked": f"{opts.matrix}x{opts.matrix} float32 matrix product "
+        "(64x64 tiles, 4x4 per invocation in registers)",
     }
     lines = []
     for workload, title in titles.items():
@@ -380,11 +507,13 @@ def to_markdown(records, opts):
         lines += [
             f"### {title}",
             "",
-            "| Backend | Time (ms) | Check |",
-            "| --- | ---: | --- |",
+            "| Backend | Time (ms) | On the device (ms) | Check |",
+            "| --- | ---: | ---: | --- |",
         ]
         lines += [
-            f"| {r['label']} | {min(r['samples_s']) * 1e3:.3f} | {r['check']} |"
+            f"| {r['label']} | {min(r['samples_s']) * 1e3:.3f} | "
+            + (f"{min(r['device_s']) * 1e3:.3f}" if r.get("device_s") else "")
+            + f" | {r['check']} |"
             for r in rows
         ]
         lines.append("")
