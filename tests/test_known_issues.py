@@ -1,6 +1,7 @@
 """Executable list of known issues (see docs/source/known_issues.md).
 
-Every case is expected to fail (KI-32 only on macOS arm64). The marks are strict, so fixing an issue
+Every case is expected to fail (KI-32 only on macOS arm64, KI-33 only on
+NVIDIA and Intel GPUs). The marks are strict, so fixing an issue
 turns its test red until the case is moved to the regular test suite and
 the entry is removed from the documentation.
 """
@@ -89,3 +90,43 @@ def test_llvmlite_backend_on_macos_arm64():
         assert emitter.emit(SELECT_AFTER_FCMP_SELECT)[:4] == b"\x03\x02\x23\x07"
     finally:
         emitter.close()
+
+
+# KI-33: the drivers' float32 sqrt is not correctly rounded everywhere.
+_INEXACT_SQRT_VENDORS = {0x10DE, 0x8086}  # NVIDIA, Intel
+
+
+def _vendor(info):
+    import vulkan as vk
+
+    return vk.vkGetPhysicalDeviceProperties(info.handle).vendorID
+
+
+@pytest.mark.parametrize(
+    "info",
+    [
+        pytest.param(
+            info,
+            marks=pytest.mark.xfail(
+                _vendor(info) in _INEXACT_SQRT_VENDORS,
+                strict=True,
+                reason="KI-33, documented in docs/source/known_issues.md",
+            ),
+            id=info.name,
+        )
+        for info in nv.list_devices()
+    ],
+)
+def test_float32_sqrt_is_correctly_rounded(info):
+    import math
+
+    @nv.jit
+    def root(x, out):
+        i = nv.global_id(0)
+        if i < x.shape[0]:
+            out[i] = math.sqrt(x[i])
+
+    x = (np.random.default_rng(0).random(4096) * 1000).astype(f32)
+    out = np.zeros_like(x)
+    root.forall(x.size, device=info.index)(x, out)
+    np.testing.assert_array_equal(out, np.sqrt(x))

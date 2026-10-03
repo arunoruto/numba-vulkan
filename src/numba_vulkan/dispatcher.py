@@ -527,8 +527,14 @@ class VulkanDispatcher:
                         f"{arg._stored} elements, which does not match a kernel "
                         f"compiled with narrow={self.narrow}"
                     )
-                argtypes.append(_device_array_type(arg.dtype, arg.ndim))
+                # A view that starts elsewhere or has gaps passes its first
+                # element and steps after its extents (see compiler).
+                plain = arg._offset == 0 and arg.is_contiguous
+                layout = "C" if plain else "A"
+                argtypes.append(_device_array_type(arg.dtype, arg.ndim, layout))
                 shapes.extend(arg.shape)
+                if not plain:
+                    shapes.extend((arg._offset, *arg._steps))
                 hosts.append(arg)
             elif isinstance(arg, np.ndarray):
                 on_host = True
@@ -682,11 +688,11 @@ def _shape3(shape):
 
 
 @functools.cache
-def _device_array_type(dtype, ndim):
-    """Numba type of a device array."""
+def _device_array_type(dtype, ndim, layout="C"):
+    """Numba type of a device array; layout ``"A"`` for views with gaps."""
     if dtype == np.float16:
-        return HalfArray(ndim, "C")
-    return types.Array(numpy_support.from_dtype(dtype), ndim, "C")
+        return HalfArray(ndim, layout)
+    return types.Array(numpy_support.from_dtype(dtype), ndim, layout)
 
 
 def jit(

@@ -115,6 +115,18 @@ accurate to about 1e-5, as is `gamma` without libclc (with libclc,
 of about 1.5e-7, and the trigonometric functions are only as good as the
 driver's.
 
+### KI-33: `float32` square roots are off by one ulp on some drivers
+
+Vulkan lets `sqrt` be as inaccurate as `1 / inversesqrt`. For random
+arguments, NVIDIA's driver (580.x, TITAN X) returns the neighbour of the
+correctly rounded `float32` result for 17 % of them, Intel's (Mesa, UHD 630)
+for 8 %; llvmpipe, and `float64` everywhere, are exact. Python and NumPy
+round correctly, so results can differ in the last bit.
+
+**Fix:** correct the driver's result by comparing the squares of it and its
+neighbours with `x`, computed exactly (Dekker's product), for kernels
+without `fastmath`.
+
 ### KI-27: very large functions are not restructured
 
 SPIR-V needs structured control flow, and `structurize.py` rearranges the
@@ -139,11 +151,12 @@ because their results have to be copied back.
 **Fix:** a launch plan cached per argument types, so that a repeated launch
 only packs values and records; or recording in C.
 
-### KI-29: device arrays are bare buffers
+### KI-29: device arrays cannot be shared with other libraries
 
-A `DeviceArray` can be created, passed to kernels and copied; it has no
-indexing, slicing, views or arithmetic, and no `__cuda_array_interface__`
-equivalent for sharing memory with other libraries.
+A `DeviceArray` supports basic indexing, views and NumPy's ufuncs, but
+there is no `__cuda_array_interface__` or DLPack equivalent for handing its
+memory to other Vulkan libraries, and no advanced indexing (arrays or
+lists as indices).
 
 ### KI-14: Numba's part of compilation is repeated in every process
 

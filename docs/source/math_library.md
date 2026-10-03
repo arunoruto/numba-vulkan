@@ -42,8 +42,10 @@ What this buys, measured on the three test devices:
 `math` functions, as the matching NumPy ufuncs and through the `**`
 operator.
 
-`sqrt`, `fabs`, `floor`, `ceil` and `trunc` use the built-in versions, which
-are exact in both precisions.
+`sqrt`, `fabs`, `floor`, `ceil` and `trunc` use the built-in versions.
+`fabs`, `floor`, `ceil` and `trunc` are exact; `sqrt` is exact for
+`float64`, but for `float32` NVIDIA's and Intel's drivers return the
+neighbour of the correctly rounded result for some arguments (KI-33).
 
 `lgamma` comes from libclc as well. `gamma` does not: libclc 22 computes it
 as `exp(lgamma(x))`, which loses precision as the argument grows (1800 ulp

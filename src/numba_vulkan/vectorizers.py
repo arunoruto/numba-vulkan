@@ -91,6 +91,13 @@ class _Argument:
         return dtype.type(self.value)
 
 
+def _flattens(value):
+    """Whether a value can be passed as one dimension without a copy."""
+    if not isinstance(value, runtime.DeviceArray):
+        return True
+    return runtime._reshaped_steps(value.shape, value._steps, (value.size,)) is not None
+
+
 def _natural_types(arguments):
     """Element types of the arguments, for functions without signatures.
 
@@ -388,8 +395,11 @@ class VulkanUFunc:
             out[...] = result
             return out
 
-        # Inputs that cover the whole result are passed as one dimension.
-        flat = all(not a.is_array or a.shape == shape for a in arguments)
+        # Inputs that cover the whole result are passed as one dimension,
+        # unless a device array is a view that cannot be flattened.
+        flat = all(not a.is_array or a.shape == shape for a in arguments) and all(
+            _flattens(v) for v in [*values, out]
+        )
         if flat:
             values = [
                 v.reshape(-1) if a.is_array else v for a, v in zip(arguments, values)
@@ -472,7 +482,7 @@ class VulkanUFunc:
             return dtype.type(self.identity)
         self._core.compile_device(argtypes, restype)
         kernel = self._reduce_kernel(dtype)
-        values = values.reshape(-1)
+        values = values.ravel()  # a copy only for views with gaps
         while size > 1:
             groups = -(-size // (2 * _REDUCE_BLOCK))
             partial = runtime.device_array(groups, dtype, target)
