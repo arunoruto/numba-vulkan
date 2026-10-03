@@ -37,6 +37,12 @@ TRIPLE = "spirv1.5-unknown-vulkan1.2-compute"
 ENTRY_POINT = "main"
 
 _SPV_CAPABILITIES = {
+    61: "subgroup_basic",
+    62: "subgroup_vote",
+    63: "subgroup_arithmetic",
+    64: "subgroup_ballot",
+    65: "subgroup_shuffle",
+    66: "subgroup_shuffle_relative",
     10: "float64",
     11: "int64",
     9: "float16",
@@ -345,7 +351,8 @@ def emit_spirv(llvm_ir, exact=True, narrow_ints=False):
     """
     spirv = None
     try:
-        spirv = fix_barrier_semantics(fix_compare_exchange(emitter.emit(llvm_ir)))
+        spirv = lower_group_operations(emitter.emit(llvm_ir))
+        spirv = fix_barrier_semantics(fix_compare_exchange(spirv))
         spirv = half_storage(spirv)
         if narrow_ints:
             spirv = narrow_index_constants(spirv)
@@ -1332,6 +1339,153 @@ def preserve_nan(spirv, widths):
 
 
 _OP_FUNCTION, _OP_FUNCTION_END, _OP_LABEL = 54, 56, 248
+_OP_FUNCTION_PARAMETER, _OP_FUNCTION_CALL = 55, 57
+_DECORATION_LINKAGE, _CAP_LINKAGE = 41, 5
+_SCOPE_SUBGROUP = 3
+# Prefix of the functions that stand for subgroup operations.
+GROUP_PREFIX = "nv.sg."
+# Subgroup operations by the name after `GROUP_PREFIX`: opcode, capability,
+# and whether a group operation (reduce or scan) follows the scope.
+_GROUP_OPERATIONS = {
+    "elect": (333, 61, False),
+    "all": (334, 62, False),
+    "any": (335, 62, False),
+    "broadcast": (337, 64, False),
+    "broadcastfirst": (338, 64, False),
+    "ballot": (339, 64, False),
+    "ballotcount": (342, 64, True),
+    "shuffle": (345, 65, False),
+    "shufflexor": (346, 65, False),
+    "shuffleup": (347, 66, False),
+    "shuffledown": (348, 66, False),
+    "iadd": (349, 63, True),
+    "fadd": (350, 63, True),
+    "imul": (351, 63, True),
+    "fmul": (352, 63, True),
+    "smin": (353, 63, True),
+    "umin": (354, 63, True),
+    "fmin": (355, 63, True),
+    "smax": (356, 63, True),
+    "umax": (357, 63, True),
+    "fmax": (358, 63, True),
+}
+_GROUP_SCANS = {"red": 0, "incl": 1, "excl": 2}
+
+
+def lower_group_operations(spirv):
+    """Turn calls of subgroup placeholder functions into group instructions.
+
+    LLVM's backend offers subgroup reductions but not products, scans or
+    shuffles. Kernels therefore call functions named
+    ``nv.sg.<operation>[.<red|incl|excl>].<type>`` that are only declared,
+    which the backend emits as imported functions (with the ``Linkage``
+    capability, which Vulkan does not allow). Each call becomes the
+    ``OpGroupNonUniform*`` instruction of that name, on the subgroup scope,
+    and the declarations, their decorations and the capability go.
+
+    Parameters
+    ----------
+    spirv : bytes
+        A SPIR-V module.
+
+    Returns
+    -------
+    bytes
+        The module; `spirv` itself if it calls no such function.
+
+    Raises
+    ------
+    SpirvCodegenError
+        If a placeholder has a name this pass does not know.
+    """
+    header, instructions = _instructions(spirv)
+    names = {
+        i[1]: _string(i[2:])
+        for i in instructions
+        if i[0] & 0xFFFF == _OP_NAME and _string(i[2:]).startswith(GROUP_PREFIX)
+    }
+    if not names:
+        return spirv
+    operations = {}
+    for function, name in names.items():
+        parts = name[len(GROUP_PREFIX) :].split(".")
+        if parts[0] not in _GROUP_OPERATIONS:
+            raise SpirvCodegenError(f"unknown subgroup operation {name}")
+        opcode, capability, scanned = _GROUP_OPERATIONS[parts[0]]
+        scan = _GROUP_SCANS[parts[1]] if scanned else None
+        operations[function] = (opcode, capability, scan)
+    uint = next(
+        (
+            i[1]
+            for i in instructions
+            if i[0] & 0xFFFF == _OP_TYPE_INT and i[2] == 32 and i[3] == 0
+        ),
+        None,
+    )
+    scope = next(
+        (
+            i[2]
+            for i in instructions
+            if i[0] & 0xFFFF == _OP_CONSTANT
+            and i[1] == uint
+            and i[3] == _SCOPE_SUBGROUP
+        ),
+        None,
+    )
+    # The scope constant goes right after its type, which goes before all
+    # other declarations if it is missing too.
+    first, after_uint = [], []
+    if scope is None:
+        if uint is None:
+            uint = header[3]
+            header[3] += 1
+            first.append(((4 << 16) | _OP_TYPE_INT, uint, 32, 0))
+        scope = header[3]
+        header[3] += 1
+        (first if first else after_uint).append(
+            ((4 << 16) | _OP_CONSTANT, uint, scope, _SCOPE_SUBGROUP)
+        )
+    capabilities = {operation[1] for operation in operations.values()} | {61}
+    present = {i[1] for i in instructions if i[0] & 0xFFFF == _OP_CAPABILITY}
+    out, inside, declared = [], False, False
+    for inst in instructions:
+        opcode = inst[0] & 0xFFFF
+        if opcode == _OP_CAPABILITY:
+            if inst[1] == _CAP_LINKAGE:
+                continue
+            out.append(inst)
+            for capability in sorted(capabilities - present):
+                out.append(((2 << 16) | _OP_CAPABILITY, capability))
+            present |= capabilities
+            continue
+        if opcode == _OP_NAME and inst[1] in operations:
+            continue
+        if opcode == _OP_DECORATE and inst[1] in operations:
+            continue
+        if opcode == _OP_FUNCTION and inst[2] in operations:
+            inside = True
+            continue
+        if inside:
+            inside = opcode != _OP_FUNCTION_END
+            continue
+        if first and not declared and opcode in set(range(19, 53)):
+            out.extend(first)
+            declared = True
+        if opcode == _OP_FUNCTION_CALL and inst[3] in operations:
+            group, _, scan = operations[inst[3]]
+            operands = (scope,) + (() if scan is None else (scan,)) + inst[4:]
+            inst = (
+                ((3 + len(operands)) << 16) | group,
+                inst[1],
+                inst[2],
+                *operands,
+            )
+        out.append(inst)
+        if after_uint and opcode == _OP_TYPE_INT and inst[1] == uint:
+            out.extend(after_uint)
+    return _assemble(header, out)
+
+
 _OP_LOOP_MERGE, _OP_SELECTION_MERGE = 246, 247
 _OP_BRANCH, _OP_BRANCH_CONDITIONAL, _OP_SWITCH = 249, 250, 251
 

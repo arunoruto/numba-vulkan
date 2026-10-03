@@ -510,3 +510,85 @@ class FancyIndexing(AbstractTemplate):
                 "size. Loop over the elements instead."
             )
         return None
+
+
+# -- subgroups ----------------------------------------------------------------
+
+
+def _subgroup_value(ty):
+    """Whether subgroups can combine or exchange values of a type."""
+    return isinstance(ty, (types.Integer, types.Float)) and ty.bitwidth in (32, 64)
+
+
+def _subgroup_template(stub, typer):
+    """Register the typing of a subgroup function.
+
+    Parameters
+    ----------
+    stub : function
+        The function in `numba_vulkan.stubs.subgroup`.
+    typer : callable
+        Takes the argument types and returns the result type, or ``None``
+        if they do not fit.
+    """
+
+    @registry.register_global(stub)
+    class SubgroupTemplate(AbstractTemplate):
+        __doc__ = f"Typing of ``subgroup.{stub.__name__}``."
+
+        def generic(self, args, kws):
+            if kws:
+                return None
+            result = typer(*args)
+            unsupported = args and isinstance(args[0], types.Number)
+            if result is None and unsupported and not _subgroup_value(args[0]):
+                raise errors.TypingError(
+                    f"subgroup.{stub.__name__}() takes 32- or 64-bit integers "
+                    f"or floats, not {args[0]}"
+                )
+            return None if result is None else signature(result, *args)
+
+    return SubgroupTemplate
+
+
+def _no_arguments(result):
+    """A typer for functions without arguments."""
+    return lambda *args: None if args else result
+
+
+def _same(*args):
+    """The type of a single value argument."""
+    return args[0] if len(args) == 1 and _subgroup_value(args[0]) else None
+
+
+def _with_lane(*args):
+    """The type of the value of a value-and-lane call."""
+    if len(args) == 2 and _subgroup_value(args[0]):
+        return args[0] if isinstance(args[1], types.Integer) else None
+    return None
+
+
+def _predicate(result):
+    """A typer for functions of one boolean."""
+
+    def typer(*args):
+        if len(args) == 1 and isinstance(args[0], types.Boolean):
+            return result
+        return None
+
+    return typer
+
+
+for _name in ("size", "lane", "id", "count"):
+    _subgroup_template(getattr(stubs.subgroup, _name), _no_arguments(types.int32))
+for _op in ("sum", "prod", "min", "max"):
+    for _name in (_op, f"inclusive_{_op}", f"exclusive_{_op}"):
+        _subgroup_template(getattr(stubs.subgroup, _name), _same)
+_subgroup_template(stubs.subgroup.broadcast_first, _same)
+for _name in ("broadcast", "shuffle", "shuffle_xor", "shuffle_up", "shuffle_down"):
+    _subgroup_template(getattr(stubs.subgroup, _name), _with_lane)
+_subgroup_template(stubs.subgroup.any, _predicate(types.boolean))
+_subgroup_template(stubs.subgroup.all, _predicate(types.boolean))
+_subgroup_template(stubs.subgroup.elect, _no_arguments(types.boolean))
+_subgroup_template(stubs.subgroup.ballot, _predicate(types.UniTuple(types.uint32, 4)))
+_subgroup_template(stubs.subgroup.ballot_count, _predicate(types.uint32))

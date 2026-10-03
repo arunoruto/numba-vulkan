@@ -250,3 +250,202 @@ _local_array.__name__ = "array"
 local = _module(
     "local", "Invocation-private memory, like ``numba.cuda.local``.", [_local_array]
 )
+
+
+def _subgroup(name, doc):
+    """Create the stub of one subgroup function."""
+
+    def stub(*args):
+        raise NotImplementedError(
+            f"subgroup.{name}() can only be called inside a kernel"
+        )
+
+    stub.__name__ = name
+    stub.__doc__ = doc
+    return stub
+
+
+_REDUCE_DOC = """The {what} of `value` over the active invocations of the subgroup.
+
+Parameters
+----------
+value : int or float
+    A 32- or 64-bit integer or float.
+
+Returns
+-------
+int or float
+    The same for every active invocation, of the type of `value`.
+"""
+_SCAN_DOC = """The {what} of `value` over the active invocations up to this one.
+
+Invocations are ordered by `lane`; the {kind} scan {includes} the value of
+the invocation itself.
+
+Parameters
+----------
+value : int or float
+    A 32- or 64-bit integer or float.
+
+Returns
+-------
+int or float
+    Of the type of `value`.{empty}
+"""
+_SHUFFLE_DOC = """`value` of the invocation {which} in the subgroup.
+
+Parameters
+----------
+value : int or float
+    A 32- or 64-bit integer or float.
+{argument} : int
+    {meaning}
+
+Returns
+-------
+int or float
+    Undefined if that invocation is not active or does not exist.
+"""
+_ID_DOC = """{what}
+
+Returns
+-------
+int
+"""
+
+
+def _subgroup_functions():
+    """All stubs of `subgroup`, generated from their descriptions."""
+    functions = [
+        _subgroup(
+            "size",
+            _ID_DOC.format(
+                what="Number of invocations a subgroup can hold.\n\n"
+                "Drivers may run fewer: Intel's runs many kernels with 16 or 8\n"
+                "invocations per subgroup while reporting 32, and `count` then\n"
+                "says how many subgroups a workgroup has."
+            ),
+        ),
+        _subgroup(
+            "lane",
+            _ID_DOC.format(
+                what="Index of the current invocation within its subgroup "
+                "(``cuda.laneid``)."
+            ),
+        ),
+        _subgroup(
+            "id", _ID_DOC.format(what="Index of the subgroup within its workgroup.")
+        ),
+        _subgroup("count", _ID_DOC.format(what="Number of subgroups per workgroup.")),
+    ]
+    whats = {"sum": "sum", "prod": "product", "min": "minimum", "max": "maximum"}
+    for op, what in whats.items():
+        functions.append(_subgroup(op, _REDUCE_DOC.format(what=what)))
+        for kind, includes, empty in (
+            ("inclusive", "includes", ""),
+            (
+                "exclusive",
+                "leaves out",
+                (
+                    " The first invocation receives the identity of the\n"
+                    "    operation (0 for a sum, 1 for a product, the largest value\n"
+                    "    for a minimum, the smallest for a maximum)."
+                ),
+            ),
+        ):
+            functions.append(
+                _subgroup(
+                    f"{kind}_{op}",
+                    _SCAN_DOC.format(
+                        what=what, kind=kind, includes=includes, empty=empty
+                    ),
+                )
+            )
+    functions += [
+        _subgroup(
+            "any",
+            "Whether `predicate` holds for any active invocation of the subgroup.\n\n"
+            "Parameters\n----------\npredicate : bool\n\nReturns\n-------\nbool\n",
+        ),
+        _subgroup(
+            "all",
+            "Whether `predicate` holds for all active invocations of the subgroup."
+            "\n\nParameters\n----------\npredicate : bool\n\nReturns\n-------\nbool\n",
+        ),
+        _subgroup(
+            "elect",
+            "Whether this is the active invocation of the subgroup with the "
+            "lowest `lane`.\n\nReturns\n-------\nbool\n",
+        ),
+        _subgroup(
+            "ballot",
+            "The active invocations of the subgroup for which `predicate` holds."
+            "\n\nParameters\n----------\npredicate : bool\n\nReturns\n-------\n"
+            "tuple of int\n    Four ``uint32`` words; bit ``k % 32`` of word "
+            "``k // 32`` stands\n    for the invocation with `lane` ``k``.\n",
+        ),
+        _subgroup(
+            "ballot_count",
+            "Number of active invocations of the subgroup for which `predicate` "
+            "holds.\n\nParameters\n----------\npredicate : bool\n\nReturns\n"
+            "-------\nint\n",
+        ),
+        _subgroup(
+            "broadcast",
+            _SHUFFLE_DOC.format(
+                which="with `lane` ``lane``",
+                argument="lane",
+                meaning="The same for every invocation of the subgroup.",
+            ),
+        ),
+        _subgroup(
+            "broadcast_first",
+            "`value` of the active invocation with the lowest `lane`.\n\n"
+            "Parameters\n----------\nvalue : int or float\n\nReturns\n-------\n"
+            "int or float\n",
+        ),
+        _subgroup(
+            "shuffle",
+            _SHUFFLE_DOC.format(
+                which="with `lane` ``lane``",
+                argument="lane",
+                meaning="May differ between invocations.",
+            ),
+        ),
+        _subgroup(
+            "shuffle_xor",
+            _SHUFFLE_DOC.format(
+                which="whose `lane` is that of this one xor ``mask``",
+                argument="mask",
+                meaning="The same for every invocation of the subgroup.",
+            ),
+        ),
+        _subgroup(
+            "shuffle_up",
+            _SHUFFLE_DOC.format(
+                which="``delta`` lanes below this one",
+                argument="delta",
+                meaning="The same for every invocation of the subgroup.",
+            ),
+        ),
+        _subgroup(
+            "shuffle_down",
+            _SHUFFLE_DOC.format(
+                which="``delta`` lanes above this one",
+                argument="delta",
+                meaning="The same for every invocation of the subgroup.",
+            ),
+        ),
+    ]
+    return functions
+
+
+subgroup = _module(
+    "subgroup",
+    "Operations across the invocations of a subgroup (a warp, in CUDA's terms).\n\n"
+    "A workgroup runs as subgroups of `subgroup.size` invocations that execute\n"
+    "together. These functions combine or exchange values within one; they need\n"
+    "the device's support for subgroup operations, and they must be reached by\n"
+    "the invocations that take part, as in CUDA's ``*_sync`` functions.",
+    _subgroup_functions(),
+)
