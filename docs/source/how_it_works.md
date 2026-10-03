@@ -138,7 +138,9 @@ generation, in three steps:
    with a flag set, and a test in front of the block skips it when the flag
    is set. Copying costs no run time, guarding costs no code size, and
    only guarding keeps functions with many early returns from growing
-   exponentially.
+   exponentially. A join that is one tiny block, such as the block that
+   stores the status of a kernel that raised, is always copied, so that
+   each place that raises leaves on a path of its own.
 3. **Shared merge blocks.** A selection that shares its merge block with an
    enclosing one gets a merge block of its own that forwards to the shared
    one.
@@ -147,10 +149,29 @@ To make these rewrites simple, the IR is first brought into a form without
 phi nodes (LLVM's `reg2mem`), without `switch` (`lower-switch`) and with
 canonical loops (`loop-simplify`).
 
+Steps 1 and 2 need dominators, post-dominators and loops of the whole
+graph, which are recomputed after the rewrites. A rewrite changes edges
+only within a small *footprint*: for a loop, its body, the blocks in front
+of it and the targets of its exits; for a join, the blocks on the paths
+from its immediate dominator to it, the blocks it dominates if it is copied,
+and their successors. Dominance outside a footprint stays as it was, so all
+rewrites with disjoint footprints are made on one analysis. A kernel of
+some 5700 blocks needs 11 analyses instead of several hundred, and about
+2 s instead of 40 s.
+
+After code generation, `codegen.check_structure` checks every module for the
+rules of structured control flow that a failure here or in LLVM's backend
+would break (a conditional branch without a merge instruction, a branch
+back to a block that is no loop header, two constructs sharing a merge
+block), so that such a module never reaches a driver, with or without
+`spirv-val`.
+
 The flags are ordinary local variables, which the drivers' compilers
 optimise like any other. `tests/fuzz_control_flow.py` checks this step with
-random programs: all of the 1130 it was last run on compiled and gave the
-same results as Python (see {doc}`development`).
+random programs: all of the 900 it was last run on (600 of them with
+`--rich`) compiled and gave the same results as Python on three devices
+(see {doc}`development`). `tests/test_control_flow_corpus.py` runs the
+shapes of rust-gpu's control-flow tests as part of the test suite.
 
 ## SPIR-V emission
 
@@ -311,6 +332,7 @@ size of the whole grid.
 | The SPIR-V backend emits `OpUnordered`/`OpOrdered`, which shaders may not use | NaN comparisons are rewritten as tests on the bit pattern |
 | The SPIR-V backend cannot select `llvm.copysign`, and instcombine creates it from bit operations | calls are expanded after optimisation |
 | All tested drivers reassociate float arithmetic, e.g. `(1 + x) - 1` becomes `x` | every float operation is decorated `NoContraction` |
+| Without `SignedZeroInfNanPreserve`, drivers may assume there are no NaNs; NVIDIA's turns `y < x ? y : x` (Python's `min`) into an instruction that ignores NaN | kernels without `fastmath` declare the execution mode, for the float widths they use, on devices that support it |
 | The `log` of GPU drivers is imprecise close to 1 | the fallback `log1p` and `expm1` use series for small arguments |
 | Vulkan has no math library beyond GLSL.std.450 | math functions are linked in from libclc; see {doc}`math_library` |
 | The SPIR-V backend mistakes `x = a * b; (x < 0) ? -y : y` for GLSL's `faceforward` and crashes | strict comparisons with zero are emitted as negated complements |

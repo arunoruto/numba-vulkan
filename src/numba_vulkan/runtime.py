@@ -27,6 +27,7 @@ except OSError as exc:  # the `vulkan` package could not open the loader
 
 from numba_vulkan import narrowing
 from numba_vulkan.buffers import META_BINDING, print_formats
+from numba_vulkan.codegen import check_spirv, preserve_nan
 from numba_vulkan.errors import VulkanSupportError, VulkanValidationWarning
 
 _DEVICE_TYPES = {
@@ -75,6 +76,9 @@ class DeviceInfo:
         Largest number of workgroups along each axis of a dispatch.
     max_shared_memory : int
         Bytes of workgroup-shared memory available to a kernel.
+    nan_preserve : tuple of int
+        Float widths for which shaders can require NaN, infinity and signed
+        zero to be kept (``SignedZeroInfNanPreserve``).
     """
 
     index: int
@@ -94,6 +98,7 @@ class DeviceInfo:
     max_local_invocations: int = 128
     max_groups: tuple = (65535, 65535, 65535)
     max_shared_memory: int = 16384
+    nan_preserve: tuple = ()
 
     def __repr__(self):
         return f"<{self.index}: {self.name} ({self.kind})>"
@@ -330,6 +335,36 @@ def _vulkan12_features(handle):
     return feats
 
 
+def _nan_preserving_widths(handle):
+    """Float widths for which shaders can ask to keep NaN, infinity and -0.
+
+    Parameters
+    ----------
+    handle : object
+        A ``VkPhysicalDevice`` handle.
+
+    Returns
+    -------
+    tuple of int
+        Out of 32 and 64, from ``shaderSignedZeroInfNanPreserveFloat*``.
+    """
+    props = vk.VkPhysicalDeviceVulkan12Properties(
+        sType=vk.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_PROPERTIES
+    )
+    props2 = vk.VkPhysicalDeviceProperties2(
+        sType=vk.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, pNext=props
+    )
+    vk.vkGetPhysicalDeviceProperties2(handle, props2)
+    return tuple(
+        width
+        for width, kept in (
+            (32, props.shaderSignedZeroInfNanPreserveFloat32),
+            (64, props.shaderSignedZeroInfNanPreserveFloat64),
+        )
+        if kept
+    )
+
+
 _FLOAT_ATOMICS = "VK_EXT_shader_atomic_float"
 _PORTABILITY_ENUMERATION = "VK_KHR_portability_enumeration"
 # Implementations of Vulkan on top of other APIs (MoltenVK) offer this, and
@@ -418,6 +453,7 @@ def list_devices(refresh=False):
                 max_local_invocations=limits.maxComputeWorkGroupInvocations,
                 max_groups=tuple(limits.maxComputeWorkGroupCount),
                 max_shared_memory=limits.maxComputeSharedMemorySize,
+                nan_preserve=_nan_preserving_widths(handle),
             )
         )
     _infos = found
@@ -627,12 +663,19 @@ class Device:
             return self._pipelines[key]
         self.check_support(kernel)
         dev = self.handle
+        code = kernel.spirv
+        if kernel.exact and self.info.nan_preserve:
+            # Without this, drivers may assume that there are no NaNs:
+            # NVIDIA's turns ``y < x ? y : x``, Python's min(), into an
+            # instruction that ignores NaN.
+            code = preserve_nan(code, self.info.nan_preserve)
+            check_spirv(code)
         module = vk.vkCreateShaderModule(
             dev,
             vk.VkShaderModuleCreateInfo(
                 sType=vk.VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
-                codeSize=len(kernel.spirv),
-                pCode=kernel.spirv,
+                codeSize=len(code),
+                pCode=code,
             ),
             None,
         )

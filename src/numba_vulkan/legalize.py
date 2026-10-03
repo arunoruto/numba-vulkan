@@ -205,8 +205,11 @@ def expand_copysign(text):
 def expand_fmuladd(text):
     """Rewrite ``llvm.fmuladd`` as a multiplication and an addition.
 
-    The intrinsic means "multiply and add, fused or not", and the SPIR-V
-    backend fails on it. libclc uses it throughout.
+    The intrinsic means "multiply and add, fused or not"; libclc uses it
+    throughout. The SPIR-V backend of LLVM 22 emits GLSL's ``Fma`` for it,
+    which some drivers fuse and others do not, and which would bypass the
+    software ``fma`` of devices that need one (see `emulate_fma`). Separate
+    operations give the same results on every device.
 
     Parameters
     ----------
