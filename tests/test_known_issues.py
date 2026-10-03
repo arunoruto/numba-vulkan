@@ -51,6 +51,14 @@ def _(x, out):
         out[i].a = x[i].b
 
 
+@known_issue("KI-34 slice of a reversed view", XF, lambda x: x[::-1][:2].sum() + 0 * x)
+def _(x, out):
+    i = nv.global_id(0)
+    if i < x.size:
+        v = x[::-1][:2]
+        out[i] = v[0] + v[1]
+
+
 @pytest.mark.parametrize("issue", CASES)
 @pytest.mark.xfail(strict=True, reason="documented in docs/source/known_issues.md")
 def test_known_issue(issue):

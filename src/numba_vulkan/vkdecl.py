@@ -263,7 +263,7 @@ def _atomic_target(array, index, dtypes):
         raise errors.TypingError(
             "atomic operations on float16 arrays are not supported"
         )
-    if array.binding >= LOCAL_BASE:
+    if array.binding is not None and array.binding >= LOCAL_BASE:
         raise errors.TypingError("atomic operations on local arrays are not supported")
     if not array.mutable:
         raise errors.TypingError("atomic operations need a writable array")

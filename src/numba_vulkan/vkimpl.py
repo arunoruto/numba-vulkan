@@ -124,12 +124,57 @@ class _Selection:
         the view, as an ``intp`` count of elements.
     shape, strides : list of llvmlite.ir.Value
         Extents and strides (in bytes) of the view; empty for an element.
+    binding : int or llvmlite.ir.Value
+        Binding of the buffer; see `_binding`.
     """
 
-    def __init__(self, offset, shape, strides):
+    def __init__(self, offset, shape, strides, binding):
         self.offset = offset
         self.shape = shape
         self.strides = strides
+        self.binding = binding
+
+
+def _binding(context, builder, aryty, ary):
+    """The binding of an array's buffer.
+
+    Returns
+    -------
+    int or llvmlite.ir.Value
+        The number in the type, or, for arrays that carry it as a value
+        (kernel arguments), that value; inlining makes it a constant.
+    """
+    if aryty.binding is not None:
+        return aryty.binding
+    return cgutils.create_struct_proxy(aryty)(context, builder, value=ary).binding
+
+
+def _same_buffer(context, builder, first, second):
+    """Whether two arrays live in the same buffer.
+
+    Parameters
+    ----------
+    first, second : tuple
+        Type and value of each array.
+
+    Returns
+    -------
+    bool or llvmlite.ir.Value
+        A Python bool where the types decide it, otherwise an ``i1`` that
+        is constant after inlining.
+    """
+    (ty1, v1), (ty2, v2) = first, second
+    if ty1.binding is not None and ty2.binding is not None:
+        return ty1.binding == ty2.binding
+    a = _binding_value(context, builder, ty1, v1)
+    b = _binding_value(context, builder, ty2, v2)
+    return builder.icmp_unsigned("==", a, b)
+
+
+def _binding_value(context, builder, aryty, ary):
+    """The binding of an array's buffer as an ``i32`` value."""
+    binding = _binding(context, builder, aryty, ary)
+    return i32(binding) if isinstance(binding, int) else binding
 
 
 def _unpack(context, builder, aryty, ary):
@@ -270,7 +315,8 @@ def _select(context, builder, aryty, ary, idxty, idx):
     # Axes without an index are taken whole.
     out_shape += shape[len(indices) :]
     out_strides += strides[len(indices) :]
-    return _Selection(offset, out_shape, out_strides)
+    binding = _binding(context, builder, aryty, ary)
+    return _Selection(offset, out_shape, out_strides, binding)
 
 
 def _make_view(context, builder, viewty, selection):
@@ -301,7 +347,20 @@ def _make_view(context, builder, viewty, selection):
     proxy.shape = cgutils.pack_array(builder, selection.shape, ty=intp)
     proxy.strides = cgutils.pack_array(builder, selection.strides, ty=intp)
     proxy.offset = builder.sext(selection.offset, intp)
+    proxy.binding = _binding_member(viewty, selection.binding)
     return proxy._getvalue()
+
+
+def _binding_member(aryty, binding):
+    """The value of the ``binding`` member of an array of type `aryty`.
+
+    Only arrays whose type has no binding read it. The others store 0, so
+    that the per-process numbers of constant arrays stay out of the IR that
+    the kernel cache hashes (see `numba_vulkan.kernelcache`).
+    """
+    if aryty.binding is not None:
+        return i32(0)
+    return i32(binding) if isinstance(binding, int) else binding
 
 
 def half_conversion(builder, value, target):
@@ -359,10 +418,10 @@ def storage_type(context, aryty):
     return buffer_element_type(context, aryty.dtype)
 
 
-def _load(context, builder, aryty, position):
+def _load(context, builder, aryty, position, binding):
     """Read the element at a position of an array's buffer."""
     elem = storage_type(context, aryty)
-    val = load_element(builder, aryty.binding, elem, position)
+    val = load_element(builder, binding, elem, position)
     if isinstance(aryty.dtype, types.Boolean):
         val = builder.icmp_unsigned("!=", val, i32(0))
     elif isinstance(elem, ir.HalfType):
@@ -370,7 +429,7 @@ def _load(context, builder, aryty, position):
     return val
 
 
-def _store(context, builder, aryty, position, val, valty):
+def _store(context, builder, aryty, position, val, valty, binding):
     """Write a value, cast to the element type, at a position of a buffer."""
     val = context.cast(builder, val, valty, aryty.dtype)
     elem = storage_type(context, aryty)
@@ -378,7 +437,7 @@ def _store(context, builder, aryty, position, val, valty):
         val = builder.zext(val, i32)
     elif isinstance(elem, ir.HalfType):
         val = half_conversion(builder, val, elem)
-    store_element(builder, aryty.binding, elem, position, val)
+    store_element(builder, binding, elem, position, val)
 
 
 def _position(context, builder, aryty, ary, indices):
@@ -421,7 +480,7 @@ def lower_getitem(context, builder, sig, args):
     selection = _select(context, builder, aryty, args[0], idxty, args[1])
     if isinstance(sig.return_type, types.Array):
         return _make_view(context, builder, sig.return_type, selection)
-    return _load(context, builder, aryty, selection.offset)
+    return _load(context, builder, aryty, selection.offset, selection.binding)
 
 
 @lower(operator.getitem, VulkanArray, types.EllipsisType)
@@ -454,7 +513,8 @@ def lower_transpose(context, builder, ty, value):
         return value
     offset, shape, strides, _ = _unpack(context, builder, ty, value)
     viewty = context.typing_context.resolve_getattr(ty, "T")
-    selection = _Selection(offset, shape[::-1], strides[::-1])
+    binding = _binding(context, builder, ty, value)
+    selection = _Selection(offset, shape[::-1], strides[::-1], binding)
     return _make_view(context, builder, viewty, selection)
 
 
@@ -500,7 +560,9 @@ def lower_setitem(context, builder, sig, args):
     aryty, idxty, valty = sig.args
     selection = _select(context, builder, aryty, args[0], idxty, args[1])
     if not selection.shape:
-        _store(context, builder, aryty, selection.offset, args[2], valty)
+        _store(
+            context, builder, aryty, selection.offset, args[2], valty, selection.binding
+        )
         return context.get_dummy_value()
 
     ndim = len(selection.shape)
@@ -512,20 +574,25 @@ def lower_setitem(context, builder, sig, args):
                 f"assigning {valty} to a {ndim}-d slice is not supported on Vulkan "
                 "(only scalars and arrays of the same dimensionality are)"
             )
-        if valty.binding == aryty.binding:
+        shared = _same_buffer(context, builder, (valty, args[2]), (aryty, args[0]))
+        if shared is not False:
             # Allowed only as a no-op: ``a[i] += x`` assigns a view to itself.
             offset, shape, _, steps = _unpack(context, builder, valty, args[2])
             _, _, _, view_steps = _unpack(context, builder, viewty, view)
             same = builder.icmp_signed("==", offset, selection.offset)
             for a, b in zip(shape + steps, selection.shape + view_steps):
                 same = builder.and_(same, builder.icmp_signed("==", a, b))
-            with builder.if_then(builder.not_(same), likely=False):
+            overlap = builder.not_(same)
+            if shared is not True:
+                overlap = builder.and_(shared, overlap)
+            with builder.if_then(overlap, likely=False):
                 context.call_conv.return_user_exc(
                     builder,
                     ValueError,
                     ("copying between slices of the same array, which could overlap",),
                 )
-            return context.get_dummy_value()
+            if shared is True:
+                return context.get_dummy_value()
         source_shape = _unpack(context, builder, valty, args[2])[1]
         for extent, wanted in zip(source_shape, selection.shape):
             with builder.if_then(
@@ -537,14 +604,17 @@ def lower_setitem(context, builder, sig, args):
                     ("cannot assign slice from input of different size",),
                 )
     intp = context.get_value_type(types.intp)
+    if isinstance(valty, types.Array):
+        source_binding = _binding(context, builder, valty, args[2])
     with cgutils.loop_nest(builder, selection.shape, intp) as indices:
         if isinstance(valty, types.Array):
             source = _position(context, builder, valty, args[2], indices)
-            val, itemty = _load(context, builder, valty, source), valty.dtype
+            val = _load(context, builder, valty, source, source_binding)
+            itemty = valty.dtype
         else:
             val, itemty = args[2], valty
         target = _position(context, builder, viewty, view, indices)
-        _store(context, builder, aryty, target, val, itemty)
+        _store(context, builder, aryty, target, val, itemty, selection.binding)
     return context.get_dummy_value()
 
 
@@ -602,14 +672,15 @@ def lower_iternext(context, builder, sig, args, result):
     iterator = context.make_helper(builder, iterty, value=args[0])
     index = builder.load(iterator.index)
     offset, shape, strides, steps = _unpack(context, builder, aryty, iterator.array)
+    binding = _binding(context, builder, aryty, iterator.array)
     valid = builder.icmp_signed("<", index, shape[0])
     result.set_valid(valid)
     with builder.if_then(valid):
         position = builder.add(offset, builder.mul(_i32(builder, index), steps[0]))
         if aryty.ndim == 1:
-            result.yield_(_load(context, builder, aryty, position))
+            result.yield_(_load(context, builder, aryty, position, binding))
         else:
-            selection = _Selection(position, shape[1:], strides[1:])
+            selection = _Selection(position, shape[1:], strides[1:], binding)
             result.yield_(_make_view(context, builder, iterty.yield_type, selection))
         builder.store(builder.add(index, index.type(1)), iterator.index)
 
@@ -647,14 +718,16 @@ def flat_item(typingctx, array, position):
                 k = builder.udiv(k, extent)
             return expression_element(context, builder, aryty, args[0], indices)
         offset, shape, _, steps = _unpack(context, builder, aryty, args[0])
+        binding = _binding(context, builder, aryty, args[0])
         if aryty.layout == "C":
-            return _load(context, builder, aryty, builder.add(offset, _i32(builder, k)))
+            position = builder.add(offset, _i32(builder, k))
+            return _load(context, builder, aryty, position, binding)
         # A view: split the position into one index per axis, last first.
         for extent, step in zip(reversed(shape), reversed(steps)):
             index = builder.urem(k, extent)
             k = builder.udiv(k, extent)
             offset = builder.add(offset, builder.mul(_i32(builder, index), step))
-        return _load(context, builder, aryty, offset)
+        return _load(context, builder, aryty, offset, binding)
 
     return array.dtype(array, position), codegen
 
@@ -771,6 +844,7 @@ def static_array(context, builder, aryty, shape):
     proxy.shape = cgutils.pack_array(builder, [intp(n) for n in shape], ty=intp)
     proxy.strides = cgutils.pack_array(builder, [intp(n) for n in strides], ty=intp)
     proxy.offset = intp(0)
+    proxy.binding = _binding_member(aryty, aryty.binding)
     return proxy._getvalue()
 
 
@@ -820,9 +894,8 @@ def _register_constructor(function, fill):
             value = context.get_constant(aryty.dtype, 1 if function is np.ones else 0)
         count = context.get_constant(types.intp, shared_sizes[aryty.binding])
         with cgutils.for_range(builder, count) as loop:
-            _store(
-                context, builder, aryty, _i32(builder, loop.index), value, aryty.dtype
-            )
+            position = _i32(builder, loop.index)
+            _store(context, builder, aryty, position, value, aryty.dtype, aryty.binding)
         return array
 
     lower_constructor.__doc__ = f"Lower ``np.{function.__name__}`` in kernels."
@@ -838,12 +911,12 @@ _register_constructor(np.full, fill=True)
 
 
 def _atomic_position(context, builder, aryty, ary, idxty, idx):
-    """Buffer position of the element an atomic operation applies to."""
+    """Binding and buffer position of the element an atomic applies to."""
     selection = _select(context, builder, aryty, ary, idxty, idx)
-    return selection.offset
+    return selection.binding, selection.offset
 
 
-def _float_atomic(context, builder, aryty, position, value, update):
+def _float_atomic(context, builder, binding, position, value, update):
     """Apply a float read-modify-write with a compare-and-swap loop.
 
     Parameters
@@ -858,7 +931,7 @@ def _float_atomic(context, builder, aryty, position, value, update):
         The element's previous value.
     """
     single = ir.FloatType()
-    current = load_element(builder, aryty.binding, single, position)
+    current = load_element(builder, binding, single, position)
     first = builder.bitcast(current, i32)
     start = builder.basic_block
     loop = builder.append_basic_block("atomic.loop")
@@ -873,7 +946,7 @@ def _float_atomic(context, builder, aryty, position, value, update):
     # Nothing to write: the element already has the result (max, min).
     builder.cbranch(builder.icmp_unsigned("==", new, bits), done, swap)
     builder.position_at_end(swap)
-    seen = compare_and_swap(builder, aryty.binding, position, bits, new)
+    seen = compare_and_swap(builder, binding, position, bits, new)
     bits.add_incoming(seen, swap)
     builder.cbranch(builder.icmp_unsigned("==", seen, bits), done, loop)
     builder.position_at_end(done)
@@ -906,7 +979,9 @@ def _register_atomic(stub):
     def lower_atomic(context, builder, sig, args):
         aryty, idxty, valty = sig.args
         dtype = aryty.dtype
-        position = _atomic_position(context, builder, aryty, args[0], idxty, args[1])
+        binding, position = _atomic_position(
+            context, builder, aryty, args[0], idxty, args[1]
+        )
         value = context.cast(builder, args[2], valty, dtype)
         if isinstance(dtype, types.Integer):
             if dtype.bitwidth == 64 and not narrowing.current.ints:
@@ -919,14 +994,14 @@ def _register_atomic(stub):
             if op in ("max", "min") and not dtype.signed:
                 op = "u" + op
             elem = buffer_element_type(context, dtype)
-            return atomic_element(builder, aryty.binding, elem, position, op, value)
+            return atomic_element(builder, binding, elem, position, op, value)
         if name == "exch":
             if dtype == types.float64 and not narrowing.current.floats:
                 raise VulkanUnsupportedError("atomic.exch on float64 is not supported")
             single = narrowing.to_single(builder, value)
             old = atomic_element(
                 builder,
-                aryty.binding,
+                binding,
                 i32,
                 position,
                 "xchg",
@@ -945,14 +1020,14 @@ def _register_atomic(stub):
             if name == "sub":
                 single = builder.fneg(single)
             old = atomic_element(
-                builder, aryty.binding, ir.FloatType(), position, "fadd", single
+                builder, binding, ir.FloatType(), position, "fadd", single
             )
             return narrowing.to_double(builder, old) if dtype == types.float64 else old
         update = _FLOAT_UPDATES[name]
         old = _float_atomic(
             context,
             builder,
-            aryty,
+            binding,
             position,
             narrowing.to_single(builder, value),
             lambda o, v: update(builder, o, v),
@@ -979,12 +1054,14 @@ def lower_cas(context, builder, sig, args):
     """
     aryty, idxty, expty, valty = sig.args
     dtype = aryty.dtype
-    position = _atomic_position(context, builder, aryty, args[0], idxty, args[1])
+    binding, position = _atomic_position(
+        context, builder, aryty, args[0], idxty, args[1]
+    )
     expected = context.cast(builder, args[2], expty, dtype)
     value = context.cast(builder, args[3], valty, dtype)
     if isinstance(dtype, types.Float):
         expected, value = (builder.bitcast(v, i32) for v in (expected, value))
-    old = compare_and_swap(builder, aryty.binding, position, expected, value)
+    old = compare_and_swap(builder, binding, position, expected, value)
     return (
         builder.bitcast(old, ir.FloatType()) if isinstance(dtype, types.Float) else old
     )
@@ -1060,7 +1137,7 @@ def _operand_element(context, builder, ty, value, indices):
             builder.icmp_signed("==", extent, extent.type(1)), index.type(0), index
         )
         offset = builder.add(offset, builder.mul(_i32(builder, index), step))
-    return _load(context, builder, ty, offset)
+    return _load(context, builder, ty, offset, _binding(context, builder, ty, value))
 
 
 def expression_element(context, builder, ty, value, indices):
@@ -1243,20 +1320,33 @@ def assign_expression(context, builder, aryty, selection, exprty, expr):
         for stride in selection.strides
     ]
     for opty, operand in _arrays_in(exprty, expr, context, builder):
-        if opty.binding != aryty.binding:
+        if opty.binding is not None and isinstance(selection.binding, int):
+            shared = opty.binding == selection.binding
+        else:
+            source = _binding_value(context, builder, opty, operand)
+            target = selection.binding
+            target = i32(target) if isinstance(target, int) else target
+            shared = builder.icmp_unsigned("==", source, target)
+        if shared is False:
             continue
         offset, op_shape, _, steps = _unpack(context, builder, opty, operand)
         if opty.ndim != len(view_shape):
-            raise VulkanUnsupportedError(
-                "an expression may only read the array it is assigned to at the "
-                "positions it writes"
-            )
-        same = builder.icmp_signed("==", offset, selection.offset)
-        for a, b in zip(op_shape, view_shape):
-            same = builder.and_(same, builder.icmp_signed("==", a, b))
-        for a, b in zip(steps, view_steps):
-            same = builder.and_(same, builder.icmp_signed("==", a, b))
-        with builder.if_then(builder.not_(same), likely=False):
+            if shared is True:
+                raise VulkanUnsupportedError(
+                    "an expression may only read the array it is assigned to at "
+                    "the positions it writes"
+                )
+            same = cgutils.false_bit  # different shapes: never the same view
+        else:
+            same = builder.icmp_signed("==", offset, selection.offset)
+            for a, b in zip(op_shape, view_shape):
+                same = builder.and_(same, builder.icmp_signed("==", a, b))
+            for a, b in zip(steps, view_steps):
+                same = builder.and_(same, builder.icmp_signed("==", a, b))
+        overlap = builder.not_(same)
+        if shared is not True:
+            overlap = builder.and_(shared, overlap)
+        with builder.if_then(overlap, likely=False):
             context.call_conv.return_user_exc(
                 builder,
                 ValueError,
@@ -1276,7 +1366,7 @@ def assign_expression(context, builder, aryty, selection, exprty, expr):
             list(indices)[len(view_shape) - exprty.ndim :],
         )
         target = _position(context, builder, viewty, view, indices)
-        _store(context, builder, aryty, target, value, exprty.dtype)
+        _store(context, builder, aryty, target, value, exprty.dtype, selection.binding)
 
 
 @lower(operator.setitem, VulkanArray, types.Integer, VulkanExpr)
@@ -1306,7 +1396,8 @@ def _register_inplace(op, plain):
         proxy = cgutils.create_struct_proxy(exprty)(context, builder)
         proxy.operand0, proxy.operand1 = args
         offset, shape, strides, _ = _unpack(context, builder, aryty, args[0])
-        selection = _Selection(offset, shape, strides)
+        binding = _binding(context, builder, aryty, args[0])
+        selection = _Selection(offset, shape, strides, binding)
         assign_expression(context, builder, aryty, selection, exprty, proxy._getvalue())
         return args[0]
 

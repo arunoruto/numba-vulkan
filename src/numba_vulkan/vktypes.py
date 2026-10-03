@@ -4,11 +4,15 @@ from numba.core import types
 
 
 class VulkanArray(types.Array):
-    """An array backed by the storage buffer at a fixed descriptor binding.
+    """An array backed by a storage buffer at a descriptor binding.
 
-    Vulkan shaders have no general pointers, so the buffer an array lives
-    in is part of its type rather than of its runtime value. A function
-    taking arrays is therefore compiled once per combination of bindings.
+    Vulkan shaders have no general pointers, so every access names the
+    buffer by its binding, which must be a constant in the shader. Arrays
+    allocated in a kernel (shared, local, constant arrays) have it in their
+    type. Kernel arguments carry it as a value (``binding=None``), so that a
+    function taking arrays is compiled once for all of them; after inlining
+    into the kernel, the value is a constant (see
+    `numba_vulkan.buffers.expand_buffer_access`).
 
     Parameters
     ----------
@@ -19,8 +23,9 @@ class VulkanArray(types.Array):
     layout : {'C', 'A'}
         Memory layout: ``'C'`` for contiguous arrays, ``'A'`` for views
         with arbitrary strides.
-    binding : int
-        Descriptor binding of the buffer holding the data.
+    binding : int or None
+        Descriptor binding of the buffer holding the data, or ``None`` for
+        arrays that carry it as a value.
     readonly : bool, optional
         Whether the array is immutable.
     aligned : bool, optional
@@ -31,8 +36,8 @@ class VulkanArray(types.Array):
 
     Attributes
     ----------
-    binding : int
-        Descriptor binding of the buffer holding the data.
+    binding : int or None
+        As given.
     half : bool
         As given.
     """
@@ -43,7 +48,8 @@ class VulkanArray(types.Array):
         self.binding = binding
         self.half = half
         storage = ", float16" if half else ""
-        name = f"vkarray({dtype}{storage}, {ndim}d, {layout}, binding={binding})"
+        where = "*" if binding is None else binding
+        name = f"vkarray({dtype}{storage}, {ndim}d, {layout}, binding={where})"
         super().__init__(
             dtype, ndim, layout, readonly=readonly, name=name, aligned=aligned
         )

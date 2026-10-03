@@ -432,6 +432,7 @@ def _load_argument(context, builder, index, ty, shape_offset, push=None):
         proxy.shape = cgutils.pack_array(builder, shape, ty=intp)
         proxy.strides = cgutils.pack_array(builder, strides, ty=intp)
         proxy.offset = offset
+        proxy.binding = i32(arg_binding(index))
         return proxy._getvalue()
     elem = buffer_element_type(context, ty)
     if push is not None:

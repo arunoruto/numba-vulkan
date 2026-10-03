@@ -45,6 +45,11 @@ class VulkanArrayModel(models.StructModel):
             ("shape", types.UniTuple(types.intp, fe_type.ndim)),
             ("strides", types.UniTuple(types.intp, fe_type.ndim)),
             ("offset", types.intp),
+            # The descriptor binding of the buffer, for types without one
+            # (kernel arguments): functions taking arrays are then compiled
+            # once for all bindings, and after inlining it is a constant.
+            # Arrays with a binding in their type store 0.
+            ("binding", types.int32),
         ]
         super().__init__(dmm, fe_type, members)
 

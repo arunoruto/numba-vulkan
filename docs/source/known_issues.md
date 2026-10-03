@@ -14,13 +14,14 @@ uv run pytest tests/test_known_issues.py -rxX
 ```
 
 Numbers are not reused: KI-02, KI-03, KI-05, KI-06, KI-07, KI-08, KI-13,
-KI-14, KI-24, KI-25, KI-26, KI-30 and KI-31 (NumPy functions on scalars,
-missing `math` functions, allocating arrays in kernels, global constant
-arrays, complex numbers, `print`, all data copied on every call, nested
-loop exits that failed to compile, Numba's compilation repeated in every
-process, libclc linked in full for every kernel, libclc depending on an old
-NixOS release, `gamma` losing precision for large arguments, `float64`
-functions losing precision on Intel's and Mesa's drivers) have been fixed.
+KI-14, KI-15, KI-24, KI-25, KI-26, KI-30 and KI-31 (NumPy functions on
+scalars, missing `math` functions, allocating arrays in kernels, global
+constant arrays, complex numbers, `print`, all data copied on every call,
+nested loop exits that failed to compile, Numba's compilation repeated in
+every process, one specialisation per buffer binding, libclc linked in
+full for every kernel, libclc depending on an old NixOS release, `gamma`
+losing precision for large arguments, `float64` functions losing precision
+on Intel's and Mesa's drivers) have been fixed.
 
 ## Language and library coverage
 
@@ -81,6 +82,17 @@ for every call; device arrays are always contiguous.
 **Fix:** a record would map to a SPIR-V struct in the buffer, with field
 access as member access chains; Numba's record model assumes a data
 pointer, so this needs its own type, like `VulkanArray`.
+
+### KI-34: slicing a reversed view in kernels with 32-bit integers
+
+`x[::-1][:2]` inside a kernel fails to compile with "the integer constant
+9223372036854775806 ... does not fit in 32 bits" when the kernel computes
+with 32-bit integers (the default): Numba's slicing code leaves a 64-bit
+sentinel that the narrowing does not recognise in this combination. Each
+slice alone works, as does the kernel with `narrow=False`.
+
+**Fix:** find where the constant comes from in Numba's slice arithmetic
+and map it in `narrowing._EXTREMES` like the other sentinels.
 
 ## Behaviour that differs from Numba on the CPU
 
@@ -157,12 +169,6 @@ A `DeviceArray` supports basic indexing, views and NumPy's ufuncs, but
 there is no `__cuda_array_interface__` or DLPack equivalent for handing its
 memory to other Vulkan libraries, and no advanced indexing (arrays or
 lists as indices).
-
-### KI-15: one specialisation per buffer binding
-
-The binding is part of the array type, so a function that takes arrays is
-compiled again for every combination of bindings it is called with. This is
-invisible for kernels but multiplies work for shared helper functions.
 
 ### KI-16: 64-bit integer atomics and float64 atomics
 
