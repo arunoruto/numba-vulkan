@@ -68,6 +68,14 @@ def test_results_file_follows_the_format(path):
             isinstance(t, float) and math.isfinite(t) and t > 0
             for t in record["samples_s"]
         )
+        # Optional: time until the launch returned, and time on the device.
+        for key in ("enqueue_s", "device_s"):
+            if key in record:
+                assert len(record[key]) == len(record["samples_s"]), key
+                assert all(
+                    isinstance(t, float) and math.isfinite(t) and t >= 0
+                    for t in record[key]
+                ), key
 
 
 def test_no_stray_files_in_results():

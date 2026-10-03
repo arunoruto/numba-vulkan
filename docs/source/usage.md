@@ -183,6 +183,20 @@ measuring time. Launches with NumPy arrays wait for the kernel, since
 their results have to be copied back. `NUMBA_VULKAN_SYNC=1` makes every
 launch wait. Devices are not thread-safe.
 
+To measure the time the device spends, rather than the time Python waits,
+record events around the work, as with `numba.cuda`:
+
+```python
+start, end = nv.event(), nv.event()
+start.record()
+kernel.forall(n)(x, out)          # device arrays: does not wait
+end.record()
+start.elapsed_time(end)           # milliseconds, from the device's clock
+```
+
+The device writes a timestamp when it passes each event. Time in which it
+waits for the host between the two events counts as well.
+
 Launches that do not wait are collected into one command buffer, which is
 submitted at once while the device is idle, and otherwise after 16 launches
 or when something waits. A program that launches work and then computes on
@@ -208,6 +222,34 @@ the source file of an `@nv.jit` function it calls, changes. As with
 Numba's `cache=True`, changes to the values of global arrays are not
 noticed, and functions defined interactively or with `exec` are not
 cached (with a warning).
+
+## Autotuning
+
+Which kernel variant, tile size or workgroup size is fastest depends on the
+device and the size of the problem. `nv.autotune` chooses by measurement:
+the decorated generator yields named candidate launches, all of which must
+leave the same results.
+
+```python
+@nv.autotune(key=lambda a, b, c: (a.shape, b.shape))
+def product(a, b, c):
+    m, n = c.shape
+    yield "tiled", lambda: matmul[(-(-n // 16), -(-m // 16)), (16, 16)](a, b, c)
+    yield "blocked", lambda: matmul_blocked[(-(-n // 64), -(-m // 64)), (16, 16)](a, b, c)
+
+product(a, b, c)    # times both candidates, then runs the faster one
+product.choices     # {...: "blocked"}; product.timings has the times
+```
+
+On the first call for a key (by default the shapes and types of the array
+arguments), every candidate runs once untimed and three times timed, and
+the one with the lowest median is kept: in memory, and per device and
+driver in `~/.cache/numba-vulkan/autotune.json`, so later processes skip the
+timing. Arrays that the candidates write are written several times while
+tuning, so candidates that update an array in place should be tuned on a
+copy. For the two matrix products of the benchmark suite, both GPUs here
+chose the blocked one (1.2 against 2.1 ms on a TITAN X, 35 against 75 ms on
+a UHD 630, for 1024×1024).
 
 ## Structured arrays
 
