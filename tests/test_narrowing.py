@@ -326,3 +326,28 @@ def test_warnings_can_be_silenced(run, monkeypatch):
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         run(double, 4, np.ones(4), np.zeros(4))
+
+
+def test_constants_near_the_int64_extremes_follow_to_int32(device):
+    # Numba's slicing and LLVM's signed modulo produce constants a little
+    # off INT64_MAX and INT64_MIN, which narrowing keeps at the same distance
+    # from the int32 extremes.
+    @nv.jit
+    def kernel(x, out):
+        i = nv.global_id(0)
+        if i < out.shape[0]:
+            v = x[::-1][:2]
+            e = i * 7 - 300
+            out[i, 0] = v[0] + v[1]
+            out[i, 1] = e % 64
+            out[i, 2] = e // 64
+            out[i, 3] = e % -16
+            out[i, 4] = e // -16
+
+    x = np.arange(10, dtype=np.int32)
+    out = np.zeros((100, 5), np.int32)
+    kernel.forall(100, device=device)(x, out)
+    e = np.arange(100) * 7 - 300
+    want = np.stack([np.full(100, 17), e % 64, e // 64, e % -16, e // -16], axis=1)
+    np.testing.assert_array_equal(out, want)
+    assert list(kernel._launched.values())[-1].mode.ints

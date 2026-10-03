@@ -200,8 +200,38 @@ _TOP_BITS = re.compile(
     r"^(\s*)(%[\w.]+) = (lshr|ashr)(?: exact)? i64 (%[\w.]+), (\d+)$"
 )
 _INT_LITERAL = re.compile(r"(?<![\w.%@#!\"-])(-?\d{10,})(?![\w.])")
-_EXTREMES = {str((1 << 63) - 1): str((1 << 31) - 1), str(-(1 << 63)): str(-(1 << 31))}
+# Constants this close to the extremes of int64 are kept at the same distance
+# from the extremes of int32; see `_narrow_extreme`.
+_NEAR = 1 << 16
 _DECLARATION = re.compile(r"^declare [^@\n]*(@[^\s(]+)\(")
+
+
+def _narrow_extreme(literal):
+    """The 32-bit counterpart of an integer constant near an int64 extreme.
+
+    Numba uses the extremes of ``int64`` as sentinels ("no bound" in
+    slices), and LLVM derives constants from them: ``INT64_MAX - 1`` as an
+    unsigned bound, ``INT64_MIN | 63`` as the mask of the sign bit and the
+    low bits that a signed ``x % 64`` tests. In a narrowed kernel the same
+    constants relative to the extremes of ``int32`` mean the same for
+    32-bit values. Others are returned unchanged.
+
+    Parameters
+    ----------
+    literal : str
+        A decimal integer constant.
+
+    Returns
+    -------
+    str
+    """
+    value = int(literal)
+    top, bottom = (1 << 63) - 1, -(1 << 63)
+    if top - _NEAR <= value <= top:
+        return str((1 << 31) - 1 - (top - value))
+    if bottom <= value <= bottom + _NEAR:
+        return str(-(1 << 31) + (value - bottom))
+    return literal
 
 
 def _narrow_literal(match):
@@ -329,9 +359,7 @@ def narrow_ir(text, mode):
                     "cannot be done on a device without 64-bit integers"
                 )
             # The extreme values stand for "no limit", as in slice bounds.
-            line = _INT_LITERAL.sub(
-                lambda m: _EXTREMES.get(m.group(1), m.group(1)), line
-            )
+            line = _INT_LITERAL.sub(lambda m: _narrow_extreme(m.group(1)), line)
             for literal in _INT_LITERAL.findall(line):
                 if not -(1 << 31) <= int(literal) < (1 << 32):
                     raise VulkanUnsupportedError(
