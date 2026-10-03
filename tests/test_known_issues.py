@@ -40,17 +40,6 @@ def _(x, out):
         out[i] = x[x > 0][0]
 
 
-@known_issue(
-    "KI-09 structured array",
-    np.zeros(N, dtype=[("a", np.float32), ("b", np.float32)]),
-    lambda x: x,
-)
-def _(x, out):
-    i = nv.global_id(0)
-    if i < x.size:
-        out[i].a = x[i].b
-
-
 @known_issue("KI-34 slice of a reversed view", XF, lambda x: x[::-1][:2].sum() + 0 * x)
 def _(x, out):
     i = nv.global_id(0)
@@ -66,13 +55,12 @@ def test_known_issue(issue):
     out = np.zeros_like(x)
     nv.jit(kernel).forall(x.shape[0])(x, out)
     want = expected(x)
-    if x.dtype.names is None:
-        np.testing.assert_allclose(
-            out.astype(np.float64),
-            np.asarray(want, dtype=np.float64),
-            rtol=2e-3,
-            atol=1e-5,
-        )
+    np.testing.assert_allclose(
+        out.astype(np.float64),
+        np.asarray(want, dtype=np.float64),
+        rtol=2e-3,
+        atol=1e-5,
+    )
 
 
 # KI-32: llvmlite's own backend (not NUMBA_VULKAN_LLC), in a child process.

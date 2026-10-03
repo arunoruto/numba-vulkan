@@ -16,7 +16,7 @@ from numba.core.typing.templates import (
 
 from numba_vulkan import stubs
 from numba_vulkan.buffers import LOCAL_BASE, SHARED_BASE, shared_sizes
-from numba_vulkan.vktypes import VulkanArray, VulkanExpr
+from numba_vulkan.vktypes import VulkanArray, VulkanExpr, VulkanRecord
 
 registry = Registry()
 
@@ -592,3 +592,95 @@ _subgroup_template(stubs.subgroup.all, _predicate(types.boolean))
 _subgroup_template(stubs.subgroup.elect, _no_arguments(types.boolean))
 _subgroup_template(stubs.subgroup.ballot, _predicate(types.UniTuple(types.uint32, 4)))
 _subgroup_template(stubs.subgroup.ballot_count, _predicate(types.uint32))
+
+
+# -- records ------------------------------------------------------------------
+
+
+def _field(record, name):
+    """Type of a field of a record, or a ``TypingError`` naming the fields."""
+    if name not in record.record.fields:
+        raise errors.TypingError(
+            f"the record has no field '{name}', only {', '.join(record.record.fields)}"
+        )
+    return record.field(name)[0]
+
+
+@registry.register_attr
+class RecordAttributes(AttributeTemplate):
+    """Typing of ``record.field``, to read and to assign."""
+
+    key = VulkanRecord
+
+    def generic_resolve(self, record, attr):
+        """The type of a field.
+
+        Returns
+        -------
+        numba.types.Type or None
+        """
+        if attr in record.record.fields:
+            return record.field(attr)[0]
+        return None
+
+
+@registry.register_global(operator.getitem)
+class RecordGetItem(AbstractTemplate):
+    """Typing of ``record["field"]``."""
+
+    def generic(self, args, kws):
+        """Type a call."""
+        record = len(args) == 2 and isinstance(args[0], VulkanRecord)
+        if record and isinstance(args[1], types.StringLiteral):
+            return signature(_field(args[0], args[1].literal_value), *args)
+        return None
+
+
+@registry.register
+class RecordStaticGetItem(AbstractTemplate):
+    """Typing of ``record["field"]`` with a constant name."""
+
+    key = "static_getitem"
+
+    def generic(self, args, kws):
+        """Type a call."""
+        if (
+            len(args) == 2
+            and isinstance(args[0], VulkanRecord)
+            and isinstance(args[1], str)
+        ):
+            name = types.literal(args[1])
+            return signature(_field(args[0], args[1]), args[0], name)
+        return None
+
+
+@registry.register_global(operator.setitem)
+class RecordSetItem(AbstractTemplate):
+    """Typing of ``record["field"] = value``."""
+
+    def generic(self, args, kws):
+        """Type a call."""
+        record = len(args) == 3 and isinstance(args[0], VulkanRecord)
+        if not (record and isinstance(args[1], types.StringLiteral)):
+            return None
+        field = _field(args[0], args[1].literal_value)
+        if self.context.can_convert(args[2], field) is None:
+            return None
+        return signature(types.none, args[0], args[1], field)
+
+
+@registry.register
+class RecordStaticSetItem(AbstractTemplate):
+    """Typing of ``record["field"] = value`` with a constant name."""
+
+    key = "static_setitem"
+
+    def generic(self, args, kws):
+        """Type a call."""
+        record = len(args) == 3 and isinstance(args[0], VulkanRecord)
+        if not (record and isinstance(args[1], str)):
+            return None
+        field = _field(args[0], args[1])
+        if self.context.can_convert(args[2], field) is None:
+            return None
+        return signature(types.none, args[0], types.literal(args[1]), field)

@@ -28,7 +28,12 @@ from numba_vulkan.errors import (
     VulkanUnsupportedError,
 )
 from numba_vulkan.target import TARGET_NAME, exception_table, vulkan_target
-from numba_vulkan.vktypes import HalfArray, VulkanArray, VulkanDispatcherType
+from numba_vulkan.vktypes import (
+    HalfArray,
+    VulkanArray,
+    VulkanDispatcherType,
+    VulkanRecord,
+)
 
 
 class VulkanDispatcher:
@@ -333,6 +338,8 @@ class VulkanDispatcher:
         """
         bound = []
         for index, ty in enumerate(argtypes):
+            if isinstance(ty, types.Array) and isinstance(ty.dtype, types.Record):
+                ty = ty.copy(dtype=_record_type(ty.dtype))
             if isinstance(ty, types.Array):
                 # The binding is a value of the array (see vktypes), so
                 # functions called with it are compiled once for all.
@@ -487,7 +494,7 @@ class VulkanDispatcher:
                 stacklevel=5,
             )
         elif not kernel.mode.floats and _FLOAT64_ARITHMETIC.search(kernel.llvm_ir):
-            explicit = any((getattr(t, "dtype", t) == types.float64) for t in argtypes)
+            explicit = any(_holds_float64(getattr(t, "dtype", t)) for t in argtypes)
             hint = (
                 ""
                 if explicit
@@ -638,19 +645,24 @@ class VulkanDispatcher:
                 # element and steps after its extents (see compiler).
                 plain = arg._offset == 0 and arg.is_contiguous
                 layout = "C" if plain else "A"
-                argtypes.append(_device_array_type(arg.dtype, arg.ndim, layout))
+                # Records are typed as stored: narrowing moves their fields.
+                dtype = arg._stored if arg.dtype.names else arg.dtype
+                argtypes.append(_device_array_type(dtype, arg.ndim, layout))
                 shapes.extend(arg.shape)
                 if not plain:
                     shapes.extend((arg._offset, *arg._steps))
                 hosts.append(arg)
             elif isinstance(arg, np.ndarray):
                 on_host = True
+                stored = narrowing.stored_dtype(arg.dtype, mode)
                 if arg.dtype == np.float16:
                     argtypes.append(HalfArray(arg.ndim, "C"))
+                elif arg.dtype.names:
+                    # Records are typed as stored: narrowing moves their fields.
+                    argtypes.append(_device_array_type(stored, arg.ndim))
                 else:
                     argtypes.append(typeof(arg).copy(layout="C", readonly=False))
                 shapes.extend(arg.shape)
-                stored = narrowing.stored_dtype(arg.dtype, mode)
                 if stored != arg.dtype or not arg.flags.c_contiguous:
                     # Converted on the host: booleans are int32 on the device
                     # (SPIR-V has no storable bool), 64-bit types are 32-bit
@@ -804,6 +816,37 @@ def _shape3(shape):
 
 
 @functools.cache
+def _holds_float64(ty):
+    """Whether a type is float64 or a record with a float64 field."""
+    if isinstance(ty, VulkanRecord):
+        ty = ty.record
+    if isinstance(ty, types.Record):
+        return any(ty.typeof(name) == types.float64 for name in ty.fields)
+    return ty == types.float64
+
+
+def _record_type(record):
+    """The Vulkan record type for a Numba record type.
+
+    Raises
+    ------
+    VulkanUnsupportedError
+        For fields other than booleans, integers and floats of 32 or 64
+        bits (nested records, arrays, ``float16``, complex numbers).
+    """
+    for name in record.fields:
+        fieldty = record.typeof(name)
+        ok = isinstance(fieldty, (types.Boolean, types.Integer)) or (
+            isinstance(fieldty, types.Float) and fieldty.bitwidth in (32, 64)
+        )
+        if not ok:
+            raise VulkanUnsupportedError(
+                f"record field '{name}' of type {fieldty} is not supported on "
+                "Vulkan: fields must be booleans, integers, float32 or float64"
+            )
+    return VulkanRecord(record)
+
+
 def _device_array_type(dtype, ndim, layout="C"):
     """Numba type of a device array; layout ``"A"`` for views with gaps."""
     if dtype == np.float16:

@@ -209,6 +209,33 @@ Numba's `cache=True`, changes to the values of global arrays are not
 noticed, and functions defined interactively or with `exec` are not
 cached (with a warning).
 
+## Structured arrays
+
+Arrays of a structured dtype work as in Numba on the CPU:
+
+```python
+particle = np.dtype([("x", "f4"), ("v", "f4"), ("alive", "?")])
+
+@nv.jit
+def step(p, dt):
+    i = nv.global_id(0)
+    if i < p.shape[0] and p[i].alive:
+        p[i].x += p[i].v * dt
+        if p[i].x > 100:
+            p[i]["alive"] = False
+```
+
+Fields may be booleans, integers, `float32` and `float64`, in packed or
+aligned dtypes. A record (`p[i]`) refers to the element in the buffer;
+reading a field reads the buffer, and assigning to one writes it. Fields
+narrower than 32 bits, and fields that do not start at a multiple of four
+bytes, are written with atomic operations on the 32-bit words they share
+with their neighbours, so invocations can write different fields of the
+same record at once; whole aligned words are written directly. On devices
+without `float64` or `int64`, those fields are converted on the host, so
+the kernel sees them as `float32` and `int32`. Nested records and array
+fields are not supported.
+
 ## Functions called from kernels
 
 A function decorated with `@nv.jit` can also be called from a kernel. It may

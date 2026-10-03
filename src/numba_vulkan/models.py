@@ -11,6 +11,7 @@ from numba_vulkan.vktypes import (
     VulkanArrayIterator,
     VulkanDispatcherType,
     VulkanExpr,
+    VulkanRecord,
 )
 
 vulkan_data_manager = DataModelManager()
@@ -51,6 +52,23 @@ class VulkanArrayModel(models.StructModel):
             # Arrays with a binding in their type store 0.
             ("binding", types.int32),
         ]
+        super().__init__(dmm, fe_type, members)
+
+
+@register_model(VulkanRecord)
+class VulkanRecordModel(models.StructModel):
+    """Where a record lies: its buffer's binding and its first byte.
+
+    Parameters
+    ----------
+    dmm : numba.core.datamodel.DataModelManager
+        The data model manager.
+    fe_type : VulkanRecord
+        The record type being modelled.
+    """
+
+    def __init__(self, dmm, fe_type):
+        members = [("binding", types.int32), ("position", types.int32)]
         super().__init__(dmm, fe_type, members)
 
 

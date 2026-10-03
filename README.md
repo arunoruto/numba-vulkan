@@ -411,6 +411,7 @@ To continue the work, start with the
 - [x] Device arrays and buffer reuse, to avoid copying on every call
 - [x] Asynchronous launches on device arrays (`nv.synchronize()`)
 - [x] Indexing, views and NumPy ufuncs on device arrays
+- [x] Structured (record) arrays
 - [x] Scalars as push constants
 - [x] Slices, array views, iteration and reductions
 - [x] Array expressions and local arrays
