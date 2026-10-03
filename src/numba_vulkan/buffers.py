@@ -66,6 +66,12 @@ _DECLARE = re.compile(rf'^declare [^\n]*@"?{_PREFIX}\.[^\n]*\n', re.MULTILINE)
 # Placeholder binding of the buffer that print() writes to. Each kernel that
 # prints gets it as its last binding (see renumber_print).
 PRINT_BINDING = (1 << 20) - 1
+# Placeholder binding of the push-constant block; the index of a load is the
+# number of the member. See numba_vulkan.compiler._push_members.
+PUSH_BINDING = (1 << 20) - 2
+# The block itself, in the address space LLVM maps to PushConstant.
+PUSH_BLOCK = "nv.args"
+_AS_PUSH_CONSTANT = 13
 # What each print() call prints, by the number its records start with.
 print_formats = {}
 _PRINT_ACCESS = re.compile(
@@ -437,17 +443,21 @@ def barrier(builder):
     builder.call(fn, [])
 
 
-def expand_buffer_access(text):
+def expand_buffer_access(text, push_types=()):
     """Replace the placeholder calls in LLVM IR by real buffer accesses.
 
     Each placeholder becomes a ``llvm.spv.resource.handlefrombinding``
     call, a ``llvm.spv.resource.getpointer`` call and a load or store.
-    The declarations and name strings these need are appended.
+    Loads from `PUSH_BINDING` become loads of members of the push-constant
+    block. The declarations and name strings these need are appended.
 
     Parameters
     ----------
     text : str
         Textual LLVM IR after optimisation.
+    push_types : sequence of str, optional
+        LLVM types of the members of the push-constant block, if the
+        kernel has one.
 
     Returns
     -------
@@ -474,6 +484,8 @@ def expand_buffer_access(text):
     read = set()
     shared = {}
     cas_spaces = set()
+    pushed = []
+    block = "{ " + ", ".join(push_types) + " }"
     counter = iter(range(1 << 30))
     text = _float_add_as_loops(text)
     access_as = _access_types(text)
@@ -527,6 +539,14 @@ def expand_buffer_access(text):
     def load(match):
         """Replacement text for one placeholder load."""
         indent, res, mangled, binding, index = match.groups()
+        if int(binding) == PUSH_BINDING:
+            pushed.append(index)
+            return (
+                f"{indent}%nv.pc{len(pushed)} = getelementptr inbounds {block}, "
+                f"ptr addrspace({_AS_PUSH_CONSTANT}) @{PUSH_BLOCK}, i32 0, i32 {index}\n"
+                f"{indent}{res} = load {_LLVM_TYPES[mangled]}, "
+                f"ptr addrspace({_AS_PUSH_CONSTANT}) %nv.pc{len(pushed)}"
+            )
         read.add(int(binding))
         n, code, space = pointer(indent, mangled, binding, index)
         ty, stored = (
@@ -603,6 +623,14 @@ def expand_buffer_access(text):
         raise SpirvCodegenError("a buffer access with a non-constant binding survived")
 
     extra = []
+    if pushed:
+        # Declared as clang declares the push constants of HLSL: without
+        # "hidden", the backend asks for the Linkage capability, which Vulkan
+        # lacks.
+        extra.append(
+            f"@{PUSH_BLOCK} = external hidden addrspace({_AS_PUSH_CONSTANT}) "
+            f"externally_initialized global {block}, align 4"
+        )
     for binding in sorted({b for _, b in used}, key=int):
         label = f"nv.binding{binding}"
         extra.append(

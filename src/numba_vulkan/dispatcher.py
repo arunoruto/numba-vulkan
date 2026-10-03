@@ -1,8 +1,10 @@
 """Dispatcher and ``jit`` decorator of the Vulkan target."""
 
+import dataclasses
 import functools
 import os
 import re
+import struct
 import warnings
 
 import numpy as np
@@ -338,16 +340,22 @@ class VulkanDispatcher:
                 )
             bound.append(ty)
         local_size = _shape3(local_size) if local_size else None
-        key = (tuple(bound), ndim, mode, local_size)
+        key = (tuple(bound), ndim, mode)
         if key not in self._kernels:
             with narrowing.using(mode):
                 cres = self.compile_device(key[0])
-                kernel = compile_kernel(
-                    cres, ndim, exact=not self.fastmath, local_size=local_size
-                )
+                kernel = compile_kernel(cres, ndim, exact=not self.fastmath)
             self._warn(kernel, bound)
             self._kernels[key] = kernel
-        return self._kernels[key]
+        kernel = self._kernels[key]
+        if local_size is None or local_size == kernel.local_size:
+            return kernel
+        # The workgroup size is a specialization constant: other sizes share
+        # the module, and only get a pipeline of their own.
+        variant = (key, local_size)
+        if variant not in self._kernels:
+            self._kernels[variant] = dataclasses.replace(kernel, local_size=local_size)
+        return self._kernels[variant]
 
     def _warn(self, kernel, argtypes):
         """Point out float64 that costs precision or speed, once per kernel.
@@ -492,10 +500,12 @@ class VulkanDispatcher:
 
         Notes
         -----
-        Scalars are passed as one-element buffers. Arrays are converted on
-        the host where the device stores them differently: booleans as
-        int32, 64-bit types as 32-bit ones where the kernel is narrowed,
-        and arrays that are not C-contiguous as contiguous copies.
+        Scalars and the extents of arrays are passed as push constants, or,
+        if they do not fit, scalars as one-element buffers and extents in
+        the buffer at binding 0 (see `numba_vulkan.compiler`). Arrays are
+        converted on the host where the device stores them differently:
+        booleans as int32, 64-bit types as 32-bit ones where the kernel is
+        narrowed, and arrays that are not C-contiguous as contiguous copies.
         """
         target = runtime.get_device(device)
         mode = target.mode
@@ -562,18 +572,22 @@ class VulkanDispatcher:
             hosts[index] = narrowing.convert(arg, stored, check)
         if 0 in groups:
             return
-        # Element 0 receives the status of the kernel, the shapes follow.
-        meta = np.array([0, *shapes], dtype=np.int32)
-        if (
-            _ASYNC
-            and not on_host
-            and STATUS_BINDING not in kernel.written_bindings
-            and kernel.print_binding is None
-        ):
-            # Nothing to copy back and no exception to report: do not wait.
-            target.launch(kernel, tuple(groups), [meta, *hosts])
+        push = _pack(kernel, hosts, shapes, groups) if kernel.push_format else b""
+        for kind, index in kernel.push_sources:
+            if kind == "arg":
+                hosts[index] = None  # no buffer
+        if kernel.args_pushed:
+            # Element 0 receives the status of the kernel.
+            meta = np.zeros(1, dtype=np.int32)
+        else:
+            # Element 0 receives the status of the kernel, the shapes follow.
+            meta = np.array([0, *shapes], dtype=np.int32)
+        if _ASYNC and not on_host and kernel.print_binding is None:
+            # Nothing to copy back: do not wait. Exceptions are reported by
+            # the next synchronisation.
+            target.launch(kernel, tuple(groups), [meta, *hosts], push)
             return
-        target.run(kernel, tuple(groups), [meta, *hosts])
+        target.run(kernel, tuple(groups), [meta, *hosts], push)
         for index, original in staged:
             if arg_binding(index) in kernel.written_bindings:
                 copy = hosts[index]
@@ -582,40 +596,81 @@ class VulkanDispatcher:
             self._raise(int(meta[STATUS_INDEX]))
 
     def _raise(self, code):
-        """Raise the exception that a kernel reported.
+        """Raise the exception that a kernel reported; see `raise_kernel_error`."""
+        raise_kernel_error(self.py_func.__name__, code)
 
-        Parameters
-        ----------
-        code : int
-            Status code left by the kernel.
 
-        Raises
-        ------
-        Exception
-            The exception registered for `code`, with a note saying where
-            in the kernel it was raised.
-        """
-        exc, exc_args, location = exception_table.get_exception(code)
-        if exc is None:
-            exc, exc_args = RuntimeError, ("exception re-raised in a kernel",)
-        error = exc(*(exc_args or ()))
-        where = f"raised in Vulkan kernel '{self.py_func.__name__}'"
-        if location:
-            where += f", in {location[0]} at {location[1]}:{location[2]}"
-        error.add_note(where)
-        raise error
+def raise_kernel_error(name, code, asynchronous=False):
+    """Raise the exception that a kernel reported.
+
+    Parameters
+    ----------
+    name : str
+        Name of the kernel.
+    code : int
+        Status code left by the kernel.
+    asynchronous : bool
+        Whether the kernel was launched without waiting for it, so that
+        the exception is raised later, by a synchronisation.
+
+    Raises
+    ------
+    Exception
+        The exception registered for `code`, with a note saying where
+        in the kernel it was raised.
+    """
+    exc, exc_args, location = exception_table.get_exception(code)
+    if exc is None:
+        exc, exc_args = RuntimeError, ("exception re-raised in a kernel",)
+    error = exc(*(exc_args or ()))
+    where = f"raised in Vulkan kernel '{name}'"
+    if location:
+        where += f", in {location[0]} at {location[1]}:{location[2]}"
+    if asynchronous:
+        where += (
+            ", by a launch since the last synchronisation (set "
+            "NUMBA_VULKAN_SYNC=1 to check every launch at once)"
+        )
+    error.add_note(where)
+    raise error
 
 
 # Launches on device arrays return before the kernel has finished, unless
 # NUMBA_VULKAN_SYNC=1.
 _ASYNC = os.environ.get("NUMBA_VULKAN_SYNC", "0") == "0"
-STATUS_BINDING = 0
 
 
 _FLOAT64_ARITHMETIC = re.compile(
     r"= (?:fadd|fsub|fmul|fdiv|frem|fneg)\b[^\n]*\bdouble\b|"
     r"call [^\n]*double @(?:_Z\d+\w+d\b|llvm\.\w+\.f64)"
 )
+
+
+def _pack(kernel, hosts, shapes, groups):
+    """Pack the push constants of a launch.
+
+    Parameters
+    ----------
+    kernel : CompiledKernel
+        The kernel, which has push constants.
+    hosts : list
+        The arguments, scalars as one-element arrays of their stored type.
+    shapes : list of int
+        The extents of all array arguments, in order.
+    groups : tuple of int
+        The size of the grid in workgroups.
+
+    Returns
+    -------
+    bytes
+    """
+    values = [
+        hosts[k].item()
+        if kind == "arg"
+        else (shapes[k] if kind == "shape" else groups[k])
+        for kind, k in kernel.push_sources
+    ]
+    return struct.pack(kernel.push_format, *values)
 
 
 def _shape3(shape):

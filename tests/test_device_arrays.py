@@ -212,14 +212,20 @@ def test_launches_on_device_arrays_do_not_wait(device):
     total = nv.to_device(np.zeros(1000, dtype=f32), device)
     step = nv.to_device(np.arange(1000, dtype=f32), device)
     accumulate.forall(1000, device=device)(total, step)
-    assert dev._pending  # still running, or at least not waited for
-    for _ in range(3 * runtime.Device.MAX_PENDING):  # more than may be pending
+    assert dev._pending or dev._open  # still running, or at least not waited for
+    # More than may be pending: batches are submitted when full.
+    launches = 3 * runtime.Device.MAX_BATCH * runtime.Device.MAX_IN_FLIGHT
+    for _ in range(launches):
         accumulate.forall(1000, device=device)(total, step)
-    assert len(dev._pending) <= runtime.Device.MAX_PENDING
+        assert len(dev._pending) <= runtime.Device.MAX_IN_FLIGHT
+        assert dev._open is None or dev._open.launches < runtime.Device.MAX_BATCH
     # reading waits, and sees every launch in order
-    want = np.arange(1000) * (1 + 3 * runtime.Device.MAX_PENDING)
+    want = np.arange(1000) * (1 + launches)
     np.testing.assert_array_equal(total.copy_to_host(), want)
-    assert not dev._pending
+    assert not dev._pending and dev._open is None
+    # One slot serves all of these launches.
+    state = dev._pipelines[id(list(accumulate._launched.values())[-1])]
+    assert len(state.slots) == 1
 
 
 def test_buffers_in_use_are_not_reused(device):
@@ -231,14 +237,16 @@ def test_buffers_in_use_are_not_reused(device):
     del step
     gc.collect()
     replacement = nv.device_array(1000, f32, device)
-    if dev._pending:
+    if dev._pending or dev._open:
         assert replacement._buffer.handle is not handle
     nv.synchronize(device)
     assert not dev._pending and not dev._deferred
     np.testing.assert_array_equal(total.copy_to_host(), np.ones(1000))
 
 
-def test_kernels_that_can_raise_still_report_at_once(device):
+def test_kernels_that_can_raise_report_at_synchronisation(device):
+    from numba_vulkan import dispatcher
+
     @nv.jit
     def checked(a):
         i = nv.global_id(0)
@@ -248,5 +256,75 @@ def test_kernels_that_can_raise_still_report_at_once(device):
             a[i] += 1
 
     a = nv.to_device(np.array([1, -1], dtype=f32), device)
-    with pytest.raises(ValueError, match="negative"):
+    with pytest.raises(ValueError, match="negative") as info:
+        checked.forall(2, device=device)(a)  # raises here with NUMBA_VULKAN_SYNC=1
+        nv.synchronize(device)
+    if not dispatcher._ASYNC:
+        return
+    assert "since the last synchronisation" in str(info.value.__notes__)
+    nv.synchronize(device)  # reported once
+    # Copies synchronise, and so report too.
+    for _ in range(3):
         checked.forall(2, device=device)(a)
+    with pytest.raises(ValueError, match="negative"):
+        a.copy_to_host()
+    # Launches that do not raise leave nothing to report.
+    good = nv.to_device(np.array([1, 2], dtype=f32), device)
+    for _ in range(40):
+        checked.forall(2, device=device)(good)
+    np.testing.assert_array_equal(good.copy_to_host(), [41, 42])
+
+
+def test_errors_are_reported_before_a_waiting_launch(device):
+    from numba_vulkan import dispatcher
+
+    if not dispatcher._ASYNC:
+        pytest.skip("NUMBA_VULKAN_SYNC=1")
+
+    @nv.jit
+    def fails(a):
+        if nv.global_id(0) == 0:
+            raise IndexError("boom")
+
+    fails.forall(1, device=device)(nv.to_device(np.zeros(1, f32), device))
+    with pytest.raises(IndexError, match="boom"):
+        add_one.forall(1, device=device)(np.zeros(1, f32))  # waits for its result
+
+
+def test_copies_wait_only_for_launches_that_use_the_array(device):
+    from numba_vulkan import dispatcher
+
+    if not dispatcher._ASYNC:
+        pytest.skip("NUMBA_VULKAN_SYNC=1")
+    dev = nv.get_device(device)
+    busy = nv.to_device(np.zeros(1 << 16, dtype=f32), device)
+    idle = nv.to_device(np.zeros(4, dtype=f32), device)
+    add_one.forall(4, device=device)(idle)
+    for _ in range(3 * runtime.Device.MAX_BATCH):
+        add_one.forall(1 << 16, device=device)(busy)
+    np.testing.assert_array_equal(idle.copy_to_host(), np.ones(4))
+    assert dev._retired_seq >= idle._buffer.used
+    np.testing.assert_array_equal(
+        busy.copy_to_host(), np.full(1 << 16, 3 * runtime.Device.MAX_BATCH)
+    )
+    assert not dev._pending
+
+
+def test_device_arrays_are_mapped_where_device_memory_is(device):
+    import vulkan as vk
+
+    dev = nv.get_device(device)
+    unified = (
+        vk.VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
+        | vk.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
+        | vk.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
+        | vk.VK_MEMORY_PROPERTY_HOST_CACHED_BIT
+    )
+    memory = dev.memory
+    offered = any(
+        memory.memoryTypes[i].propertyFlags & unified == unified
+        for i in range(memory.memoryTypeCount)
+    )
+    a = nv.to_device(np.arange(8, dtype=f32), device)
+    # Copies then go straight to the mapped memory, without staging.
+    assert (a._buffer.view is not None) == offered

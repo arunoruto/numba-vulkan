@@ -151,10 +151,17 @@ and serves the next request of a similar size. The pool holds up to
 
 A launch whose arrays are all device arrays returns at once, before the
 kernel has run, as in `numba.cuda`; later launches and copies wait for it
-as needed. `nv.synchronize()` waits for everything, which is what to call
-before measuring time. Launches with NumPy arrays, and of kernels that can
-raise an exception, wait for the kernel. `NUMBA_VULKAN_SYNC=1` makes every
+as needed, and a copy waits only for the launches that use its array.
+`nv.synchronize()` waits for everything, which is what to call before
+measuring time. Launches with NumPy arrays wait for the kernel, since
+their results have to be copied back. `NUMBA_VULKAN_SYNC=1` makes every
 launch wait. Devices are not thread-safe.
+
+Launches that do not wait are collected into one command buffer, which is
+submitted at once while the device is idle, and otherwise after 16 launches
+or when something waits. A program that launches work and then computes on
+the CPU for a while should call `nv.synchronize()` only when it needs the
+results; the launches are submitted by then at the latest.
 
 ## Functions called from kernels
 
@@ -414,7 +421,12 @@ call the `@nv.jit` function there instead.
 ## Errors
 
 An exception raised in a kernel, or in a function it calls, is raised by
-the launch after the kernel has finished:
+the launch after the kernel has finished, or, for a launch that does not
+wait (all arrays on the device), by the next synchronisation: a copy of an
+array the kernel used, `nv.synchronize()`, or a launch that waits. As in
+CUDA, it is then not certain which launch raised it, and the launches in
+between ran anyway; `NUMBA_VULKAN_SYNC=1` makes every launch wait and report
+at once:
 
 ```python
 @nv.jit

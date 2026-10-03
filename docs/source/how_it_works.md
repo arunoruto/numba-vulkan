@@ -56,9 +56,31 @@ The bindings of a kernel are laid out as follows:
 
 | Binding | Contents |
 | --- | --- |
-| 0 | error status of the kernel, then the shapes of all array arguments, as `int32` |
-| `1 + k` | argument `k`: the array data, or a one-element buffer for a scalar |
+| 0 | error status of the kernel (`int32`) |
+| `1 + k` | argument `k`, if it is an array |
 | after the arguments | one buffer per NumPy array the kernel uses as a global constant |
+
+Scalar arguments and the extents of array arguments are **push constants**,
+one block per kernel specialisation, as clspv passes plain-data arguments:
+8-byte scalars first, then 4-byte scalars (booleans and integers narrower
+than 32 bits are widened to 32 bits), then the extents as `int32`. The
+block is read through placeholder loads like buffers (see below), which
+become loads from an `addrspace(13)` global only after narrowing, so its
+member types are final; the runtime packs the values with offsets read
+back from the SPIR-V module. A block must fit into 128 bytes, the size every
+Vulkan device guarantees, so that compiled kernels do not depend on the
+device. Kernels whose arguments need more fall back to one-element buffers
+for scalars (at binding `1 + k`) and the extents after the status in
+binding 0.
+
+The **workgroup size** is a specialization constant: the module declares
+it as clspv does, with three `OpSpecConstant` (ids 0, 1 and 2, defaulting
+to the size of the grid's dimensionality) combined into an
+`OpSpecConstantComposite` decorated `BuiltIn WorkgroupSize`
+(`codegen.specialize_local_size`). `nv.local_size()` reads a private array
+initialised with the same constants. A kernel is therefore compiled once for
+all workgroup sizes; each size gets its own pipeline, and drivers fold the
+constants when they create it.
 
 A global array is typed with a placeholder binding that is the same in every
 function using it; each kernel renumbers the ones it reaches to follow its
@@ -238,25 +260,42 @@ to finish. A NumPy argument gets a temporary buffer in mappable memory: it
 is uploaded before the dispatch and read back afterwards if the shader
 writes to it. A device array brings its own buffer, which on discrete GPUs
 lives in device-local memory and is filled and read through a staging
-buffer. If the shader left an error status in binding 0, the matching
+buffer. Where device-local memory can be mapped and is cached, as on
+integrated GPUs and llvmpipe, device arrays are mapped and copies need no
+staging. MoltenVK declares such memory for Apple GPUs too
+(`mvk_datatypes.h`), which has not been checked on one yet. If the shader left an error status in binding 0, the matching
 exception is raised.
 
 Buffers are recycled through a per-device pool, and pipelines, descriptor
 sets and the command buffer are kept per device and kernel specialisation.
 A launch that binds the same buffers as the previous one of that kernel,
 which is the usual case in a loop, neither rewrites the descriptor set nor
-records the commands again; it only submits.
+records the commands again; it only submits. Push constants are part of the
+recorded commands, so a launch with other scalar values or shapes records
+them again, through the C functions directly, which takes a few
+microseconds.
 
-Launches on device arrays of kernels that cannot raise do not wait. Each
-takes a *slot* of its kernel (descriptor set, recorded command buffer,
-fence and mapped buffers for shapes and scalars), which a later launch with
-the same arrays and grid reuses by copying the new argument values and
-submitting again. Every command buffer begins with a memory barrier, so a
-launch sees the writes of all earlier ones on the queue. At most 32
-launches are pending; buffers that are released meanwhile join the pool
-once the launches submitted before their release have finished. Grids
-beyond the device's workgroup limits are dispatched in parts with
-`vkCmdDispatchBase`.
+Launches on device arrays do not wait. They are recorded into a *batch*,
+one command buffer with a fence, as clvk does: a memory barrier, the
+pipeline and descriptor set (bound only when they change), the push
+constants and the dispatch. A batch is submitted when the device has
+nothing else to do (its last fence is signalled), after 16 launches, or at
+any synchronisation; at most four are in flight. Each launch uses a *slot*
+of its kernel, a descriptor set with mapped buffers for the status (and,
+without push constants, shapes and scalars). Launches with the same buffers
+and the same values in those share a slot, so a loop over the same arrays
+uses one descriptor set and copies nothing.
+
+A kernel that can raise leaves its status in the slot's mapped buffer.
+When a batch has finished, the status of each slot it used last is read
+and reset; an error is kept and raised by the next synchronisation, as
+CUDA reports errors of asynchronous launches. Buffers that are released
+while launches may use them join the pool once the batch recorded before
+their release has finished. Each buffer records the last batch that uses
+it, so that copying to or from a device array waits only for that one.
+Grids beyond the device's workgroup limits are dispatched in parts with
+`vkCmdDispatchBase`; `num_groups` comes from push constants holding the
+size of the whole grid.
 
 ## Workarounds for toolchain and driver behaviour
 

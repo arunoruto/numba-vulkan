@@ -60,7 +60,8 @@ Arrays of run-time size
 
 Exceptions and recursion
 : An exception raised inside a kernel is raised by the launch once the
-  kernel has finished; it does not stop the other invocations, and
+  kernel has finished, or by the next synchronisation for launches that do
+  not wait; it does not stop the other invocations, and
   `try`/`except` is not available. Out-of-bounds accesses are checked only
   with `boundscheck=True`, and integer division by zero only with
   `error_model="python"`. Recursive functions cannot be compiled, because
@@ -81,7 +82,10 @@ Data transfer
   they support transfers only, no indexing or arithmetic from Python.
 
 Workgroup size
-: The workgroup size is fixed per grid dimensionality (64, 8×8 or 4×4×4).
+: Without an explicit size, workgroups have 64, 8×8 or 4×4×4 invocations,
+  depending on the grid's dimensionality. Other sizes
+  (`kernel[groups, local_size]`, `forall(n, local_size=...)`) share the
+  compiled kernel and only need a pipeline of their own.
 
 ## Differences between drivers
 

@@ -340,3 +340,24 @@ def test_grids_beyond_the_device_limit_are_split(device, monkeypatch):
     monkeypatch.setattr(dev.info, "max_groups", (3, 65535, 65535))
     mark.forall(1000, device=device)(out)  # 16 workgroups, dispatched 3 at a time
     np.testing.assert_array_equal(out, np.arange(1, 1001))
+
+
+def test_num_groups_of_a_split_grid_is_that_of_the_whole_grid(device, monkeypatch):
+    @nv.jit
+    def stride(out):
+        # A grid-stride loop: correct only if num_groups covers all parts.
+        i = nv.global_id(0)
+        step = nv.num_groups(0) * nv.local_size(0)
+        while i < out.shape[0]:
+            out[i] += 1
+            i += step
+        if nv.global_id(0) == 0:
+            out[0] += nv.num_groups(0) * 1000 + nv.num_groups(1) * 10 + nv.num_groups(2)
+
+    out = np.zeros(5000, dtype=np.int32)
+    dev = nv.get_device(device)
+    monkeypatch.setattr(dev.info, "max_groups", (3, 65535, 65535))
+    stride[(10, 1), (64, 1), device](out)  # 10 workgroups, dispatched 3 at a time
+    want = np.ones(5000, dtype=np.int32)
+    want[0] += 10 * 1000 + 1 * 10 + 1
+    np.testing.assert_array_equal(out, want)

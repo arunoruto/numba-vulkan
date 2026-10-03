@@ -3,6 +3,7 @@
 import re
 import zlib
 
+import numpy as np
 from llvmlite import ir
 from numba.core import cgutils, compiler, types, typing
 from numba.core import ir as numba_ir
@@ -28,6 +29,7 @@ from numba.core.untyped_passes import IRProcessing
 from numba_vulkan import narrowing
 from numba_vulkan.buffers import (
     META_BINDING,
+    PUSH_BINDING,
     STATUS_INDEX,
     arg_binding,
     i32,
@@ -38,8 +40,10 @@ from numba_vulkan.codegen import (
     ENTRY_POINT,
     CompiledKernel,
     emitter,
+    push_constant_layout,
     spirv_capabilities,
 )
+from numba_vulkan.errors import SpirvCodegenError
 from numba_vulkan.target import TARGET_NAME, vulkan_target
 from numba_vulkan.vkimpl import buffer_element_type, storage_type
 from numba_vulkan.vktypes import VulkanArray
@@ -275,8 +279,81 @@ def compile_vulkan(
     return cres
 
 
-def _load_argument(context, builder, index, ty, shape_offset):
-    """Build the Numba value of one kernel argument from its buffers.
+# Push constants guaranteed by every Vulkan device. Kernels whose arguments
+# need more use buffers instead, so that compiled kernels do not depend on
+# the device. The last 12 bytes are kept for the size of the grid.
+PUSH_CONSTANT_BYTES = 128
+_GRID_BYTES = 12
+
+
+def _push_members(context, argtypes):
+    """Plan the push-constant block of a kernel.
+
+    Parameters
+    ----------
+    context : VulkanTargetContext
+        The target context.
+    argtypes : sequence of numba.types.Type
+        Argument types of the kernel.
+
+    Returns
+    -------
+    list of tuple or None
+        One ``(source, llvm_type)`` per member, in order, where `source`
+        is ``("arg", index)`` for a scalar argument or ``("shape", k)``
+        for the `k`-th extent of all array arguments. ``None`` if the
+        arguments do not fit into `PUSH_CONSTANT_BYTES` or include a
+        scalar type the block cannot hold.
+
+    Notes
+    -----
+    Members of 8 bytes come first, so that no member needs padding. Integers
+    narrower than 32 bits are widened to ``i32``, since 8- and 16-bit
+    push constants need device features of their own.
+    """
+    wide, narrow, shapes = [], [], []
+    for index, ty in enumerate(argtypes):
+        if isinstance(ty, VulkanArray):
+            shapes += [("shape", len(shapes) + k) for k in range(ty.ndim)]
+            continue
+        if isinstance(ty, types.Boolean):
+            narrow.append((("arg", index), i32))
+            continue
+        if not isinstance(ty, (types.Integer, types.Float)):
+            return None
+        if isinstance(ty, types.Float) and ty.bitwidth < 32:
+            return None  # half needs a device feature of its own
+        elem = buffer_element_type(context, ty)
+        if isinstance(ty, types.Integer) and ty.bitwidth < 32:
+            elem = i32
+        (wide if ty.bitwidth == 64 else narrow).append((("arg", index), elem))
+    members = wide + narrow + [(source, i32) for source in shapes]
+    size = 8 * len(wide) + 4 * (len(narrow) + len(shapes))
+    return members if size <= PUSH_CONSTANT_BYTES - _GRID_BYTES else None
+
+
+def _push_dtype(ty, mode):
+    """Host type of a scalar argument in the push-constant block.
+
+    Parameters
+    ----------
+    ty : numba.types.Type
+        Type of the argument.
+    mode : numba_vulkan.narrowing.Mode
+        Mode the kernel is compiled in.
+
+    Returns
+    -------
+    numpy.dtype
+    """
+    dtype = narrowing.stored_dtype(np.dtype(str(ty)), mode)
+    if dtype.itemsize < 4:
+        dtype = np.dtype(np.int32 if dtype.kind in "ib" else np.uint32)
+    return dtype
+
+
+def _load_argument(context, builder, index, ty, shape_offset, push=None):
+    """Build the Numba value of one kernel argument.
 
     Parameters
     ----------
@@ -289,20 +366,28 @@ def _load_argument(context, builder, index, ty, shape_offset):
     ty : numba.types.Type
         Type of the argument.
     shape_offset : int
-        Index of the array's first extent in the shape buffer. Ignored
-        for scalars.
+        Index of the array's first extent in the shape buffer, or among
+        the extents in the push-constant block. Ignored for scalars.
+    push : callable, optional
+        Loads a member of the push-constant block, given its source as in
+        `_push_members`. Without it, scalars and extents come from buffers.
 
     Returns
     -------
     llvmlite.ir.Value
-        For a scalar, its value loaded from element 0 of its buffer. For
-        an array, the metadata structure filled from the shape buffer.
+        For a scalar, its value. For an array, the metadata structure
+        filled with its extents.
     """
     intp = context.get_value_type(types.intp)
     if isinstance(ty, VulkanArray):
         shape = []
         for dim in range(ty.ndim):
-            extent = load_element(builder, META_BINDING, i32, i32(shape_offset + dim))
+            if push is not None:
+                extent = push(("shape", shape_offset + dim))
+            else:
+                extent = load_element(
+                    builder, META_BINDING, i32, i32(shape_offset + dim)
+                )
             shape.append(builder.zext(extent, intp))
         itemsize = context.get_abi_sizeof(storage_type(context, ty))
         strides, step = [], intp(itemsize)
@@ -318,7 +403,12 @@ def _load_argument(context, builder, index, ty, shape_offset):
         proxy.offset = intp(0)
         return proxy._getvalue()
     elem = buffer_element_type(context, ty)
-    val = load_element(builder, arg_binding(index), elem, i32(0))
+    if push is not None:
+        val = push(("arg", index))
+        if val.type != elem:
+            val = builder.trunc(val, elem)
+    else:
+        val = load_element(builder, arg_binding(index), elem, i32(0))
     if isinstance(ty, types.Boolean):
         val = builder.icmp_unsigned("!=", val, i32(0))
     return val
@@ -367,10 +457,21 @@ def compile_kernel(cres, ndim, exact=True, local_size=None):
     wrapper = ir.Function(module, ir.FunctionType(ir.VoidType(), []), ENTRY_POINT)
     builder = ir.IRBuilder(wrapper.append_basic_block("entry"))
 
-    # Element 0 of the shape buffer receives the error status.
-    callargs, shape_offset = [], 1
+    members = _push_members(context, argtypes)
+    push = None
+    if members:
+        position = {source: k for k, (source, _) in enumerate(members)}
+
+        def push(source):
+            """Load one member of the push-constant block."""
+            k = position[source]
+            return load_element(builder, PUSH_BINDING, members[k][1], i32(k))
+
+    # Element 0 of the shape buffer receives the error status; the extents
+    # follow it unless they are push constants.
+    callargs, shape_offset = [], 0 if push else 1
     for index, ty in enumerate(argtypes):
-        callargs.append(_load_argument(context, builder, index, ty, shape_offset))
+        callargs.append(_load_argument(context, builder, index, ty, shape_offset, push))
         if isinstance(ty, VulkanArray):
             shape_offset += ty.ndim
     status, _ = context.call_conv.call_function(
@@ -395,9 +496,13 @@ def compile_kernel(cres, ndim, exact=True, local_size=None):
     library.first_constant_binding = 1 + len(argtypes)
     library.mode = narrowing.current
     library.local_size = local
+    library.push_types = [str(ty) for _, ty in members or ()]
     library.finalize()
 
     spirv = library.get_spirv(exact)
+    push_format, push_sources = _push_packing(
+        members or [], argtypes, library.mode, push_constant_layout(spirv)
+    )
     return CompiledKernel(
         name=fndesc.qualname,
         spirv=spirv,
@@ -413,4 +518,72 @@ def compile_kernel(cres, ndim, exact=True, local_size=None):
         constants=dict(library.constants),
         mode=library.mode,
         narrowed=library.narrowed,
+        push_format=push_format,
+        push_sources=push_sources,
+        args_pushed=members is not None,
     )
+
+
+# Format characters of `struct` by NumPy kind and size.
+_STRUCT_CODES = {
+    ("i", 4): "i",
+    ("i", 8): "q",
+    ("u", 4): "I",
+    ("u", 8): "Q",
+    ("f", 4): "f",
+    ("f", 8): "d",
+}
+
+
+def _push_packing(members, argtypes, mode, layout):
+    """How the host packs the push-constant block of a kernel.
+
+    Parameters
+    ----------
+    members : list of tuple
+        The members, from `_push_members`; empty if the arguments are
+        passed in buffers. The size of the grid may follow them.
+    argtypes : sequence of numba.types.Type
+        Argument types of the kernel.
+    mode : numba_vulkan.narrowing.Mode
+        Mode the kernel was compiled in.
+    layout : list of tuple of int
+        ``(offset, size)`` of each member in the SPIR-V module, from
+        `numba_vulkan.codegen.push_constant_layout`. Narrowing may have
+        changed the sizes since `members` was planned.
+
+    Returns
+    -------
+    format : str
+        A `struct` format for the block, padding included.
+    sources : tuple of tuple
+        The source of each value to pack, as in `_push_members`.
+
+    Raises
+    ------
+    SpirvCodegenError
+        If the module's block does not match the planned one.
+    """
+    if not layout:
+        return "", ()  # the kernel uses none of them
+    if len(layout) == len(members) + 3:
+        # The size of the grid follows, if the kernel reads it.
+        members = members + [(("groups", axis), i32) for axis in range(3)]
+    if len(layout) != len(members):
+        raise SpirvCodegenError(
+            f"the push-constant block has {len(layout)} members, not {len(members)}"
+        )
+    fmt, end = "<", 0
+    for (source, _), (offset, size) in zip(members, layout):
+        if source[0] in ("shape", "groups"):
+            dtype = np.dtype(np.int32)
+        else:
+            dtype = _push_dtype(argtypes[source[1]], mode)
+        if dtype.itemsize != size or offset < end:
+            raise SpirvCodegenError(
+                f"push constant {source} is {size} bytes at offset {offset}, "
+                f"expected {dtype.itemsize} bytes after offset {end}"
+            )
+        fmt += "x" * (offset - end) + _STRUCT_CODES[dtype.kind, dtype.itemsize]
+        end = offset + size
+    return fmt, tuple(source for source, _ in members)

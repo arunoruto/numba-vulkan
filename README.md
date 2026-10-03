@@ -96,9 +96,10 @@ where it hurts; it is not ready for real workloads.
 4. LLVM's SPIR-V backend turns the result into a compute shader. It runs in a
    child process, so a backend failure raises an exception instead of
    aborting Python.
-5. The runtime uploads the arguments (binding 0: error status and array shapes, binding
-   `1 + k`: argument `k`), dispatches, and copies written buffers back.
-   Device arrays are used in place.
+5. The runtime uploads the arguments (binding 0: error status, binding
+   `1 + k`: array argument `k`; scalars and array shapes as push constants),
+   dispatches, and copies written buffers back. Device arrays are used in
+   place.
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
@@ -409,7 +410,7 @@ To continue the work, start with the
 - [x] Loops with `break`/`return` anywhere, `while` loops (fuzz-tested)
 - [x] Device arrays and buffer reuse, to avoid copying on every call
 - [x] Asynchronous launches on device arrays (`nv.synchronize()`)
-- [ ] Scalars as push constants
+- [x] Scalars as push constants
 - [x] Slices, array views, iteration and reductions
 - [x] Array expressions and local arrays
 - [x] Kernels narrowed to 32-bit types on devices without float64/int64
