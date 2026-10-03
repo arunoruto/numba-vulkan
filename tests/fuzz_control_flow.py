@@ -8,6 +8,7 @@ for Vulkan, run on the selected devices and compared with plain Python.
     uv run python tests/fuzz_control_flow.py 0 100          # all devices
     uv run python tests/fuzz_control_flow.py 0 100 --cpu    # CPU devices only
     uv run python tests/fuzz_control_flow.py 0 100 --rich   # also while loops
+    uv run python tests/fuzz_control_flow.py 0 20 --rich --depth 6   # deeper
     uv run python tests/fuzz_control_flow.py --show 42      # print one program
 
 A failure is either a compile error (loud) or a wrong result (silent in
@@ -46,12 +47,17 @@ def gen_cond(rng, depth=0):
     return f"({gen_cond(rng, depth + 1)}) {rng.choice(['and', 'or'])} ({gen_cond(rng, depth + 1)})"
 
 
+# Nesting depth of --rich programs; --depth changes it. Programs grow about
+# fivefold per level: depth 6 gives up to a few thousand lines.
+DEPTH = 4
+
+
 def gen_block(rng, indent, depth, in_loop, rich=False):
     lines = []
     for _ in range(rng.randint(1, 3)):
         r = rng.random()
         pad = "    " * indent
-        if rich and depth < 4 and r >= 0.6 and rng.random() < 0.5:
+        if rich and depth < DEPTH and r >= 0.6 and rng.random() < 0.5:
             # a while loop; the counter moves first so `continue` is safe
             lines.append(f"{pad}k{depth} = 0")
             lines.append(
@@ -59,7 +65,7 @@ def gen_block(rng, indent, depth, in_loop, rich=False):
             )
             lines.append(f"{pad}    k{depth} += 1")
             lines += gen_block(rng, indent + 1, depth + 1, True, rich)
-        elif depth >= (4 if rich else 3) or r < 0.3:
+        elif depth >= (DEPTH if rich else 3) or r < 0.3:
             lines.append(f"{pad}{rng.choice('ab')} = {gen_expr(rng)} * C0")
         elif r < 0.6:
             lines.append(f"{pad}if {gen_cond(rng)}:")
@@ -132,6 +138,11 @@ def run(seed, devices, rich=False):
 
 
 def main(argv):
+    global DEPTH
+    if "--depth" in argv:
+        at = argv.index("--depth")
+        DEPTH = int(argv[at + 1])
+        argv = argv[:at] + argv[at + 2 :]
     if argv and argv[0] == "--show":
         print(make(int(argv[1]), "--rich" in argv))
         return 0

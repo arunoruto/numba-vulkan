@@ -147,7 +147,11 @@ generation, in three steps:
    only guarding keeps functions with many early returns from growing
    exponentially. A join that is one tiny block, such as the block that
    stores the status of a kernel that raised, is always copied, so that
-   each place that raises leaves on a path of its own.
+   each place that raises leaves on a path of its own. Which of the two is
+   chosen makes no measurable difference to the speed of the kernels: for 40
+   random programs, copying much more, or guarding everything else, changed
+   the time on a TITAN X by less than 0.1 % and on a UHD 630 by less than
+   2 %, while copying more made the modules 40 % larger.
 3. **Shared merge blocks.** A selection that shares its merge block with an
    enclosing one gets a merge block of its own that forwards to the shared
    one.
@@ -181,8 +185,11 @@ block), so that such a module never reaches a driver, with or without
 The flags are ordinary local variables, which the drivers' compilers
 optimise like any other. `tests/fuzz_control_flow.py` checks this step with
 random programs: all of the 900 it was last run on (600 of them with
-`--rich`) compiled and gave the same results as Python on three devices
-(see {doc}`development`). `tests/test_control_flow_corpus.py` runs the
+`--rich`) compiled and gave the same results as Python on three devices,
+as did 41 programs nested six levels deep (`--depth 6`, up to 2000 lines)
+on llvmpipe (see {doc}`development`). Restructuring is a small part of
+compiling: for a kernel of 3800 blocks, Numba's type inference and lowering
+took most of 73 s, LLVM's SPIR-V backend 19 s and the restructuring 1 s. `tests/test_control_flow_corpus.py` runs the
 shapes of rust-gpu's control-flow tests as part of the test suite.
 
 ## SPIR-V emission
