@@ -54,6 +54,10 @@ temperature during a run affect all of them alike.
 Every result keeps all timed calls; the charts show the best end-to-end
 time.
 
+`benchmarks/streams.py` compares processing data in chunks one after
+another with three streams that overlap copies and kernels (see
+{doc}`usage`). Its results are printed, not collected.
+
 ## Results
 
 ```{include} _generated/benchmarks/charts.md
