@@ -2,6 +2,7 @@
 
 import contextlib
 import ctypes
+import functools
 import itertools
 import math
 import os
@@ -2025,6 +2026,47 @@ def _copy(cmd, source, target, nbytes, source_offset=0, target_offset=0):
     vk.vkCmdCopyBuffer(cmd, source.handle, target.handle, 1, [region])
 
 
+# Views with more runs of adjacent elements than this are copied on a stream
+# by a kernel: drivers record and run copy regions slowly, ~1 us each.
+_KERNEL_RUNS = 1024
+
+_WORD_KERNELS = []
+
+
+def _word_kernels():
+    """Kernels that gather and scatter runs of 4-byte words.
+
+    Returns
+    -------
+    gather, scatter : VulkanDispatcher
+        Called with all words of a buffer, the packed words, the first
+        word of each run and the words per run.
+    """
+    if not _WORD_KERNELS:
+        from numba_vulkan import stubs
+        from numba_vulkan.dispatcher import jit
+
+        @jit
+        def gather(whole, packed, starts, length):
+            i = stubs.global_id(0)
+            if i < packed.shape[0]:
+                packed[i] = whole[starts[i // length] + i % length]
+
+        @jit
+        def scatter(whole, packed, starts, length):
+            i = stubs.global_id(0)
+            if i < packed.shape[0]:
+                whole[starts[i // length] + i % length] = packed[i]
+
+        _WORD_KERNELS.extend((gather, scatter))
+    return _WORD_KERNELS
+
+
+def _copy_regions(cmd, source, target, regions):
+    """Record a copy of an array of ``VkBufferCopy`` between two buffers."""
+    _lib.vkCmdCopyBuffer(cmd, source.handle, target.handle, len(regions), regions)
+
+
 class DeviceArray:
     """An array that lives on a Vulkan device.
 
@@ -2069,11 +2111,16 @@ class DeviceArray:
     >>> out[0] = 1                  # writes one element
     """
 
-    def __init__(self, device, shape, dtype):
+    def __init__(self, device, shape, dtype, _stored=None):
         self.device = device
         self.shape = tuple(int(n) for n in shape)
         self.dtype = np.dtype(dtype)
-        self._stored = narrowing.stored_dtype(self.dtype, device.mode)
+        # Launches give the stored type of the kernel's mode.
+        self._stored = (
+            np.dtype(_stored)
+            if _stored is not None
+            else narrowing.stored_dtype(self.dtype, device.mode)
+        )
         # Bytes of the buffer that kernels may address; views share them.
         self._nbytes = self.size * self._stored.itemsize
         self._buffer = device._acquire(max(self._nbytes, 4), host=False)
@@ -2236,6 +2283,93 @@ class DeviceArray:
             strides=[step * size for step in self._steps],
         )
 
+    def _runs(self):
+        """The runs of adjacent elements of the array, in C order.
+
+        Returns
+        -------
+        starts : numpy.ndarray
+            Position of the first element of each run in the buffer, in
+            elements.
+        length : int
+            Number of elements in each run.
+        """
+        dims = [(n, step) for n, step in zip(self.shape, self._steps) if n != 1]
+        length = 1
+        while dims and dims[-1][1] == length:
+            length *= dims.pop()[0]
+        starts = np.full(1, self._offset, dtype=np.int64)
+        for n, step in dims:
+            starts = (starts[:, None] + np.arange(n, dtype=np.int64) * step).ravel()
+        return starts, length
+
+    def _regions(self, host_offset, to_device):
+        """Copy regions between the array and its elements packed in C order.
+
+        Parameters
+        ----------
+        host_offset : int
+            Byte position of the packed elements in their buffer.
+        to_device : bool
+            Whether the copy goes from the packed elements to the array.
+
+        Returns
+        -------
+        cdata
+            An array of ``VkBufferCopy``, one per run of adjacent elements.
+        """
+        starts, length = self._runs()
+        size = self._stored.itemsize
+        packed = host_offset + np.arange(len(starts), dtype=np.uint64) * (length * size)
+        regions = _ffi.new("VkBufferCopy[]", len(starts))
+        table = np.frombuffer(_ffi.buffer(regions), dtype=np.uint64).reshape(-1, 3)
+        device = starts.astype(np.uint64) * size
+        table[:, 0] = packed if to_device else device
+        table[:, 1] = device if to_device else packed
+        table[:, 2] = length * size
+        return regions
+
+    def _word_runs(self):
+        """The runs of the array in 4-byte words, if a kernel copies them.
+
+        Returns
+        -------
+        tuple or None
+            Positions of the first word of each run in the buffer, and
+            words per run, for views with more than ``_KERNEL_RUNS`` runs
+            of elements whose size is a multiple of 4 bytes; otherwise None,
+            and the runs are copied as regions.
+        """
+        words, rest = divmod(self._stored.itemsize, 4)
+        if rest:
+            return None
+        starts, length = self._runs()
+        if len(starts) <= _KERNEL_RUNS:
+            return None
+        return starts * words, length * words
+
+    def _copy_words(self, packed, runs, stream, to_view):
+        """Enqueue a kernel that copies between the runs and packed words.
+
+        Parameters
+        ----------
+        packed : DeviceArray
+            Contiguous ``uint32`` array, the elements in C order.
+        runs : tuple
+            See `_word_runs`.
+        stream : Stream
+            The stream.
+        to_view : bool
+            Whether the copy goes from `packed` to the array.
+        """
+        starts, length = runs
+        whole = self._view((self._nbytes // 4,), 0, (1,))
+        whole.dtype = whole._stored = np.dtype(np.uint32)
+        first = to_device(starts.astype(np.uint32), self.device, stream=stream)
+        gather, scatter = _word_kernels()
+        kernel = scatter if to_view else gather
+        kernel.forall(packed.size, stream=stream)(whole, packed, first, length)
+
     def copy_to_device(self, array, stream=None):
         """Overwrite the contents with those of a host array.
 
@@ -2246,8 +2380,7 @@ class DeviceArray:
         stream : Stream, optional
             Enqueue the copy on a stream and return at once; see `Stream`.
             The array (if it is not pinned, its converted copy) must not
-            change before the stream has done the copy. Needs a contiguous
-            view.
+            change before the stream has done the copy.
 
         Returns
         -------
@@ -2293,7 +2426,7 @@ class DeviceArray:
             A new array is created if omitted.
         stream : Stream, optional
             Enqueue the copy on a stream and return at once; `out` holds the
-            data after ``stream.synchronize()``. Needs a contiguous view.
+            data after ``stream.synchronize()``.
 
         Returns
         -------
@@ -2346,8 +2479,6 @@ class DeviceArray:
                 f"the stream belongs to {stream.device.info.name}, the array to "
                 f"{self.device.info.name}"
             )
-        if not self.is_contiguous:
-            raise ValueError("copies on a stream need a contiguous view; copy() first")
         return self.size * self._stored.itemsize
 
     def _copy_in_stream(self, array, stream):
@@ -2366,45 +2497,82 @@ class DeviceArray:
             source = device._acquire(max(nbytes, 4), host=True)
             source.view[:nbytes] = data.reshape(-1).view(np.uint8)
             keep.append(source)
-        target, at = self._buffer, self._offset * self._stored.itemsize
         if nbytes:
+            runs = self._word_runs()
+            if runs is None:
+                # Views with gaps are copied run by run.
+                target = self._buffer
+                regions = self._regions(offset, to_device=True)
+                record = functools.partial(
+                    _copy_regions, source=source, target=target, regions=regions
+                )
+            else:
+                packed = DeviceArray(device, (nbytes // 4,), np.uint32)
+                target = packed._buffer
+                record = functools.partial(
+                    _copy,
+                    source=source,
+                    target=target,
+                    nbytes=nbytes,
+                    source_offset=offset,
+                )
             stream._submit(
                 device.transfer_family,
-                lambda cmd: _copy(cmd, source, target, nbytes, offset, at),
+                record,
                 [target] + ([] if keep else [source]),
                 keep=keep,
             )
+            if runs is not None:
+                self._copy_words(packed, runs, stream, to_view=True)
         else:
             for buffer in keep:
                 device._release(buffer)
         return self
 
-    def _copy_out_stream(self, out, stream):
-        """`copy_to_host` on a stream."""
+    def _copy_out_stream(self, out, stream, cast=False):
+        """`copy_to_host` on a stream; `cast` lets `out` have another type."""
         nbytes = self._stream_check(stream)
         if out is None:
             out = np.empty(self.shape, dtype=self.dtype)
-        elif out.shape != self.shape or out.dtype != self.dtype:
+        elif out.shape != self.shape or (out.dtype != self.dtype and not cast):
             raise ValueError(f"out must be a {self.dtype} array of shape {self.shape}")
         if not nbytes:
             return out
         device = self.device
         target, offset, after, keep = None, 0, None, []
-        if self._stored == self.dtype:
+        if self._stored == out.dtype:
             target, offset = _pinned_place(device, out)
         if target is None:
             staging = target = device._acquire(max(nbytes, 4), host=True)
             keep.append(staging)
-            stored, shape, dtype = self._stored, self.shape, self.dtype
+            stored, shape = self._stored, self.shape
 
             def after():
                 data = staging.view[:nbytes].view(stored).reshape(shape)
-                out[...] = data != 0 if dtype == np.bool_ else data
+                out[...] = data != 0 if out.dtype == np.bool_ else data
 
-        source, at = self._buffer, self._offset * self._stored.itemsize
+        runs = self._word_runs()
+        if runs is None:
+            # Views with gaps are copied run by run.
+            source = self._buffer
+            regions = self._regions(offset, to_device=False)
+            record = functools.partial(
+                _copy_regions, source=source, target=target, regions=regions
+            )
+        else:
+            packed = DeviceArray(device, (nbytes // 4,), np.uint32)
+            self._copy_words(packed, runs, stream, to_view=False)
+            source = packed._buffer
+            record = functools.partial(
+                _copy,
+                source=source,
+                target=target,
+                nbytes=nbytes,
+                target_offset=offset,
+            )
         stream._submit(
             device.transfer_family,
-            lambda cmd: _copy(cmd, source, target, nbytes, at, offset),
+            record,
             [source] + ([] if keep else [target]),
             keep=keep,
             after=after,
@@ -2828,6 +2996,10 @@ class Stream:
     from and to arrays created with `pinned_array` go directly between that
     memory and the device; other host arrays go through a staging buffer,
     and the data of a copy to the host is copied out of it by `synchronize`.
+    NumPy arrays passed to a launch on a stream are copied to the device
+    before it and, if the kernel writes them, back after it. Views with
+    gaps are copied run by run of adjacent elements, or with many runs by
+    a kernel that gathers or scatters them on the device.
 
     Each stream has a timeline semaphore: every submission waits for the
     previous one of its stream, and for the streams that last used its
@@ -3120,7 +3292,8 @@ class Event:
     between two events on the device, which excludes the cost of launching
     and waiting in Python, as long as the device has work: as with CUDA's
     events, time in which it waits for the host between two events counts.
-    Create events with `event`.
+    On a `Stream`, ``record(stream)`` marks the point after the work
+    enqueued on that stream instead. Create events with `event`.
 
     Parameters
     ----------
@@ -3141,16 +3314,32 @@ class Event:
         self.device = device
         self._query = None
         self._seq = None
+        # The stream it was recorded on, and the value it waits for there.
+        self._stream = None
+        self._value = 0
 
-    def record(self):
+    def record(self, stream=None):
         """Mark the point after all work launched on the device so far.
+
+        Parameters
+        ----------
+        stream : Stream, optional
+            Mark the point after the work enqueued on this stream so far
+            instead, like ``cuda.event().record(stream)``.
 
         Returns
         -------
         Event
             The event itself.
+
+        Raises
+        ------
+        ValueError
+            If the stream belongs to another device.
         """
         device = self.device
+        if stream is not None and stream.device is not device:
+            raise ValueError("the stream belongs to another device")
         if device._queries is None:
             device._queries = vk.vkCreateQueryPool(
                 device.handle,
@@ -3163,8 +3352,21 @@ class Event:
             )
         # Queries are used in turn; an event recorded QUERIES events ago is
         # overwritten.
-        self._query = device._next_query
+        self._query = query = device._next_query
         device._next_query = (device._next_query + 1) % self.QUERIES
+        if stream is not None:
+            pool = device._queries
+
+            def record(cmd):
+                _lib.vkCmdResetQueryPool(cmd, pool, query, 1)
+                _lib.vkCmdWriteTimestamp(
+                    cmd, vk.VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, pool, query
+                )
+
+            stream._submit(device.family, record, [])
+            self._stream, self._value, self._seq = stream, stream.value, None
+            return self
+        self._stream = None
         batch = device._open or device._open_batch()
         _lib.vkCmdResetQueryPool(batch.cmd, device._queries, self._query, 1)
         _lib.vkCmdWriteTimestamp(
@@ -3180,6 +3382,9 @@ class Event:
 
     def synchronize(self):
         """Wait until the device has passed the event."""
+        if self._stream is not None:
+            self._stream._wait(self._value)
+            return
         if self._seq is None:
             raise RuntimeError("the event was not recorded")
         device = self.device

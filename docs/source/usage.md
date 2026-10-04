@@ -225,8 +225,14 @@ data copied to the host is in the array after `synchronize()`.
 `with stream.auto_synchronize():` waits for it when the block ends.
 Exceptions raised by kernels on a stream are raised by its `synchronize()`.
 
-Launches on a stream take device arrays only and cannot `print`, and only
-contiguous views can be copied on a stream. Work without a stream that uses
+Launches on a stream also take NumPy arrays: as with `numba.cuda`, they are
+copied to the device on the stream before the kernel, and those the kernel
+writes are copied back after it, so they hold the results after
+`synchronize()`. Views with gaps (`d[:, 1]`, `d[::2]`) can be copied too:
+run by run of adjacent elements, or, with many runs, through a small kernel
+that gathers or scatters them on the device. `event.record(stream)` marks the point after the work
+enqueued on a stream so far, for timing it. Kernels launched on a stream
+cannot `print`. Work without a stream that uses
 an array that a stream still uses waits for that stream on the host, and the
 other way round, so mixing the two is correct but serialises them.
 
