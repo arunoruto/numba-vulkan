@@ -524,8 +524,9 @@ class VulkanDispatcher:
             Workgroup size. By default 64 invocations: ``(64,)``,
             ``(8, 8)`` or ``(4, 4, 4)`` depending on the grid.
         stream : numba_vulkan.runtime.Stream, optional
-            Enqueue the launch on a stream (device arrays only); see
-            `numba_vulkan.runtime.Stream`.
+            Enqueue the launch on a stream; see
+            `numba_vulkan.runtime.Stream`. NumPy arrays are copied on the
+            stream and hold the results after it is synchronized.
 
         Returns
         -------
@@ -652,7 +653,7 @@ class VulkanDispatcher:
             )
             mode = mode._replace(floats=floats, ints=ints)
         argtypes, hosts, shapes, staged, convert = [], [], [], [], []
-        on_host = False
+        on_host, host_arrays = False, []
         for arg in args:
             if isinstance(arg, runtime.DeviceArray):
                 if arg._stored != narrowing.stored_dtype(arg.dtype, mode):
@@ -692,6 +693,7 @@ class VulkanDispatcher:
                     # the array is read at all.
                     staged.append((len(hosts), arg))
                     convert.append((len(hosts), arg, stored))
+                host_arrays.append((len(hosts), arg, stored))
                 hosts.append(arg)
             else:
                 ty = typeof(arg)
@@ -728,14 +730,11 @@ class VulkanDispatcher:
             # Element 0 receives the status of the kernel, the shapes follow.
             meta = np.array([0, *shapes], dtype=np.int32)
         if stream is not None:
-            if on_host or kernel.print_binding is not None:
-                raise TypeError(
-                    "launches on a stream take device arrays only and cannot print; "
-                    "copy NumPy arrays with to_device(..., stream=...)"
-                )
-            target.launch_stream(stream, kernel, tuple(groups), [meta, *hosts], push)
-            if not _ASYNC:
-                stream.synchronize()
+            if kernel.print_binding is not None:
+                raise TypeError("kernels launched on a stream cannot print")
+            self._launch_stream(
+                stream, kernel, tuple(groups), meta, hosts, push, host_arrays
+            )
             return
         if _ASYNC and not on_host and kernel.print_binding is None:
             # Nothing to copy back: do not wait. Exceptions are reported by
@@ -749,6 +748,51 @@ class VulkanDispatcher:
                 original[...] = copy != 0 if original.dtype == np.bool_ else copy
         if meta[STATUS_INDEX]:
             self._raise(int(meta[STATUS_INDEX]))
+
+    def _launch_stream(self, stream, kernel, groups, meta, hosts, push, host_arrays):
+        """Enqueue a launch on a stream, with copies for its host arrays.
+
+        Parameters
+        ----------
+        stream : numba_vulkan.runtime.Stream
+            The stream.
+        kernel : CompiledKernel
+            The kernel.
+        groups : tuple of int
+            The size of the grid in workgroups.
+        meta : numpy.ndarray
+            The status word, and the shapes without push constants.
+        hosts : list
+            The arguments as passed to the device (see `_launch`).
+        push : bytes
+            The push constants.
+        host_arrays : list of tuple
+            Index in `hosts`, the NumPy array passed and its stored type,
+            for every NumPy array argument.
+
+        Notes
+        -----
+        As in ``numba.cuda``, NumPy arrays are copied to the device on the
+        stream before the kernel, and those the kernel writes back after
+        it; they hold the results after ``stream.synchronize()``.
+        """
+        hosts = list(hosts)
+        back = []
+        for index, original, stored in host_arrays:
+            if hosts[index] is None:
+                continue
+            on_device = runtime.DeviceArray(
+                stream.device, original.shape, stored, _stored=stored
+            )
+            on_device.copy_to_device(hosts[index], stream=stream)
+            hosts[index] = on_device
+            if arg_binding(index) in kernel.written_bindings:
+                back.append((on_device, original))
+        stream.device.launch_stream(stream, kernel, groups, [meta, *hosts], push)
+        for on_device, original in back:
+            on_device._copy_out_stream(original, stream, cast=True)
+        if not _ASYNC:
+            stream.synchronize()
 
     def _raise(self, code):
         """Raise the exception that a kernel reported; see `raise_kernel_error`."""
