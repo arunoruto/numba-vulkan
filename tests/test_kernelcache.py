@@ -138,7 +138,6 @@ def test_cache_can_be_turned_off(cache, device, monkeypatch):
 
 
 def test_unwritable_cache_directory_is_harmless(cache, device, monkeypatch):
-    emitted, _ = cache
     monkeypatch.setenv("NUMBA_VULKAN_CACHE_DIR", "/proc/numba-vulkan-no-such-place")
     out, _ = launch(body, device)
     np.testing.assert_allclose(

@@ -637,8 +637,10 @@ def expand_byte_table_loads(text):
             for k in range(width // 8):
                 out += [
                     f"{indent}{p}.i{k} = add i64 {position}, {k}",
-                    f"{indent}{p}.p{k} = getelementptr inbounds [{size} x i8], "
-                    f"ptr {space}{table}, i64 0, i64 {p}.i{k}",
+                    (
+                        f"{indent}{p}.p{k} = getelementptr inbounds [{size} x i8], "
+                        f"ptr {space}{table}, i64 0, i64 {p}.i{k}"
+                    ),
                     f"{indent}{p}.b{k} = load i8, ptr {space}{p}.p{k}",
                 ]
                 if width == 8:

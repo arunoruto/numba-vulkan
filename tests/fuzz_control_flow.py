@@ -103,7 +103,7 @@ def make(seed, rich=False):
 def run(seed, devices, rich=False):
     src = make(seed, rich)
     ns = {f"C{i}": c for i, c in enumerate(C)}
-    exec(src, ns)
+    exec(src, ns)  # noqa: S102 - a generated kernel
     pyf = ns["f"]
     x = np.linspace(-2, 2, 48, dtype=f32)
     y = np.linspace(3, -1, 48, dtype=f32)
@@ -121,7 +121,7 @@ def run(seed, devices, rich=False):
         out = np.zeros_like(x)
         try:
             kernel.forall(x.size, device=dev)(x, y, out)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - a finding, reported
             msg = [l for l in str(exc).splitlines() if l.strip()]
             return (
                 f"{type(exc).__name__}: {(msg[1] if len(msg) > 1 else msg[0])[:140]}",

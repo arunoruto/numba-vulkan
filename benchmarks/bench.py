@@ -28,7 +28,7 @@ try:
     from numba import cuda
 
     HAVE_CUDA = cuda.is_available()
-except Exception:
+except Exception:  # noqa: BLE001 - any failure means: no CUDA
     HAVE_CUDA = False
 
 f32 = np.float32
@@ -251,7 +251,7 @@ def system_info():
     except (OSError, StopIteration):
         pass
     info = [
-        ("Date", datetime.date.today().isoformat()),
+        ("Date", datetime.datetime.now(datetime.UTC).date().isoformat()),
         ("CPU", f"{cpu} ({os.cpu_count()} threads)"),
         (
             "Vulkan devices",
@@ -362,7 +362,7 @@ def run(size=2048, maxiter=200, repeat=5, verbose=True):
         for label, kernels, on_device, (backend, device, variant) in available:
             try:
                 first, samples, result = measure(kernels, name, args, repeat, on_device)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - reported, the run goes on
                 if verbose:
                     print(
                         f"  {label:<60}  failed: {type(exc).__name__}: "
@@ -379,18 +379,18 @@ def run(size=2048, maxiter=200, repeat=5, verbose=True):
                     f"{baseline / best:>8.2f}x  {check}"
                 )
             records.append(
-                dict(
-                    suite="apps",
-                    workload=name,
-                    description=description,
-                    backend=backend,
-                    device=device,
-                    variant=variant,
-                    label=label,
-                    first_s=first,
-                    samples_s=samples,
-                    check=check,
-                )
+                {
+                    "suite": "apps",
+                    "workload": name,
+                    "description": description,
+                    "backend": backend,
+                    "device": device,
+                    "variant": variant,
+                    "label": label,
+                    "first_s": first,
+                    "samples_s": samples,
+                    "check": check,
+                }
             )
     return records
 
@@ -418,7 +418,7 @@ def main():
     if opts.json:
         with open(opts.json, "w") as fh:
             json.dump(
-                dict(size=opts.size, maxiter=opts.maxiter, results=records),
+                {"size": opts.size, "maxiter": opts.maxiter, "results": records},
                 fh,
                 indent=2,
             )

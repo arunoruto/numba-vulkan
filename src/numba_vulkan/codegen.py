@@ -157,7 +157,8 @@ class Emitter:
     def _start(self):
         """Start the child process without waiting for it to be ready."""
         self._stop()
-        self._log = tempfile.TemporaryFile()
+        # Open for as long as the child runs.
+        self._log = tempfile.TemporaryFile()  # noqa: SIM115
         self._proc = subprocess.Popen(
             # Run as a script, which spares the child importing this package
             # and Numba; -P keeps this directory off its module search path.
@@ -458,8 +459,8 @@ class CompiledKernel:
     shared_bytes: int = 0
     print_binding: int = None
     constants: dict = field(default_factory=dict)
-    mode: narrowing.Mode = narrowing.Mode()
-    narrowed: narrowing.Mode = narrowing.Mode()
+    mode: narrowing.Mode = narrowing.Mode()  # noqa: RUF009 - immutable
+    narrowed: narrowing.Mode = narrowing.Mode()  # noqa: RUF009 - immutable
     push_format: str = ""
     push_sources: tuple = ()
     args_pushed: bool = False
@@ -1592,6 +1593,7 @@ def check_spirv(spirv):
                 ["spirv-val", "--target-env", "vulkan1.2", tmp.name],
                 capture_output=True,
                 text=True,
+                check=False,
             )
         if proc.returncode != 0:
             raise SpirvCodegenError(

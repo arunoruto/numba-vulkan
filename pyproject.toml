@@ -38,10 +38,18 @@ bench = [
 test = [
     "pytest>=8.0",
 ]
+# Pinned: new ruff versions enable new rules by default.
+lint = [
+    "ruff>=0.16.8,<0.17",
+]
 
 [tool.uv]
 package = true
 default-groups = ["test"]
+
+[tool.ruff]
+# Code blocks in the documentation align their comments on purpose.
+extend-exclude = ["*.md"]
 
 [tool.ruff.lint.pydocstyle]
 convention = "numpy"

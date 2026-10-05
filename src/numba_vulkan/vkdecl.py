@@ -46,9 +46,13 @@ class GlobalId(AbstractTemplate):
             ``int32(literal)`` for a valid literal axis, otherwise ``None``,
             which makes Numba retry with literal argument types.
         """
-        if len(args) == 1 and not kws and isinstance(args[0], types.IntegerLiteral):
-            if args[0].literal_value in (0, 1, 2):
-                return signature(types.int32, args[0])
+        if (
+            len(args) == 1
+            and not kws
+            and isinstance(args[0], types.IntegerLiteral)
+            and args[0].literal_value in (0, 1, 2)
+        ):
+            return signature(types.int32, args[0])
 
 
 def _axis_template(stub):
@@ -69,7 +73,7 @@ for _stub in (stubs.local_id, stubs.group_id, stubs.local_size, stubs.num_groups
 class Barrier(ConcreteTemplate):
     """Typing of `numba_vulkan.stubs.barrier`: no arguments, no result."""
 
-    cases = [signature(types.none)]
+    cases = [signature(types.none)]  # noqa: RUF012 - Numba reads a list
 
 
 def _literal_shape(shape):
@@ -157,12 +161,15 @@ def _numpy_constructor(function, fill):
         # then can a shape be told to be constant or not.
         if not isinstance(site, types.IntegerLiteral):
             return False
-        if _literal_shape(shape) is None and not isinstance(shape, types.Literal):
-            if isinstance(shape, (types.Integer, types.BaseTuple)):
-                raise errors.TypingError(
-                    f"np.{function.__name__}() in a Vulkan kernel needs a constant "
-                    "shape: shaders cannot allocate memory at run time"
-                )
+        if (
+            _literal_shape(shape) is None
+            and not isinstance(shape, types.Literal)
+            and isinstance(shape, (types.Integer, types.BaseTuple))
+        ):
+            raise errors.TypingError(
+                f"np.{function.__name__}() in a Vulkan kernel needs a constant "
+                "shape: shaders cannot allocate memory at run time"
+            )
         return True
 
     if fill:
@@ -247,7 +254,7 @@ def _atomic_template(stub, dtypes):
         def generic(self, args, kws):
             if kws or len(args) != 3:
                 return None
-            array, index, value = args
+            array, index, _ = args
             if not _atomic_target(array, index, dtypes):
                 return None
             return signature(array.dtype, array, index, array.dtype)
@@ -500,7 +507,7 @@ class FancyIndexing(AbstractTemplate):
     def generic(self, args, kws):
         """Raise for an array or expression used as an index."""
         if len(args) < 2 or not isinstance(args[0], VulkanArray):
-            return None
+            return
         index = args[1]
         parts = index if isinstance(index, types.BaseTuple) else (index,)
         if any(isinstance(p, (types.Array, VulkanExpr)) for p in parts):
@@ -509,7 +516,7 @@ class FancyIndexing(AbstractTemplate):
                 "supported in Vulkan kernels: it would create an array of run-time "
                 "size. Loop over the elements instead."
             )
-        return None
+        return
 
 
 # -- subgroups ----------------------------------------------------------------

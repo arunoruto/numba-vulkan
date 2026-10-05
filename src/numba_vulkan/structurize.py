@@ -658,10 +658,12 @@ def _copy_join(blocks, graph, join, tag):
         for n in region:
             blocks[mapping[n]] = blocks[n].renamed(mapping[n], mapping)
         twin = blocks[mapping[join]]
-        twin.phis = [_keep_entries(line, lambda b: b == pred) for line in twin.phis]
+        twin.phis = [
+            _keep_entries(line, lambda b, p=pred: b == p) for line in twin.phis
+        ]
         blocks[pred].retarget(join, mapping[join])
         blocks[join].phis = [
-            _keep_entries(line, lambda b: b != pred) for line in blocks[join].phis
+            _keep_entries(line, lambda b, p=pred: b != p) for line in blocks[join].phis
         ]
         # Blocks after the region now also receive values from the copy.
         for name in frontier:

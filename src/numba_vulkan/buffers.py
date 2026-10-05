@@ -736,8 +736,10 @@ def _float_add_as_loops(text):
             f"{indent}%{n}.f = bitcast i32 %{n}.c to float",
             f"{indent}%{n}.s = fadd float %{n}.f, {value}",
             f"{indent}%{n}.n = bitcast float %{n}.s to i32",
-            f"{indent}%{n}.g = call i32 @{_PREFIX}.cas.i32(i32 {binding}, i32 {index}, "
-            f"i32 %{n}.c, i32 %{n}.n)",
+            (
+                f"{indent}%{n}.g = call i32 @{_PREFIX}.cas.i32(i32 {binding}, i32 {index}, "
+                f"i32 %{n}.c, i32 %{n}.n)"
+            ),
             f"{indent}%{n}.k = icmp eq i32 %{n}.g, %{n}.c",
             f"{indent}br i1 %{n}.k, label %{n}.done, label %{n}.loop",
             f"{n}.done:",

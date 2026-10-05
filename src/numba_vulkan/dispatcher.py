@@ -320,7 +320,13 @@ class VulkanDispatcher:
 
     # -- kernel launch --------------------------------------------------------
 
-    def compile(self, argtypes, ndim=1, mode=narrowing.Mode(), local_size=None):
+    def compile(
+        self,
+        argtypes,
+        ndim=1,
+        mode=narrowing.Mode(),  # noqa: B008 - immutable
+        local_size=None,
+    ):
         """Compile (or fetch) the kernel specialisation for ``argtypes``.
 
         Parameters
