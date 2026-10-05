@@ -832,8 +832,6 @@ class VulkanDispatcher:
             # Element 0 receives the status of the kernel, the shapes follow.
             meta = np.array([0, *shapes], dtype=np.int32)
         if stream is not None:
-            if kernel.print_binding is not None:
-                raise TypeError("kernels launched on a stream cannot print")
             self._launch_stream(
                 stream, kernel, tuple(groups), meta, hosts, push, host_arrays
             )

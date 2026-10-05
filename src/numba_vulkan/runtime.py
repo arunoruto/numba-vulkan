@@ -1262,8 +1262,12 @@ class Device:
         if batch.launches >= self.MAX_BATCH or not self._busy():
             self._flush()
 
-    def _new_slot(self, state, key, arrays):
-        """Set up a slot for asynchronous launches; see `launch`."""
+    def _new_slot(self, state, key, arrays, extra=()):
+        """Set up a slot for asynchronous launches; see `launch`.
+
+        `extra` holds ``(buffer, nbytes)`` for the bindings after the
+        constant arrays: the print buffer of a launch on a stream.
+        """
         if len(state.slots) >= self.MAX_SLOTS:
             # The descriptor pool is full: reuse the set of the slot used
             # longest ago, once no launch can use it any more.
@@ -1290,6 +1294,7 @@ class Device:
                 host_buffers.append(buffer)
                 buffers.append((buffer, _words(array.nbytes)))
         buffers += state.constants
+        buffers += extra
         writes = [
             vk.VkWriteDescriptorSet(
                 sType=vk.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
@@ -1536,7 +1541,8 @@ class Device:
         """Enqueue ``kernel`` on a `Stream`; see `launch` for the arguments.
 
         The arrays must be device arrays (and the host arrays that hold the
-        status and, without push constants, shapes and scalars).
+        status and, without push constants, shapes and scalars). What the
+        kernel prints is printed once the stream has passed the launch.
         """
         state = self._pipeline(kernel)
         parts, host, buffers = [], [], []
@@ -1554,14 +1560,28 @@ class Device:
             else:
                 parts.append(array.nbytes)
                 host.append(array.tobytes())
+        extra, keep, after = (), [], None
+        if kernel.print_binding is not None:
+            # A print buffer per launch, printed once the stream is past it.
+            printed = self._acquire(PRINT_BUFFER_WORDS * 4, host=True)
+            header = np.array([0, PRINT_BUFFER_WORDS], dtype=np.uint32)
+            printed.view[:8] = header.view(np.uint8)
+            extra, keep = [(printed, PRINT_BUFFER_WORDS * 4)], [printed]
+            parts.append(("print", printed.serial))
+
+            def after():
+                print_records(printed.view.view(np.uint32))
+
         key = (tuple(parts), tuple(host))
         slot = state.slots.get(key)
         if slot is None:
-            slot = self._new_slot(state, key, arrays)
+            slot = self._new_slot(state, key, arrays, extra)
         stream._submit(
             self.family,
             lambda cmd: self._record_dispatch(cmd, state, slot.desc_set, groups, push),
             buffers,
+            keep=keep,
+            after=after,
             checks=[slot] if slot.status is not None else (),
         )
         slot.stream, slot.stream_value = stream, stream.value
@@ -3123,7 +3143,8 @@ class Stream:
     memory and the device; other host arrays go through a staging buffer,
     and the data of a copy to the host is copied out of it by `synchronize`.
     NumPy arrays passed to a launch on a stream are copied to the device
-    before it and, if the kernel writes them, back after it. Views with
+    before it and, if the kernel writes them, back after it; what a kernel
+    prints is printed by `synchronize` as well. Views with
     gaps are copied run by run of adjacent elements, or with many runs by
     a kernel that gathers or scatters them on the device.
 

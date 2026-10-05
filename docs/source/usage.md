@@ -256,8 +256,9 @@ writes are copied back after it, so they hold the results after
 `synchronize()`. Views with gaps (`d[:, 1]`, `d[::2]`) can be copied too:
 run by run of adjacent elements, or, with many runs, through a small kernel
 that gathers or scatters them on the device. `event.record(stream)` marks the point after the work
-enqueued on a stream so far, for timing it. Kernels launched on a stream
-cannot `print`. Work without a stream that uses
+enqueued on a stream so far, for timing it. What kernels on a stream
+`print` appears when the stream is synchronised (or `query()` finds the
+launch finished). Work without a stream that uses
 an array that a stream still uses waits for that stream on the host, and the
 other way round, so mixing the two is correct but serialises them.
 
