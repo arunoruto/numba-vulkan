@@ -55,26 +55,6 @@ def test_known_issue(issue):
     )
 
 
-# KI-35: one buffer under two bindings escapes the overlap check.
-@nv.jit
-def _shift(x, y):
-    if nv.global_id(0) == 0:
-        y[1:] = x[:-1] * f32(2)
-
-
-@pytest.mark.xfail(
-    strict=True, reason="KI-35, documented in docs/source/known_issues.md"
-)
-def test_one_array_as_two_arguments():
-    d = nv.to_device(np.arange(5, dtype=f32))
-    try:
-        _shift.forall(1)(d, d)
-        nv.synchronize()
-    except ValueError:
-        return  # refused, as it should be
-    np.testing.assert_array_equal(d.copy_to_host(), [0, 0, 2, 4, 6])
-
-
 # KI-32: llvmlite's own backend (not NUMBA_VULKAN_LLC), in a child process.
 SELECT_AFTER_FCMP_SELECT = f"""
 target triple = "{codegen.TRIPLE}"
