@@ -1342,6 +1342,27 @@ def _arrays_in(ty, value, context, builder, anywhere=False):
     return found
 
 
+def _element_span(builder, offset, shape, steps):
+    """The positions in its buffer that a view's elements lie between.
+
+    Returns
+    -------
+    tuple of llvmlite.ir.Value
+        The lowest and highest position, as 32-bit element positions like
+        offsets and steps, and whether the view has no elements.
+    """
+    low = high = _i32(builder, offset)
+    zero, empty = i32(0), cgutils.false_bit
+    for extent, step in zip(shape, steps):
+        extent = _i32(builder, extent)
+        reach = builder.mul(builder.sub(extent, i32(1)), _i32(builder, step))
+        negative = builder.icmp_signed("<", reach, zero)
+        low = builder.add(low, builder.select(negative, reach, zero))
+        high = builder.add(high, builder.select(negative, zero, reach))
+        empty = builder.or_(empty, builder.icmp_signed("==", extent, zero))
+    return low, high, empty
+
+
 def assign_expression(context, builder, aryty, selection, exprty, expr):
     """Write an expression, element by element, into a view.
 
@@ -1360,7 +1381,8 @@ def assign_expression(context, builder, aryty, selection, exprty, expr):
     -----
     NumPy computes the right-hand side before writing. Element by element,
     that is the same only if the expression reads the written array at the
-    very positions it writes; anything else raises ``ValueError``.
+    very positions it writes, or only outside the span of positions it
+    writes; anything else raises ``ValueError``.
     """
     view_shape = selection.shape
     if exprty.ndim > len(view_shape):
@@ -1385,6 +1407,7 @@ def assign_expression(context, builder, aryty, selection, exprty, expr):
         _i32(builder, builder.sdiv(stride, stride.type(itemsize), flags=["exact"]))
         for stride in selection.strides
     ]
+    write_span = _element_span(builder, selection.offset, view_shape, view_steps)
     for opty, operand, anywhere in _arrays_in(exprty, expr, context, builder):
         if opty.binding is not None and isinstance(selection.binding, int):
             shared = opty.binding == selection.binding
@@ -1397,19 +1420,23 @@ def assign_expression(context, builder, aryty, selection, exprty, expr):
             continue
         offset, op_shape, _, steps = _unpack(context, builder, opty, operand)
         if anywhere or opty.ndim != len(view_shape):
-            if shared is True:
-                raise VulkanUnsupportedError(
-                    "an expression may only read the array it is assigned to at "
-                    "the positions it writes"
-                )
-            same = cgutils.false_bit  # different shapes: never the same view
+            same = cgutils.false_bit  # read elsewhere, or a different shape
         else:
             same = builder.icmp_signed("==", offset, selection.offset)
             for a, b in zip(op_shape, view_shape):
                 same = builder.and_(same, builder.icmp_signed("==", a, b))
             for a, b in zip(steps, view_steps):
                 same = builder.and_(same, builder.icmp_signed("==", a, b))
-        overlap = builder.not_(same)
+        # Reads whose elements all lie outside the span written are fine.
+        read_span = _element_span(builder, offset, op_shape, steps)
+        apart = builder.or_(
+            builder.or_(read_span[2], write_span[2]),
+            builder.or_(
+                builder.icmp_signed("<", read_span[1], write_span[0]),
+                builder.icmp_signed("<", write_span[1], read_span[0]),
+            ),
+        )
+        overlap = builder.and_(builder.not_(same), builder.not_(apart))
         if shared is not True:
             overlap = builder.and_(shared, overlap)
         with builder.if_then(overlap, likely=False):

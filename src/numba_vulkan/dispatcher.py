@@ -326,6 +326,7 @@ class VulkanDispatcher:
         ndim=1,
         mode=narrowing.Mode(),  # noqa: B008 - immutable
         local_size=None,
+        aliases=(),
     ):
         """Compile (or fetch) the kernel specialisation for ``argtypes``.
 
@@ -339,6 +340,9 @@ class VulkanDispatcher:
             The 64-bit types the kernel must do without.
         local_size : tuple of int, optional
             Workgroup size; by default 64 invocations, shaped by `ndim`.
+        aliases : tuple of tuple
+            ``(index, earlier)`` for array arguments that share the buffer
+            of an earlier one; see `numba_vulkan.compiler.compile_kernel`.
 
         Returns
         -------
@@ -361,7 +365,7 @@ class VulkanDispatcher:
                 )
             bound.append(ty)
         local_size = _shape3(local_size) if local_size else None
-        key = (tuple(bound), ndim, mode)
+        key = (tuple(bound), ndim, mode, *((aliases,) if aliases else ()))
         if key not in self._kernels:
             name = self._cache_name(key) if self.cache else None
             kernel = self._load(name) if name else None
@@ -369,7 +373,9 @@ class VulkanDispatcher:
                 counted = exception_table.counted
                 with narrowing.using(mode):
                     cres = self.compile_device(key[0])
-                    kernel = compile_kernel(cres, ndim, exact=not self.fastmath)
+                    kernel = compile_kernel(
+                        cres, ndim, exact=not self.fastmath, aliases=aliases
+                    )
                 # Exceptions with counted codes differ between processes.
                 if name and exception_table.counted == counted:
                     kernelcache.store_kernel(
@@ -742,10 +748,11 @@ class VulkanDispatcher:
         if local_size is not None:
             local_size = (local_size,) if np.isscalar(local_size) else tuple(local_size)
             ndim = max(ndim, len(local_size))
-        key = (tuple(argtypes), ndim, mode, local_size)
+        aliases = _aliases(args)
+        key = (tuple(argtypes), ndim, mode, local_size, aliases)
         kernel = self._launched.get(key)
         if kernel is None:
-            kernel = self.compile(argtypes, ndim, mode, local_size)
+            kernel = self.compile(argtypes, ndim, mode, local_size, aliases)
             self._launched[key] = kernel
         if signature is not None:
             self._plans[plan_key] = (kernel, tuple(scalars))
@@ -992,9 +999,10 @@ def _signature(args):
     -------
     tuple or None
         Per argument: the element type, stored type, dimensions and
-        plainness of a device array, or the type of a scalar. None if an
-        argument is anything else (NumPy arrays among them), for which
-        launches take the full path.
+        plainness of a device array, or the type of a scalar; then the
+        arguments that share a buffer (`_aliases`). None if an argument is
+        anything else (NumPy arrays among them), for which launches take
+        the full path.
     """
     signature = []
     for arg in args:
@@ -1016,7 +1024,30 @@ def _signature(args):
             signature.append(kind)
         else:
             return None
-    return tuple(signature)
+    return (*signature, _aliases(args))
+
+
+def _aliases(args):
+    """Device array arguments that share the buffer of an earlier one.
+
+    Parameters
+    ----------
+    args : tuple
+        The arguments of a launch.
+
+    Returns
+    -------
+    tuple of tuple
+        ``(index, earlier)`` per such argument; see
+        `numba_vulkan.compiler.compile_kernel`.
+    """
+    first, aliases = {}, []
+    for index, arg in enumerate(args):
+        if type(arg) is runtime.DeviceArray:
+            earlier = first.setdefault(id(arg._buffer), index)
+            if earlier != index:
+                aliases.append((index, earlier))
+    return tuple(aliases)
 
 
 def _shape3(shape):

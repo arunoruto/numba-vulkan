@@ -370,7 +370,7 @@ def _push_dtype(ty, mode):
     return dtype
 
 
-def _load_argument(context, builder, index, ty, shape_offset, push=None):
+def _load_argument(context, builder, index, ty, shape_offset, push=None, buffer=None):
     """Build the Numba value of one kernel argument.
 
     Parameters
@@ -391,6 +391,9 @@ def _load_argument(context, builder, index, ty, shape_offset, push=None):
     push : callable, optional
         Loads a member of the push-constant block, given its source as in
         `_push_members`. Without it, scalars and extents come from buffers.
+    buffer : int, optional
+        For an array, the position of the argument whose binding it uses:
+        an earlier one with the same buffer (see `compile_kernel`).
 
     Returns
     -------
@@ -432,7 +435,7 @@ def _load_argument(context, builder, index, ty, shape_offset, push=None):
         proxy.shape = cgutils.pack_array(builder, shape, ty=intp)
         proxy.strides = cgutils.pack_array(builder, strides, ty=intp)
         proxy.offset = offset
-        proxy.binding = i32(arg_binding(index))
+        proxy.binding = i32(arg_binding(index if buffer is None else buffer))
         return proxy._getvalue()
     elem = buffer_element_type(context, ty)
     if push is not None:
@@ -456,7 +459,7 @@ def _shared_bytes(text):
 
 
 @global_compiler_lock
-def compile_kernel(cres, ndim, exact=True, local_size=None):
+def compile_kernel(cres, ndim, exact=True, local_size=None, aliases=()):
     """Wrap a compiled function in a shader entry point and emit SPIR-V.
 
     Parameters
@@ -471,12 +474,18 @@ def compile_kernel(cres, ndim, exact=True, local_size=None):
         `numba_vulkan.codegen.mark_exact`.
     local_size : tuple of int, optional
         Workgroup size; by default 64 invocations, shaped by `ndim`.
+    aliases : tuple of tuple
+        ``(index, earlier)`` for array arguments launched with the same
+        buffer as an earlier one: they use its binding, so that the kernel
+        sees that they share memory (as the checks of array expressions
+        assigned to arrays they read need to).
 
     Returns
     -------
     CompiledKernel
     """
     context, fndesc = cres.target_context, cres.fndesc
+    shares = dict(aliases)
     argtypes = fndesc.argtypes
     if fndesc.restype != types.none:
         raise TypeError(f"kernels must return None, not {fndesc.restype}")
@@ -503,7 +512,11 @@ def compile_kernel(cres, ndim, exact=True, local_size=None):
     # follow it unless they are push constants.
     callargs, shape_offset = [], 0 if push else 1
     for index, ty in enumerate(argtypes):
-        callargs.append(_load_argument(context, builder, index, ty, shape_offset, push))
+        callargs.append(
+            _load_argument(
+                context, builder, index, ty, shape_offset, push, shares.get(index)
+            )
+        )
         if isinstance(ty, VulkanArray):
             shape_offset += _layout_values(ty)
     status, _ = context.call_conv.call_function(

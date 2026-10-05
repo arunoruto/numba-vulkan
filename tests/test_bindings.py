@@ -77,6 +77,53 @@ def test_aliasing_checks_still_see_the_same_buffer(run):
     np.testing.assert_array_equal(a, [0, 2, 3, 4])
 
 
+@nv.jit
+def _shift(x, y):
+    if nv.global_id(0) == 0:
+        y[1:] = x[:-1] * f32(2)
+
+
+@nv.jit
+def _double(x, y):
+    if nv.global_id(0) == 0:
+        y[:] = x * f32(2)
+
+
+def test_one_array_as_two_arguments(device):
+    """Arguments that share a buffer share a binding, so the checks see it."""
+    d = nv.to_device(np.arange(6, dtype=f32), device)
+    with pytest.raises(ValueError, match="other positions"):
+        _shift.forall(1, device=device)(d, d)
+        nv.synchronize(device)
+    _double.forall(1, device=device)(d, d)  # the same positions: fine
+    np.testing.assert_array_equal(d.copy_to_host(), np.arange(6) * 2)
+    _double.forall(1, device=device)(d[:3], d[3:])  # apart: fine
+    np.testing.assert_array_equal(d.copy_to_host(), [0, 2, 4, 0, 4, 8])
+    with pytest.raises(ValueError, match="other positions"):
+        _double.forall(1, device=device)(d[:4], d[2:])
+        nv.synchronize(device)
+
+
+def test_reads_apart_from_the_writes_are_allowed(run):
+    @nv.jit
+    def halves(a):
+        if nv.global_id(0) == 0:
+            a[4:] = a[:4] * f32(2)
+            a[::2] = a[1::2] + f32(1)  # interleaved: their spans overlap
+
+    with pytest.raises(ValueError, match="other positions"):
+        run(halves, 1, np.arange(8, dtype=f32))
+
+    @nv.jit
+    def apart(a):
+        if nv.global_id(0) == 0:
+            a[4:] = a[:4] * f32(2)
+
+    a = np.arange(8, dtype=f32)
+    run(apart, 1, a)
+    np.testing.assert_array_equal(a, [0, 1, 2, 3, 0, 2, 4, 6])
+
+
 def test_choosing_an_array_at_run_time_is_explained():
     @nv.jit
     def pick(x, y, flag, out):

@@ -14,7 +14,7 @@ uv run pytest tests/test_known_issues.py -rxX
 ```
 
 Numbers are not reused: KI-02, KI-03, KI-05, KI-06, KI-07, KI-08, KI-09,
-KI-13, KI-14, KI-15, KI-22, KI-24, KI-25, KI-26, KI-30, KI-31 and KI-34 (NumPy functions on
+KI-13, KI-14, KI-15, KI-22, KI-24, KI-25, KI-26, KI-30, KI-31, KI-34 and KI-35 (NumPy functions on
 scalars, missing `math` functions, allocating arrays in kernels, global
 constant arrays, complex numbers, `print`, all data copied on every call,
 structured arrays,
@@ -23,7 +23,8 @@ every process, lint warnings, one specialisation per buffer binding, libclc link
 full for every kernel, libclc depending on an old NixOS release, `gamma`
 losing precision for large arguments, `float64` functions losing precision
 on Intel's and Mesa's drivers, slicing a reversed view with 32-bit
-integers) have been fixed.
+integers, one array passed as two arguments escaping the overlap check of
+array expressions) have been fixed.
 
 ## Language and library coverage
 
@@ -65,8 +66,10 @@ reductions along an axis, such as `x.sum(axis=0)`, are expressions too.
 
 Because an expression is computed while it is being assigned, assigning it
 to an array it reads is only allowed where it reads each element at the
-position it writes, as in `a[:] = a * 2`; anything else is detected at run
-time and raises `ValueError`, where NumPy would compute a temporary first.
+position it writes, as in `a[:] = a * 2`, or only elements outside those it
+writes, as in `a[4:] = a[:4] * 2`; anything else is detected at run time
+and raises `ValueError`, where NumPy would compute a temporary first. This
+holds for views of one array passed as several arguments too.
 
 **Fix:** `x.copy()` could become an expression like the others. Selections
 whose size depends on the data, such as `x[x > 0]`, cannot.
@@ -126,26 +129,6 @@ gets wrong is rejected by `codegen.check_structure`. A kernel of 5700
 blocks (sixty random programs with nested loops, inlined one after the
 other) is restructured in about 2 s, but takes some 90 s to compile in all,
 mostly in LLVM.
-
-### KI-35: one array passed as two arguments escapes the overlap check
-
-```python
-@nv.jit
-def shift(x, y):
-    y[1:] = x[:-1] * 2   # NumPy computes x[:-1] * 2 first
-
-d = nv.to_device(np.arange(5, dtype=np.float32))
-shift.forall(1)(d, d)    # gives [0, 0, 0, 0, 0], not [0, 0, 2, 4, 6]
-```
-
-An array expression assigned to an array it reads is only allowed where it
-reads each element at the position it writes (see KI-04), and the check
-compares the bindings of the two. The same device array passed as two
-arguments gets two bindings, so the check does not see that they share a
-buffer, and the expression reads elements it has already overwritten.
-
-**Fix:** compare the buffers, not the bindings: the launch knows which
-arguments share one and could pass that to the check, or bind them once.
 
 ## Performance
 
