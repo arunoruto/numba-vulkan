@@ -54,6 +54,7 @@ limitations
 known_issues
 benchmarks
 development
+changelog
 authorship
 ```
 

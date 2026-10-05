@@ -1,6 +1,6 @@
 [project]
 name = "numba-vulkan"
-version = "0.0.1"
+version = "0.1.0"
 description = "Proof of concept: a Vulkan compute target for Numba"
 readme = "README.md"
 # Distributions bundle libclc's bitcode, which is under LLVM's licence.

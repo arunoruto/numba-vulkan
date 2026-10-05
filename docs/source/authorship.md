@@ -6,7 +6,7 @@ This project was written by an AI under human direction. The split is:
 | --- | --- |
 | Idea | Mirza Arnaut ([@arunoruto](https://github.com/arunoruto)), who proposed a Vulkan target in [numba/numba#10116](https://github.com/numba/numba/issues/10116) |
 | Direction and design decisions | Mirza Arnaut: a Vulkan target for Numba, built on Numba's target extension API, with numba-cuda and Taichi as references |
-| Implementation: code, tests, benchmarks, documentation | Claude (Anthropic's Claude Fable 5.1, running in Claude Code) |
+| Implementation: code, tests, benchmarks, documentation | Claude (Anthropic's Claude Fable 5.1, and Claude Opus 5.5 from 2 October 2026 on, running in Claude Code) |
 | Review | Mirza Arnaut |
 
 What this means in practice:
