@@ -26,7 +26,8 @@ def checked(x):
 
 @nv.jit
 def shout(x):
-    print(x[0])
+    if nv.global_id(0) == 0:
+        print(x[0])
 
 
 @nv.jit
@@ -125,10 +126,17 @@ def test_pinned_arrays_and_their_views(device):
     np.testing.assert_array_equal(d.copy_to_host(), np.arange(300, 400))
 
 
+def test_prints_appear_at_synchronize(device, capfd):
+    stream = nv.stream(device)
+    x = nv.to_device(np.array([7, 8, 9, 10], f32), device)
+    for k in range(3):
+        shout.forall(1, stream=stream)(x[k:])
+    stream.synchronize()
+    assert capfd.readouterr().out.split() == ["7.0", "8.0", "9.0"]
+
+
 def test_what_streams_reject(device):
     stream = nv.stream(device)
-    with pytest.raises(TypeError, match="cannot print"):
-        shout.forall(4, stream=stream)(nv.to_device(np.ones(4, f32), device))
     other = next((i for i in range(len(nv.list_devices())) if i != device), None)
     if other is not None:
         with pytest.raises(ValueError):
