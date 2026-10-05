@@ -4,7 +4,7 @@ Guidance for AI agents (and humans) working on numba-vulkan.
 
 ## What this is
 
-A proof-of-concept Vulkan compute target for Numba. Python kernels go through
+A Vulkan compute target for Numba (alpha). Python kernels go through
 Numba's pipeline to LLVM IR, then through LLVM's SPIR-V backend, and run as
 Vulkan compute shaders.
 

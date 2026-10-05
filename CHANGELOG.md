@@ -2,9 +2,9 @@
 
 ## 0.1.0 (unreleased)
 
-The first release of numba-vulkan, a proof-of-concept Vulkan compute target
-for Numba: Python kernels go through Numba's pipeline to LLVM IR, through
-LLVM's SPIR-V backend, and run as Vulkan compute shaders. It was written by
+The first release of numba-vulkan, a Vulkan compute target for Numba, as
+alpha software. Python kernels go through Numba's pipeline to LLVM IR,
+through LLVM's SPIR-V backend, and run as Vulkan compute shaders. It was written by
 an AI under human direction and review (see the authorship page of the
 documentation).
 

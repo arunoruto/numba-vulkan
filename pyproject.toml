@@ -1,13 +1,28 @@
 [project]
 name = "numba-vulkan"
 version = "0.1.0"
-description = "Proof of concept: a Vulkan compute target for Numba"
+description = "A Vulkan compute target for Numba: Python kernels on any GPU with a Vulkan driver"
 readme = "README.md"
 # Distributions bundle libclc's bitcode, which is under LLVM's licence.
 license = "BSD-2-Clause AND Apache-2.0 WITH LLVM-exception"
 license-files = ["LICENSE", "src/numba_vulkan/data/LICENSE-libclc.txt"]
 authors = [{ name = "Mirza Arnaut", email = "mirza.arnaut@tu-dortmund.de" }]
 requires-python = ">=3.11"
+keywords = ["numba", "vulkan", "gpu", "spir-v", "jit", "compiler"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Scientific/Engineering",
+    "Topic :: Software Development :: Compilers",
+]
 dependencies = [
     "numba>=0.68",
     "llvmlite>=0.50",
@@ -19,6 +34,7 @@ dependencies = [
 Repository = "https://github.com/arunoruto/numba-vulkan"
 Documentation = "https://arunoruto.github.io/numba-vulkan/"
 Issues = "https://github.com/arunoruto/numba-vulkan/issues"
+Changelog = "https://github.com/arunoruto/numba-vulkan/blob/main/CHANGELOG.md"
 
 [dependency-groups]
 docs = [

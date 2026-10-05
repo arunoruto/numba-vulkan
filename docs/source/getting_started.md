@@ -12,6 +12,24 @@
 
 ## Installation
 
+### From PyPI
+
+Install the Vulkan loader (`libvulkan1` on Debian and Ubuntu, `vulkan-loader`
+on Fedora and Arch) and a driver for your GPU, then:
+
+```sh
+pip install numba-vulkan        # or: uv add numba-vulkan
+```
+
+The wheel contains libclc, so accurate and `float64` math work without
+further setup. On macOS, install MoltenVK and an `llc` of LLVM 22 as
+described under [macOS](#macos) below; `NUMBA_VULKAN_LLC` must name the
+`llc`. [Checking the setup](#checking-the-setup) shows how to see which
+devices numba-vulkan finds.
+
+The sections that follow set up a source checkout, for working on
+numba-vulkan itself.
+
 ### With devenv
 
 On NixOS, or any system with Nix, the [devenv](https://devenv.sh/) shell

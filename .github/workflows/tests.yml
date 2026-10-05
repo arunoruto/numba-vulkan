@@ -3,10 +3,15 @@ name: "Tests"
 # The test suite on lavapipe (Mesa's CPU Vulkan driver), with every shader
 # checked by spirv-val and the runtime's use of Vulkan by Khronos'
 # validation layer, including synchronization (NUMBA_VULKAN_DEBUG=2).
-# libclc comes from conda-forge (make libclc without Nix).
+# libclc comes from conda-forge (make libclc without Nix). It runs on every
+# supported Python with the locked dependencies, and once with the newest
+# releases of them, as `pip install` would get them; weekly as well, to
+# notice new releases of Numba or llvmlite that break it.
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: "0 4 * * 1"  # Mondays, 04:00 UTC
   push:
     branches: [main]
   pull_request:
@@ -40,7 +45,16 @@ jobs:
           uv run --only-group lint ruff format --check
 
   lavapipe:
+    name: lavapipe (Python ${{ matrix.python }}${{ matrix.newest && ', newest dependencies' || '' }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.12", "3.13", "3.14"]
+        newest: [false]
+        include:
+          - python: "3.14"
+            newest: true
     env:
       NUMBA_VULKAN_DEBUG: "2"
     steps:
@@ -49,6 +63,14 @@ jobs:
 
       - name: Install uv
         uses: astral-sh/setup-uv@v10.2.0
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Use the newest releases of the dependencies
+        if: matrix.newest
+        run: |
+          uv lock --upgrade
+          uv tree --depth 1
 
       - name: Install lavapipe, the validation layer and SPIRV-Tools
         run: |
