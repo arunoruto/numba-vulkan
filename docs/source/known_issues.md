@@ -54,22 +54,22 @@ that is not kept in the repository.
 x[x > 0]            # TypingError: indexing with arrays ... is not supported
 x.copy()            # VulkanUnsupportedError: ... size is only known at run time
 np.zeros(n)         # TypingError: ... needs a constant shape
-x.sum(axis=0)       # TypingError
 x[1:] = x[:-1] * 2  # ValueError: the expression reads the array ... at other positions
 ```
 
 Shaders cannot allocate memory, so nothing can create an array whose size
 is only known when the kernel runs. Arrays of a constant shape
 (`np.zeros(4)`, `nv.local.array`) and array expressions, which are computed
-element by element where they are used, cover the rest (see {doc}`usage`).
+element by element where they are used, cover the rest (see {doc}`usage`);
+reductions along an axis, such as `x.sum(axis=0)`, are expressions too.
 
 Because an expression is computed while it is being assigned, assigning it
 to an array it reads is only allowed where it reads each element at the
 position it writes, as in `a[:] = a * 2`; anything else is detected at run
 time and raises `ValueError`, where NumPy would compute a temporary first.
 
-**Fix:** reductions along an axis can be added as `@overload`s on top of
-expressions, as `arrayfuncs.py` does for whole-array reductions.
+**Fix:** `x.copy()` could become an expression like the others. Selections
+whose size depends on the data, such as `x[x > 0]`, cannot.
 
 ## Behaviour that differs from Numba on the CPU
 
@@ -126,6 +126,26 @@ gets wrong is rejected by `codegen.check_structure`. A kernel of 5700
 blocks (sixty random programs with nested loops, inlined one after the
 other) is restructured in about 2 s, but takes some 90 s to compile in all,
 mostly in LLVM.
+
+### KI-35: one array passed as two arguments escapes the overlap check
+
+```python
+@nv.jit
+def shift(x, y):
+    y[1:] = x[:-1] * 2   # NumPy computes x[:-1] * 2 first
+
+d = nv.to_device(np.arange(5, dtype=np.float32))
+shift.forall(1)(d, d)    # gives [0, 0, 0, 0, 0], not [0, 0, 2, 4, 6]
+```
+
+An array expression assigned to an array it reads is only allowed where it
+reads each element at the position it writes (see KI-04), and the check
+compares the bindings of the two. The same device array passed as two
+arguments gets two bindings, so the check does not see that they share a
+buffer, and the expression reads elements it has already overwritten.
+
+**Fix:** compare the buffers, not the bindings: the launch knows which
+arguments share one and could pass that to the check, or bind them once.
 
 ## Performance
 

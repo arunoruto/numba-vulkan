@@ -99,6 +99,20 @@ element again, so an expression read many times is better written into a
 local array once. Indexing with masks or index arrays, `copy()` and
 anything else that needs an array of run-time size is not available.
 
+Reductions with an `axis` (`sum`, `prod`, `mean`, `min`, `max`, `argmin`,
+`argmax`, `any`, `all`, as methods or NumPy functions) are expressions as
+well: each element is a loop along the axis, run where the element is read.
+
+```python
+out[:] = x.sum(axis=0)            # column sums, one loop per element of out
+out[:, :] = x - x.mean(axis=0)    # broadcasts like NumPy
+m = np.max(x, axis=k)[j]          # k may be a variable; computes one element
+```
+
+An `axis` out of range raises `ValueError` when the shape of the
+expression is first needed. As with other expressions, assigning one to the
+array it reduces is refused.
+
 NumPy arrays defined outside a kernel can be used inside it, and inside
 functions it calls, as read-only lookup tables:
 
