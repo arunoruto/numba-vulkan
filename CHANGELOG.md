@@ -1,6 +1,11 @@
 # Changelog
 
-## 0.1.0 (unreleased)
+The entry of each release is written by python-semantic-release from the
+messages of the commits it contains; see the development guide.
+
+<!-- version list -->
+
+## 0.1.0 at a glance
 
 The first release of numba-vulkan, a Vulkan compute target for Numba, as
 alpha software. Python kernels go through Numba's pipeline to LLVM IR,

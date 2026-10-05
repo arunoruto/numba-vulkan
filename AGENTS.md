@@ -34,6 +34,10 @@ devenv shell -- bash -c 'cd docs && uv run sphinx-build -M html ./source ./build
   `tests/test_known_issues.py` into a regular test and remove the entry from
   `docs/source/known_issues.md`. When you find a new one, add both.
 - Public and private functions carry NumPy-style docstrings; keep that up.
+- Commit messages follow Conventional Commits (`feat:`, `fix:`, `perf:`,
+  `docs:`, `test:`, `chore:`, `ci:`, `bench:`...): they decide the next
+  version and become the changelog (see the release section of
+  `docs/source/development.md`).
 - Do not state that something works unless a test or a run shows it.
 - Never hand unvalidated SPIR-V to a GPU driver, and never run LLVM's SPIR-V
   backend in the main process. Both can kill the interpreter.

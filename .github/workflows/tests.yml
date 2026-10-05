@@ -10,6 +10,7 @@ name: "Tests"
 
 on:
   workflow_dispatch:
+  workflow_call:  # by the release, in publish.yml
   schedule:
     - cron: "0 4 * * 1"  # Mondays, 04:00 UTC
   push:
