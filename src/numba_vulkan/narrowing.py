@@ -20,6 +20,7 @@ and rejected rather than miscompiled.
 """
 
 import contextlib
+import functools
 import os
 import re
 import struct
@@ -390,7 +391,12 @@ def stored_dtype(dtype, mode):
         otherwise. For a structured dtype, the same with the type of each
         field narrowed (booleans stay single bytes in records).
     """
-    dtype = np.dtype(dtype)
+    return _stored_dtype(np.dtype(dtype), mode)
+
+
+@functools.lru_cache(maxsize=4096)
+def _stored_dtype(dtype, mode):
+    """`stored_dtype` for a `numpy.dtype`; asked for by every launch."""
     if dtype.names is not None:
         return _stored_record(dtype, mode)
     if dtype == np.bool_:

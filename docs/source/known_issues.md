@@ -132,13 +132,16 @@ mostly in LLVM.
 ### KI-28: launch overhead and synchronous launches with NumPy arrays
 
 Launches whose arrays are all device arrays return at once, but a launch
-still costs some 45–50 µs of Python time (typing the arguments, packing push
-constants, recording the commands), which limits small kernels to about
-20 000 launches per second. Launches with NumPy arrays wait for the kernel,
-because their results have to be copied back.
+still costs Python time, which limits small kernels to some 20 000 launches
+per second. A launch whose arguments have a signature seen before (types,
+dimensions and layouts of device arrays, types of scalars) follows a cached
+launch plan that skips typing: measured on an Intel i9-9900K, 44 µs per
+launch instead of 85 µs, most of it recording the commands and submitting
+them. Launches with NumPy arrays take the full path and wait for the
+kernel, because their results have to be copied back.
 
-**Fix:** a launch plan cached per argument types, so that a repeated launch
-only packs values and records; or recording in C.
+**Fix:** recording in C, or submitting less often when the device is idle
+(which delays the start of the kernel).
 
 ### KI-29: device arrays cannot be shared with other libraries
 

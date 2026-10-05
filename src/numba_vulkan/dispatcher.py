@@ -125,6 +125,8 @@ class VulkanDispatcher:
         self._kernels = {}
         # Kernels by the argument types of a launch, before binding.
         self._launched = {}
+        # Launch plans by argument signature; see _launch.
+        self._plans = {}
         self._compiling = 0
         self._uncachable_warned = False
         functools.update_wrapper(self, py_func)
@@ -643,6 +645,34 @@ class VulkanDispatcher:
             target = stream.device
         else:
             target = runtime.get_device(device)
+        # A launch plan: the kernel and the stored type of each scalar,
+        # for arguments of a signature seen before. It skips typing.
+        signature = _signature(args)
+        if local_size is not None and type(local_size) is not tuple:
+            local_size = (local_size,) if np.isscalar(local_size) else tuple(local_size)
+        if signature is not None:
+            plan_key = (
+                signature,
+                target,
+                len(extent if extent is not None else groups),
+                local_size,
+            )
+            plan = self._plans.get(plan_key)
+            if plan is not None:
+                kernel, scalars = plan
+                hosts, shapes = [], []
+                for arg, stored in zip(args, scalars):
+                    if stored is None:
+                        shapes.extend(arg.shape)
+                        if not (arg._offset == 0 and arg.is_contiguous):
+                            shapes.extend((arg._offset, *arg._steps))
+                        hosts.append(arg)
+                    else:
+                        hosts.append(narrowing.convert(np.array([arg]), stored))
+                self._launch_kernel(
+                    kernel, target, hosts, shapes, extent, groups, stream
+                )
+                return
         mode = target.mode
         if self.narrow is not None:
             floats = self.narrow in (True, "floats") or (
@@ -653,7 +683,7 @@ class VulkanDispatcher:
             )
             mode = mode._replace(floats=floats, ints=ints)
         argtypes, hosts, shapes, staged, convert = [], [], [], [], []
-        on_host, host_arrays = False, []
+        on_host, host_arrays, scalars = False, [], []
         for arg in args:
             if isinstance(arg, runtime.DeviceArray):
                 if arg._stored != narrowing.stored_dtype(arg.dtype, mode):
@@ -673,6 +703,7 @@ class VulkanDispatcher:
                 if not plain:
                     shapes.extend((arg._offset, *arg._steps))
                 hosts.append(arg)
+                scalars.append(None)
             elif isinstance(arg, np.ndarray):
                 on_host = True
                 stored = narrowing.stored_dtype(arg.dtype, mode)
@@ -700,6 +731,7 @@ class VulkanDispatcher:
                 argtypes.append(ty)
                 stored = narrowing.stored_dtype(np.dtype(str(ty)), mode)
                 hosts.append(narrowing.convert(np.array([arg]), stored))
+                scalars.append(stored)
         ndim = len(extent if extent is not None else groups)
         if local_size is not None:
             local_size = (local_size,) if np.isscalar(local_size) else tuple(local_size)
@@ -709,6 +741,63 @@ class VulkanDispatcher:
         if kernel is None:
             kernel = self.compile(argtypes, ndim, mode, local_size)
             self._launched[key] = kernel
+        if signature is not None:
+            self._plans[plan_key] = (kernel, tuple(scalars))
+        self._launch_kernel(
+            kernel,
+            target,
+            hosts,
+            shapes,
+            extent,
+            groups,
+            stream,
+            staged,
+            convert,
+            on_host,
+            host_arrays,
+        )
+
+    def _launch_kernel(
+        self,
+        kernel,
+        target,
+        hosts,
+        shapes,
+        extent,
+        groups,
+        stream,
+        staged=(),
+        convert=(),
+        on_host=False,
+        host_arrays=(),
+    ):
+        """Run a compiled kernel: the second half of `_launch`.
+
+        Parameters
+        ----------
+        kernel : CompiledKernel
+            The kernel.
+        target : numba_vulkan.runtime.Device
+            The device.
+        hosts : list
+            One per argument: device and NumPy arrays, and scalars as
+            one-element arrays of their stored type.
+        shapes : list of int
+            The extents of the arrays, and offsets and steps of views.
+        extent, groups : tuple of int or None
+            The grid, in invocations or in workgroups; see `_launch`.
+        stream : numba_vulkan.runtime.Stream or None
+            The stream, if any.
+        staged : list of tuple
+            Index in `hosts` and the NumPy array passed, for NumPy arrays
+            the device stores differently: written back after the kernel.
+        convert : list of tuple
+            Index, NumPy array and stored type, for those to convert.
+        on_host : bool
+            Whether any argument is a NumPy array.
+        host_arrays : list of tuple
+            Index, NumPy array and stored type of every NumPy array.
+        """
         if extent is not None:
             groups = [
                 -(-int(n) // kernel.local_size[axis]) for axis, n in enumerate(extent)
@@ -881,8 +970,53 @@ def _code_names(code):
     return names
 
 
+# Scalar types whose Numba type follows from the Python type alone.
+_SCALARS = (float, bool, np.bool_, np.number)
+
+
+def _signature(args):
+    """What decides the kernel and the layout of a launch's arguments.
+
+    Parameters
+    ----------
+    args : tuple
+        The arguments of a launch.
+
+    Returns
+    -------
+    tuple or None
+        Per argument: the element type, stored type, dimensions and
+        plainness of a device array, or the type of a scalar. None if an
+        argument is anything else (NumPy arrays among them), for which
+        launches take the full path.
+    """
+    signature = []
+    for arg in args:
+        kind = type(arg)
+        if kind is runtime.DeviceArray:
+            signature.append(
+                (
+                    arg.dtype,
+                    arg._stored,
+                    len(arg.shape),
+                    arg._offset == 0 and arg.is_contiguous,
+                )
+            )
+        elif kind is int:
+            if not -(1 << 63) <= arg < 1 << 63:
+                return None  # typed as uint64
+            signature.append(kind)
+        elif isinstance(arg, _SCALARS):
+            signature.append(kind)
+        else:
+            return None
+    return tuple(signature)
+
+
 def _shape3(shape):
     """A shape of up to three extents, padded with ones to three."""
+    if type(shape) is tuple and len(shape) == 3 and all(type(n) is int for n in shape):
+        return shape
     shape = (shape,) if np.isscalar(shape) else tuple(int(n) for n in shape)
     if not 1 <= len(shape) <= 3:
         raise ValueError(f"expected 1 to 3 extents, got {shape}")
@@ -921,6 +1055,7 @@ def _record_type(record):
     return VulkanRecord(record)
 
 
+@functools.cache
 def _device_array_type(dtype, ndim, layout="C"):
     """Numba type of a device array; layout ``"A"`` for views with gaps."""
     if dtype == np.float16:
