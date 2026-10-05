@@ -156,10 +156,10 @@ Host and device arrays can be mixed in one call. A device array belongs to
 the device it was created on (`device=` selects it, as for `forall`) and
 cannot be passed to a kernel that runs on another one.
 
-Device arrays are indexed like NumPy arrays, without advanced indexing
-(arrays or lists as indices). An integer for every axis reads or writes one
-element; slices, `...`, `None`, `.T`, `transpose` and `reshape` give
-*views* that share the memory and that kernels take like any device array:
+Device arrays are indexed like NumPy arrays. An integer for every axis
+reads or writes one element; slices, `...`, `None`, `.T`, `transpose` and
+`reshape` give *views* that share the memory and that kernels take like any
+device array:
 
 ```python
 a = nv.to_device(np.arange(48, dtype=np.float32).reshape(6, 8))
@@ -169,6 +169,17 @@ rows = a[1::2, ::-1]          # a view: every other row, reversed
 scale.forall(rows.shape)(rows, 2.0)   # the kernel works on a's memory
 b = (rows + 1) * a[::2]       # computed on the device; b is a device array
 b.sum(), np.sqrt(b).max()     # reductions return scalars
+```
+
+Index arrays, lists and boolean masks (NumPy or device arrays) select as in
+NumPy: reading gives a new device array, gathered on the device, and
+writing scatters into the selected elements. Where an element is selected
+more than once, which value it ends up with is undefined.
+
+```python
+a[[0, 3]]                     # rows 0 and 3, a new array
+a[a > 0]                      # the mask is computed on the device
+a[a < 0] = 0                  # scattered on the device
 ```
 
 A view passes the position of its first element and its steps to the
