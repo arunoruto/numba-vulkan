@@ -131,6 +131,9 @@ _instance = None
 _infos = None
 _devices = {}
 _current = None
+# The default device for each value of NUMBA_VULKAN_DEVICE: launches without
+# a device ask for it every time.
+_defaults = {}
 
 
 DEBUG_ENV_VAR = "NUMBA_VULKAN_DEBUG"
@@ -2169,10 +2172,16 @@ class DeviceArray:
         -------
         bool
         """
-        return all(
-            step == want or extent == 1
-            for extent, step, want in zip(self.shape, self._steps, _c_steps(self.shape))
-        )
+        # Asked for by every launch; the layout of an array never changes.
+        contiguous = self.__dict__.get("_contiguous")
+        if contiguous is None:
+            contiguous = self._contiguous = all(
+                step == want or extent == 1
+                for extent, step, want in zip(
+                    self.shape, self._steps, _c_steps(self.shape)
+                )
+            )
+        return contiguous
 
     @property
     def T(self):
@@ -2916,8 +2925,18 @@ def get_device(which=None):
         return which
     if which is None and _current is not None:
         return _current
+    if type(which) is int and which in _devices:  # the common case, quickly
+        return _devices[which]
     if which is None:
         which = os.environ.get("NUMBA_VULKAN_DEVICE")
+        if which not in _defaults:
+            _defaults[which] = _find_device(which)
+        return _defaults[which]
+    return _find_device(which)
+
+
+def _find_device(which):
+    """`get_device` for an index, name, `DeviceInfo` or ``None``."""
     devices = list_devices()
     if not devices:
         raise VulkanSupportError("no Vulkan 1.2 device with a compute queue found")
