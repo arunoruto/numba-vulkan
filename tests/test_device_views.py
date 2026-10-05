@@ -88,10 +88,12 @@ def test_bad_indices(pair):
         array[4]
     with pytest.raises(IndexError):
         array[0, 0, 0, 0]
-    with pytest.raises(TypeError, match="basic indexing"):
-        array[[0, 1]]
-    with pytest.raises(TypeError, match="basic indexing"):
-        array[np.array([True, False, True, False])]
+    with pytest.raises(IndexError):
+        array[[0, 9]]  # advanced indexing: see test_fancy_indexing
+    with pytest.raises(IndexError):
+        array[np.array([True, False])]
+    with pytest.raises(TypeError, match="index arrays"):
+        array[1.5]
 
 
 def test_views_keep_the_buffer_alive(device):

@@ -148,10 +148,9 @@ kernel, because their results have to be copied back.
 
 ### KI-29: device arrays cannot be shared with other libraries
 
-A `DeviceArray` supports basic indexing, views and NumPy's ufuncs, but
+A `DeviceArray` supports NumPy's indexing, views and NumPy's ufuncs, but
 there is no `__cuda_array_interface__` or DLPack equivalent for handing its
-memory to other Vulkan libraries, and no advanced indexing (arrays or
-lists as indices).
+memory to other Vulkan libraries.
 
 ### KI-16: 64-bit integer atomics and float64 atomics
 

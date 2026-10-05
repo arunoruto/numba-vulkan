@@ -2065,6 +2065,15 @@ def _word_kernels():
     return _WORD_KERNELS
 
 
+def _advanced(key):
+    """Whether an index uses advanced indexing (arrays, lists, booleans)."""
+    parts = key if isinstance(key, tuple) else (key,)
+    return any(
+        isinstance(part, (list, np.ndarray, DeviceArray, bool, np.bool_))
+        for part in parts
+    )
+
+
 def _copy_regions(cmd, source, target, regions):
     """Record a copy of an array of ``VkBufferCopy`` between two buffers."""
     _lib.vkCmdCopyBuffer(cmd, source.handle, target.handle, len(regions), regions)
@@ -2372,8 +2381,7 @@ class DeviceArray:
             Whether the copy goes from `packed` to the array.
         """
         starts, length = runs
-        whole = self._view((self._nbytes // 4,), 0, (1,))
-        whole.dtype = whole._stored = np.dtype(np.uint32)
+        whole = self._buffer_words()
         first = to_device(starts.astype(np.uint32), self.device, stream=stream)
         gather, scatter = _word_kernels()
         kernel = scatter if to_view else gather
@@ -2601,7 +2609,8 @@ class DeviceArray:
         IndexError
             For indices out of bounds, as NumPy raises it.
         TypeError
-            For advanced indexing (arrays, lists, booleans).
+            For indices of other types; advanced indexing (arrays, lists,
+            booleans) is handled by `__getitem__` and `__setitem__`.
         """
         key = key if isinstance(key, tuple) else (key,)
         for part in key:
@@ -2612,8 +2621,8 @@ class DeviceArray:
                 or (isinstance(part, (int, np.integer)) and not isinstance(part, bool))
             ):
                 raise TypeError(
-                    "device arrays support basic indexing only (integers, "
-                    f"slices, ... and None), not {type(part).__name__}"
+                    "device arrays are indexed with integers, slices, ..., None, "
+                    f"index arrays and boolean masks, not {type(part).__name__}"
                 )
         if Ellipsis not in key:
             key = (*key, Ellipsis)  # a view even where all axes are indexed
@@ -2627,23 +2636,121 @@ class DeviceArray:
         moved -= stand_in.__array_interface__["data"][0]
         return self._view(view.shape, self._offset + moved, view.strides)
 
+    def _positions(self, key):
+        """Positions in the buffer of the elements an advanced index selects.
+
+        NumPy applies the index to zero-copy broadcast views of each axis's
+        indices, so the full rules of advanced indexing apply and memory
+        grows with the result only.
+
+        Returns
+        -------
+        numpy.ndarray
+            One position per element of the result, in its shape.
+
+        Raises
+        ------
+        IndexError
+            As NumPy raises it.
+        """
+        key = key if isinstance(key, tuple) else (key,)
+        key = tuple(
+            part.copy_to_host() if isinstance(part, DeviceArray) else part
+            for part in key
+        )
+        positions = self._offset
+        for axis, (extent, step) in enumerate(zip(self.shape, self._steps)):
+            along = np.arange(extent, dtype=np.int64).reshape(
+                [-1 if d == axis else 1 for d in range(self.ndim)]
+            )
+            positions = positions + np.broadcast_to(along, self.shape)[key] * step
+        return np.asarray(positions, dtype=np.int64)
+
+    def _word_access(self, positions):
+        """Word kernels' arguments for elements at given positions, if any.
+
+        Returns
+        -------
+        tuple or None
+            All words of the buffer as an array, the first word of each
+            element, and words per element; None for elements whose size
+            is not a multiple of 4 bytes.
+        """
+        words, rest = divmod(self._stored.itemsize, 4)
+        if rest:
+            return None
+        first = (positions.reshape(-1) * words).astype(np.uint32)
+        return self._buffer_words(), to_device(first, self.device), words
+
+    def _buffer_words(self):
+        """All words of the array's buffer, as a ``uint32`` array.
+
+        For an array created contiguous, these are its elements' words.
+        """
+        words = self._view((self._nbytes // 4,), 0, (1,))
+        words.dtype = words._stored = np.dtype(np.uint32)
+        return words
+
     def __getitem__(self, key):
-        """An element, or a view; see the class description.
+        """An element, a view, or a copy for advanced indexing.
+
+        Basic indices (integers, slices, ``...``, ``None``) give views, as
+        described for the class. Index arrays, lists and boolean masks
+        (NumPy or device arrays) give a new array with the selected
+        elements, gathered on the device, as NumPy gives a copy.
 
         Returns
         -------
         scalar or DeviceArray
         """
+        if _advanced(key):
+            positions = self._positions(key)
+            out = DeviceArray(
+                self.device, positions.shape, self.dtype, _stored=self._stored
+            )
+            access = self._word_access(positions)
+            if access is None:
+                out.copy_to_device(self.copy_to_host()[key])
+            elif out.size:
+                whole, first, words = access
+                gather, _ = _word_kernels()
+                packed = out._buffer_words()
+                gather.forall(packed.size, device=self.device)(
+                    whole, packed, first, words
+                )
+            return out.copy_to_host()[()] if out.ndim == 0 else out
         view = self._index(key)
         if view.ndim == 0 and not (isinstance(key, tuple) and None in key):
             return view.copy_to_host()[()]
         return view
 
     def __setitem__(self, key, value):
-        """Write an element, or a value or array into a view.
+        """Write an element, or a value or array into the selected elements.
 
-        `value` is broadcast to the selected shape, as in NumPy.
+        `value` is broadcast to the selected shape, as in NumPy. With
+        advanced indexing (see `__getitem__`) the values are scattered on
+        the device; where an element is selected more than once, which of
+        its values it ends up with is undefined.
         """
+        if _advanced(key):
+            positions = self._positions(key)
+            values = np.broadcast_to(np.asarray(value), positions.shape)
+            access = self._word_access(positions)
+            if access is None:
+                host = self.copy_to_host()
+                host[key] = values
+                self.copy_to_device(host)
+            elif positions.size:
+                whole, first, words = access
+                packed = DeviceArray(
+                    self.device, positions.shape, self.dtype, _stored=self._stored
+                ).copy_to_device(values)
+                _, scatter = _word_kernels()
+                words_of = packed._buffer_words()
+                scatter.forall(words_of.size, device=self.device)(
+                    whole, words_of, first, words
+                )
+            return
         view = self._index(key)
         values = np.broadcast_to(np.asarray(value, dtype=self.dtype), view.shape)
         view.copy_to_device(values)
