@@ -13,25 +13,25 @@ from numba.core.imputils import RefType, Registry, iternext_impl
 from numba.cpython import slicing
 
 from numba_vulkan import narrowing, stubs, vkdecl
-from numba_vulkan.mathimpl import double_words
 from numba_vulkan.buffers import (
     PRINT_BINDING,
-    print_formats,
     atomic_element,
     barrier,
     compare_and_swap,
     i32,
     load_element,
+    print_formats,
     shared_sizes,
     store_element,
 )
 from numba_vulkan.errors import VulkanUnsupportedError
+from numba_vulkan.mathimpl import double_words
 from numba_vulkan.vktypes import (
-    VulkanRecord,
     VulkanArray,
     VulkanArrayIterator,
     VulkanDispatcherType,
     VulkanExpr,
+    VulkanRecord,
 )
 
 registry = Registry("vkimpl")

@@ -5,7 +5,6 @@ import pytest
 
 import numba_vulkan as nv
 
-
 f32 = np.float32
 
 

@@ -385,7 +385,7 @@ _PAIRS = (
         "np.maximum(x, y)",
         "np.fmin(x, y)",
         "np.fmax(x, y)",
-    ],  # fmt: skip
+    ],
 )
 def test_min_and_max_keep_nan_and_signed_zero_as_numba_does(run, expression):
     import numba

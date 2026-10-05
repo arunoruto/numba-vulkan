@@ -32,7 +32,6 @@ from numba.core import cgutils
 
 from numba_vulkan.errors import VulkanUnsupportedError
 
-
 # Kernels compute with 32-bit integers unless NUMBA_VULKAN_INT64=1: 64-bit
 # integer arithmetic is emulated on GPUs and slows index-heavy kernels down.
 NARROW_INTS = os.environ.get("NUMBA_VULKAN_INT64", "0") == "0"

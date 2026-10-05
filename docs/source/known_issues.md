@@ -14,12 +14,12 @@ uv run pytest tests/test_known_issues.py -rxX
 ```
 
 Numbers are not reused: KI-02, KI-03, KI-05, KI-06, KI-07, KI-08, KI-09,
-KI-13, KI-14, KI-15, KI-24, KI-25, KI-26, KI-30, KI-31 and KI-34 (NumPy functions on
+KI-13, KI-14, KI-15, KI-22, KI-24, KI-25, KI-26, KI-30, KI-31 and KI-34 (NumPy functions on
 scalars, missing `math` functions, allocating arrays in kernels, global
 constant arrays, complex numbers, `print`, all data copied on every call,
 structured arrays,
 nested loop exits that failed to compile, Numba's compilation repeated in
-every process, one specialisation per buffer binding, libclc linked in
+every process, lint warnings, one specialisation per buffer binding, libclc linked in
 full for every kernel, libclc depending on an old NixOS release, `gamma`
 losing precision for large arguments, `float64` functions losing precision
 on Intel's and Mesa's drivers, slicing a reversed view with 32-bit
@@ -249,8 +249,3 @@ a failing test there names a rewrite that may have become unnecessary. With
 LLVM 22.1, `llvm.fmuladd` no longer needs rewriting for the backend's sake;
 it is still split, so that results do not depend on whether a driver fuses. The benchmark dependency group pins
 `numpy<2.5`, because numba-cuda 0.30.4 does not import with NumPy 2.5.
-
-### KI-22: lint warnings
-
-Ruff reports a handful of style warnings (docstring mood, broad `except` in
-the benchmark, `subprocess.run` without `check`). None affects behaviour.

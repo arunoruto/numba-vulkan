@@ -6,10 +6,8 @@ import sys
 import numpy as np
 import pytest
 
-import numba_vulkan as nv
-
 sys.path.insert(0, str(pathlib.Path(__file__).parent.parent / "benchmarks"))
-import kernels  # noqa: E402
+import kernels
 
 
 @pytest.fixture(scope="module")

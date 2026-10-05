@@ -77,7 +77,7 @@ def main():
             try:
                 _translate(target, text, stdout)
                 status = 0
-            except BaseException as exc:
+            except BaseException as exc:  # noqa: BLE001 - reported to the parent
                 print(f"{type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
             finally:
                 os._exit(status)

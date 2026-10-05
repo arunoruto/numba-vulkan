@@ -90,7 +90,7 @@ def _min(a):
         for k in range(1, a.size):
             value = flat_item(a, k)
             # written so that a NaN, once found, is kept, as in NumPy
-            if value < best or value != value:
+            if value < best or value != value:  # noqa: PLR0124 - NaN, for any type
                 best = value
         return best
 
@@ -106,7 +106,7 @@ def _max(a):
         best = flat_item(a, 0)
         for k in range(1, a.size):
             value = flat_item(a, k)
-            if value > best or value != value:
+            if value > best or value != value:  # noqa: PLR0124 - NaN, for any type
                 best = value
         return best
 

@@ -3,9 +3,9 @@
 import numpy as np
 import pytest
 from numba.core import errors
+from test_views import rows
 
 import numba_vulkan as nv
-from test_views import rows
 
 f32 = np.float32
 A = (np.arange(12, dtype=f32).reshape(3, 4) * 7) % 5 + 1

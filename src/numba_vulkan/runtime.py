@@ -1779,7 +1779,7 @@ def _dispatch(cmd, groups, limit):
                 )
 
 
-PRINT_BUFFER_WORDS = int(os.environ.get("NUMBA_VULKAN_PRINT_WORDS", 1 << 18))
+PRINT_BUFFER_WORDS = int(os.environ.get("NUMBA_VULKAN_PRINT_WORDS", str(1 << 18)))
 
 
 def print_records(words):

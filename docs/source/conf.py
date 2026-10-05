@@ -19,7 +19,7 @@ with (ROOT / "pyproject.toml").open("rb") as fh:
 
 project = "numba-vulkan"
 author = "Mirza Arnaut"
-copyright = f"{datetime.datetime.now().year}, {author}"
+copyright = f"{datetime.datetime.now(datetime.UTC).year}, {author}"
 version = _project["version"]
 release = version
 
@@ -27,7 +27,7 @@ release = version
 # afresh on every build.
 _benchmarks = str(ROOT / "benchmarks")
 sys.path.insert(0, _benchmarks)
-import report  # noqa: E402
+import report
 
 report.report(Path(__file__).parent / "_generated" / "benchmarks")
 sys.path.remove(_benchmarks)
@@ -97,12 +97,12 @@ html_static_path = ["_static"]
 html_logo = "_static/logo.svg"
 html_favicon = "_static/favicon.svg"
 html_css_files = []
-html_context = dict(
-    github_user="arunoruto",
-    github_repo="numba-vulkan",
-    github_version="main",
-    doc_path="docs/source/",
-)
+html_context = {
+    "github_user": "arunoruto",
+    "github_repo": "numba-vulkan",
+    "github_version": "main",
+    "doc_path": "docs/source/",
+}
 
 # PyData Theme Options
 html_theme_options = {

@@ -315,18 +315,18 @@ def run(size=1 << 24, matrix=1024, repeat=10, all_devices=False, verbose=True):
     def record(workload, label, info, samples, error):
         backend, device, variant = info
         records.append(
-            dict(
-                suite="kernels",
-                workload=workload,
-                description=DESCRIPTIONS[workload].format(n=n, m=m),
-                backend=backend,
-                device=device,
-                variant=variant,
-                label=label,
-                first_s=None,
-                samples_s=samples,
-                check=error,
-            )
+            {
+                "suite": "kernels",
+                "workload": workload,
+                "description": DESCRIPTIONS[workload].format(n=n, m=m),
+                "backend": backend,
+                "device": device,
+                "variant": variant,
+                "label": label,
+                "first_s": None,
+                "samples_s": samples,
+                "check": error,
+            }
         )
         if verbose:
             print(
@@ -440,8 +440,8 @@ def run(size=1 << 24, matrix=1024, repeat=10, all_devices=False, verbose=True):
             ),
             (
                 "matmul",
-                lambda b=backend, da=da, db=db, dc=dc: b.launch(
-                    "matmul", tiles, (16, 16), da, db, dc
+                lambda b=backend, da=da, db=db, dc=dc, t=tiles: b.launch(
+                    "matmul", t, (16, 16), da, db, dc
                 ),
                 None,
                 lambda dc=dc: (
@@ -451,8 +451,8 @@ def run(size=1 << 24, matrix=1024, repeat=10, all_devices=False, verbose=True):
             ),
             (
                 "matmul_blocked",
-                lambda b=backend, da=da, db=db, dc=dc: b.launch(
-                    "matmul_blocked", blocks, (16, 16), da, db, dc
+                lambda b=backend, da=da, db=db, dc=dc, g=blocks: b.launch(
+                    "matmul_blocked", g, (16, 16), da, db, dc
                 ),
                 None,
                 lambda dc=dc: (

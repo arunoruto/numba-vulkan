@@ -46,6 +46,8 @@ uv run pytest                                  # all tests, all devices
 uv run pytest -k llvmpipe                      # one device
 uv run pytest tests/test_known_issues.py -rxX  # list known issues
 uv run python benchmarks/bench.py
+uv run --group lint ruff check                 # lint, as CI does
+uv run --group lint ruff format                # format
 cd docs && uv run sphinx-build -M html ./source ./build -W
 build-dist                                     # sdist and wheel, with libclc
 ```

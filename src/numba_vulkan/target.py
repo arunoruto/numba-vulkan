@@ -17,7 +17,6 @@ from numba.np import numpy_support
 
 from numba_vulkan import codegen
 from numba_vulkan.buffers import constant_binding
-from numba_vulkan.errors import VulkanUnsupportedError
 from numba_vulkan.models import vulkan_data_manager
 from numba_vulkan.vktypes import VulkanArray
 

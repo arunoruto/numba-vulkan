@@ -27,7 +27,7 @@ def rows(body, *arrays, columns=8, dtype=f32, run=None, **options):
         + textwrap.indent(textwrap.dedent(body).strip("\n"), " " * 8)
     )
     scope = dict(globals())
-    exec(source, scope)
+    exec(source, scope)  # noqa: S102 - a generated kernel
     out = np.zeros((arrays[0].shape[0], columns), dtype=dtype)
     run(nv.jit(**options)(scope["kernel"]), arrays[0].shape[0], *arrays, out)
     return out

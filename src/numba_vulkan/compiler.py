@@ -97,16 +97,16 @@ class VulkanBackend(LoweringPass):
         signature = typing.signature(state.return_type, *state.args)
         state.cr = VulkanCompileResult(
             **sanitize_compile_result_entries(
-                dict(
-                    typing_context=state.typingctx,
-                    target_context=state.targetctx,
-                    typing_error=state.status.fail_reason,
-                    type_annotation=state.type_annotation,
-                    library=state.library,
-                    call_helper=lowered.call_helper,
-                    signature=signature,
-                    fndesc=lowered.fndesc,
-                )
+                {
+                    "typing_context": state.typingctx,
+                    "target_context": state.targetctx,
+                    "typing_error": state.status.fail_reason,
+                    "type_annotation": state.type_annotation,
+                    "library": state.library,
+                    "call_helper": lowered.call_helper,
+                    "signature": signature,
+                    "fndesc": lowered.fndesc,
+                }
             )
         )
         return True

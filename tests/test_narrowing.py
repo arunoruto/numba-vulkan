@@ -168,7 +168,7 @@ def test_wide_device_array_does_not_fit_a_narrow_kernel(device):
 )
 def test_code_that_needs_64_bits_is_rejected(expression, message):
     scope = {"nv": nv}
-    exec(
+    exec(  # noqa: S102 - a generated kernel
         "def kernel(a, out):\n"
         "    i = nv.global_id(0)\n"
         "    if i < a.shape[0]:\n"

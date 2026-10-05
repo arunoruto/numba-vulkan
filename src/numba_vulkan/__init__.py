@@ -61,11 +61,11 @@ __all__ = [
     "group_id",
     "jit",
     "list_devices",
-    "pinned_array",
-    "local_id",
     "local",
+    "local_id",
     "local_size",
     "num_groups",
+    "pinned_array",
     "select_device",
     "shared",
     "stream",
@@ -76,4 +76,4 @@ __all__ = [
 ]
 
 # Registers target="vulkan" with numba.vectorize and numba.guvectorize.
-from numba_vulkan import vectorizers  # noqa: E402, F401
+from numba_vulkan import vectorizers  # noqa: F401

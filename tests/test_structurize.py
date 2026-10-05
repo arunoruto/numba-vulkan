@@ -25,12 +25,13 @@ def assert_structured(text):
             )
     for header in graph.order:
         merge = graph.ipdom.get(header)
-        if len(graph.succs[header]) > 1 and merge in blocks:
-            if graph.loop_of[header] == graph.loop_of[merge] != merge:
-                outside = [
-                    p for p in graph.preds[merge] if not graph.dominates(header, p)
-                ]
-                assert not outside, f"{header} shares its merge block {merge}"
+        if (
+            len(graph.succs[header]) > 1
+            and merge in blocks
+            and graph.loop_of[header] == graph.loop_of[merge] != merge
+        ):
+            outside = [p for p in graph.preds[merge] if not graph.dominates(header, p)]
+            assert not outside, f"{header} shares its merge block {merge}"
 
 
 EARLY_RETURNS = (

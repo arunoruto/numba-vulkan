@@ -104,6 +104,7 @@ def validate(tmp_path):
             ["spirv-val", "--target-env", "vulkan1.2", str(path)],
             capture_output=True,
             text=True,
+            check=False,
         )
         assert res.returncode == 0, res.stderr
 

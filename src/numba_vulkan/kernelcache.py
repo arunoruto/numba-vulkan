@@ -188,11 +188,13 @@ def store(name, entry):
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         # Written under another name first: another process may be reading.
-        with tempfile.NamedTemporaryFile(dir=os.path.dirname(path), delete=False) as fh:
-            with zipfile.ZipFile(fh, "w", zipfile.ZIP_DEFLATED) as archive:
-                archive.writestr("meta.json", json.dumps(meta))
-                archive.writestr("kernel.spv", entry["spirv"])
-                archive.writestr("kernel.ll", entry["llvm_ir"])
+        with (
+            tempfile.NamedTemporaryFile(dir=os.path.dirname(path), delete=False) as fh,
+            zipfile.ZipFile(fh, "w", zipfile.ZIP_DEFLATED) as archive,
+        ):
+            archive.writestr("meta.json", json.dumps(meta))
+            archive.writestr("kernel.spv", entry["spirv"])
+            archive.writestr("kernel.ll", entry["llvm_ir"])
         os.replace(fh.name, path)
     except OSError:
         pass
