@@ -1100,6 +1100,12 @@ def _operand_shape(context, builder, ty, value):
     return []
 
 
+def _reduced_axis(builder, opty, axis):
+    """The axis of a reduction along an axis, negative ones counted back."""
+    negative = builder.icmp_signed("<", axis, axis.type(0))
+    return builder.select(negative, builder.add(axis, axis.type(opty.ndim)), axis)
+
+
 def _operands(context, builder, ty, value):
     """The operand values of an expression."""
     proxy = cgutils.create_struct_proxy(ty)(context, builder, value=value)
@@ -1117,6 +1123,27 @@ def expression_shape(context, builder, ty, value):
     list of llvmlite.ir.Value
         One ``intp`` extent per dimension.
     """
+    if getattr(ty.op, "reduces_axis", False):
+        # A reduction along an axis: its operand's shape without that axis.
+        (opty, _), (operand, axis) = ty.operands, _operands(context, builder, ty, value)
+        extents = _operand_shape(context, builder, opty, operand)
+        axis = _reduced_axis(builder, opty, axis)
+        bad = builder.or_(
+            builder.icmp_signed("<", axis, axis.type(0)),
+            builder.icmp_signed(">=", axis, axis.type(opty.ndim)),
+        )
+        with builder.if_then(bad, likely=False):
+            context.call_conv.return_user_exc(
+                builder,
+                ValueError,
+                (f"axis is out of bounds for an array of dimension {opty.ndim}",),
+            )
+        return [
+            builder.select(
+                builder.icmp_signed("<", axis.type(d), axis), extents[d], extents[d + 1]
+            )
+            for d in range(len(extents) - 1)
+        ]
     intp = context.get_value_type(types.intp)
     one = intp(1)
     shape = [one] * ty.ndim
@@ -1182,6 +1209,15 @@ def expression_element(context, builder, ty, value, indices):
     llvmlite.ir.Value
         The element, of type ``ty.dtype``.
     """
+    if getattr(ty.op, "reduces_axis", False):
+        # A reduction along an axis: a loop, written in Python by the op.
+        (opty, _), (operand, axis) = ty.operands, _operands(context, builder, ty, value)
+        function = ty.op.element_function(opty.ndim)
+        sig = ty.dtype(opty, types.intp, *([types.intp] * len(indices)))
+        axis = _reduced_axis(builder, opty, axis)
+        return context.compile_internal(
+            builder, function, sig, [operand, axis, *indices]
+        )
     values, elements = [], []
     for opty, operand in zip(ty.operands, _operands(context, builder, ty, value)):
         values.append(_operand_element(context, builder, opty, operand, indices))
@@ -1285,15 +1321,24 @@ def lower_expression_len(context, builder, sig, args):
     return expression_shape(context, builder, sig.args[0], args[0])[0]
 
 
-def _arrays_in(ty, value, context, builder):
-    """The array operands of an expression, with their values, recursively."""
+def _arrays_in(ty, value, context, builder, anywhere=False):
+    """The array operands of an expression, recursively.
+
+    Returns
+    -------
+    list of tuple
+        Type and value of each array, and whether the expression reads it
+        at positions other than those of its own elements (under a
+        reduction along an axis).
+    """
     if isinstance(ty, VulkanArray):
-        return [(ty, value)]
+        return [(ty, value, anywhere)]
     if not isinstance(ty, VulkanExpr):
         return []
+    anywhere = anywhere or getattr(ty.op, "reduces_axis", False)
     found = []
     for opty, operand in zip(ty.operands, _operands(context, builder, ty, value)):
-        found += _arrays_in(opty, operand, context, builder)
+        found += _arrays_in(opty, operand, context, builder, anywhere)
     return found
 
 
@@ -1340,7 +1385,7 @@ def assign_expression(context, builder, aryty, selection, exprty, expr):
         _i32(builder, builder.sdiv(stride, stride.type(itemsize), flags=["exact"]))
         for stride in selection.strides
     ]
-    for opty, operand in _arrays_in(exprty, expr, context, builder):
+    for opty, operand, anywhere in _arrays_in(exprty, expr, context, builder):
         if opty.binding is not None and isinstance(selection.binding, int):
             shared = opty.binding == selection.binding
         else:
@@ -1351,7 +1396,7 @@ def assign_expression(context, builder, aryty, selection, exprty, expr):
         if shared is False:
             continue
         offset, op_shape, _, steps = _unpack(context, builder, opty, operand)
-        if opty.ndim != len(view_shape):
+        if anywhere or opty.ndim != len(view_shape):
             if shared is True:
                 raise VulkanUnsupportedError(
                     "an expression may only read the array it is assigned to at "
