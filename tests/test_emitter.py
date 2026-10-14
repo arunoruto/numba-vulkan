@@ -7,8 +7,11 @@ import sys
 
 import pytest
 
-from numba_vulkan import codegen, libclc
+from numba_vulkan import _emit, codegen, libclc
 from numba_vulkan.errors import SpirvCodegenError
+
+# Without fork (Windows) there is no long-lived child to test.
+needs_fork = pytest.mark.skipif(not _emit.CAN_FORK, reason="needs os.fork")
 
 SHADER = f"""
 target triple = "{codegen.TRIPLE}"
@@ -19,6 +22,7 @@ attributes #0 = {{ "hlsl.numthreads"="1,1,1" "hlsl.shader"="compute" }}
 """
 
 
+@needs_fork
 def test_one_process_serves_several_modules():
     emitter = codegen.Emitter()
     try:
@@ -31,6 +35,7 @@ def test_one_process_serves_several_modules():
         emitter.close()
 
 
+@needs_fork
 def test_failure_is_reported_and_the_process_keeps_serving():
     emitter = codegen.Emitter()
     try:
@@ -44,6 +49,7 @@ def test_failure_is_reported_and_the_process_keeps_serving():
         emitter.close()
 
 
+@needs_fork
 def test_dead_process_is_replaced():
     emitter = codegen.Emitter()
     try:
@@ -63,6 +69,7 @@ def test_hanging_process_is_killed(monkeypatch):
     assert emitter._proc is None
 
 
+@needs_fork
 def test_warm_up_and_close():
     emitter = codegen.Emitter()
     emitter.warm_up()
@@ -87,6 +94,7 @@ def test_llc_translates_and_reports_failures():
     assert emitter._proc is None
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="a shell script as llc")
 def test_crashing_llc_is_reported(tmp_path):
     llc = tmp_path / "llc"
     llc.write_text('#!/bin/sh\necho "#0 0x0 stack frame" >&2\nkill -SEGV $$\n')
