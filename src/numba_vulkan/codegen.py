@@ -117,7 +117,10 @@ def target_machine():
     if _target_machine is None:
         llvm.initialize_all_targets()
         llvm.initialize_all_asmprinters()
-        _target_machine = llvm.Target.from_triple(TRIPLE).create_target_machine(opt=0)
+        # codemodel="default" keeps the triple as given on Windows (see _emit).
+        _target_machine = llvm.Target.from_triple(TRIPLE).create_target_machine(
+            opt=0, codemodel="default"
+        )
     return _target_machine
 
 
