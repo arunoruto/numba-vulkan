@@ -174,3 +174,18 @@ def test_spirv_val_rejects_invalid_modules(monkeypatch):
     newer = spirv[:4] + (0x00010600).to_bytes(4, "little") + spirv[8:]
     with pytest.raises(SpirvCodegenError, match="invalid"):
         codegen.check_spirv(newer)
+
+
+def test_translation_without_fork(monkeypatch):
+    """Where there is no fork (Windows), each module gets a process of its own;
+    reading its reply must not use select, which works only on sockets there."""
+    monkeypatch.setattr(codegen._emit, "CAN_FORK", False)
+    monkeypatch.setattr(
+        codegen.select, "select", lambda *a: pytest.fail("select on a pipe")
+    )
+    emitter = codegen.Emitter()
+    emitter.warm_up()  # starts nothing
+    assert emitter._proc is None
+    assert emitter.emit(SHADER)[:4] == b"\x03\x02\x23\x07"
+    with pytest.raises(SpirvCodegenError, match="SPIR-V backend failed: .+"):
+        emitter.emit("this is not LLVM IR")
