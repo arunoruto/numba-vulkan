@@ -200,7 +200,7 @@ class Emitter:
         Called when compilation of a function begins, so that the process
         is ready by the time there is a module to translate.
         """
-        if self.llc is not None:
+        if self.llc is not None or not _emit.CAN_FORK:
             return
         with self._lock:
             if not self._running():
@@ -258,6 +258,8 @@ class Emitter:
         """
         if self.llc is not None:
             return self._emit_with_llc(llvm_ir)
+        if not _emit.CAN_FORK:
+            return self._emit_once(llvm_ir)
         with self._lock:
             if not self._running():
                 self._start()
@@ -280,37 +282,84 @@ class Emitter:
                 self._proc.wait()
                 reason = self._failure(start)
                 self._stop()
-            finally:
-                if not _emit.CAN_FORK:
-                    self._stop()
             raise SpirvCodegenError(f"LLVM's SPIR-V backend failed: {reason}")
 
     def _emit_with_llc(self, llvm_ir):
         """Translate a module with the ``llc`` program; see `emit`."""
-        proc = subprocess.Popen(
+        spirv, _ = _run_backend(
             [self.llc, "-O0", "-filetype=obj", f"--spirv-ext={_emit.EXTENSIONS}"]
             + ["-o", "-", "-"],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            start_new_session=True,
+            llvm_ir.encode(),
+            "llc",
         )
-        try:
-            spirv, log = proc.communicate(llvm_ir.encode(), timeout=EMIT_TIMEOUT)
-        except subprocess.TimeoutExpired:
-            _kill(proc)
-            proc.communicate()
+        return spirv
+
+    def _emit_once(self, llvm_ir):
+        """Translate a module in a child process of its own; see `emit`.
+
+        Where there is no ``fork`` (Windows), the child translates one
+        module and exits, and ``select`` does not work on its pipes, so
+        the reply is collected when it exits.
+        """
+        data = llvm_ir.encode()
+        reply, log = _run_backend(
+            [sys.executable, "-P", _emit.__file__, TRIPLE],
+            _emit.HEADER.pack(len(data)) + data,
+            "the backend",
+        )
+        (size,) = _emit.HEADER.unpack(reply[: _emit.HEADER.size])
+        if size == _emit.FAILED:  # reported by a child that forks
             raise SpirvCodegenError(
-                f"LLVM's SPIR-V backend did not finish within {EMIT_TIMEOUT} seconds"
-            ) from None
-        if proc.returncode == 0:
-            return spirv
-        if proc.returncode < 0:
-            # A crash ends standard error with a stack dump, not a message.
-            reason = f"llc was killed by {signal.Signals(-proc.returncode).name}"
-        else:
-            reason = _failure_reason(log)
-        raise SpirvCodegenError(f"LLVM's SPIR-V backend failed: {reason}")
+                f"LLVM's SPIR-V backend failed: {_failure_reason(log)}"
+            )
+        return reply[_emit.HEADER.size :]
+
+
+def _run_backend(command, data, name):
+    """Run a backend process on one module.
+
+    Parameters
+    ----------
+    command : list of str
+        The command.
+    data : bytes
+        Its standard input.
+    name : str
+        What to call it in messages.
+
+    Returns
+    -------
+    tuple of bytes
+        What it wrote to standard output and to standard error.
+
+    Raises
+    ------
+    SpirvCodegenError
+        If it fails or does not finish within `EMIT_TIMEOUT` seconds.
+    """
+    proc = subprocess.Popen(
+        command,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+    try:
+        out, log = proc.communicate(data, timeout=EMIT_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        _kill(proc)
+        proc.communicate()
+        raise SpirvCodegenError(
+            f"LLVM's SPIR-V backend did not finish within {EMIT_TIMEOUT} seconds"
+        ) from None
+    if proc.returncode == 0:
+        return out, log
+    if proc.returncode < 0:
+        # A crash ends standard error with a stack dump, not a message.
+        reason = f"{name} was killed by {signal.Signals(-proc.returncode).name}"
+    else:
+        reason = _failure_reason(log)
+    raise SpirvCodegenError(f"LLVM's SPIR-V backend failed: {reason}")
 
 
 def _failure_reason(log):
