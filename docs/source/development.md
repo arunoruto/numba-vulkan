@@ -71,12 +71,29 @@ carries a `libclc-version.txt`, which `numba_vulkan.libclc.version()`
 reports. `make check` installs the wheel into a clean uv-managed Python,
 outside Nix, and runs a `float64` math kernel with it.
 
-Releases are published by `.github/workflows/publish.yml` when a GitHub
-release is published: it builds on Ubuntu with Nix (and, as a check, a
-second time with libclc from conda-forge), runs the same check on lavapipe,
-verifies that the tag (`v0.1.0`) matches the version in `pyproject.toml`,
-and uploads to PyPI through trusted publishing from the `pypi` environment.
-Versions stay below 1.0 until the package has been tested widely.
+Releases are made by running the "Build and publish" workflow
+(`.github/workflows/publish.yml`) by hand on `main`, from the Actions tab or
+with `gh workflow run publish.yml --ref main`. It runs the test suite, then
+[python-semantic-release](https://python-semantic-release.readthedocs.io/)
+derives the version from the commit messages since the last release tag,
+following [Conventional Commits](https://www.conventionalcommits.org/):
+`feat:` raises the minor version, `fix:` and `perf:` the patch version, and
+other types (`docs:`, `test:`, `chore:`, `ci:`, `bench:`...) release
+nothing on their own. Breaking changes (`feat!:` or a `BREAKING CHANGE:`
+footer) also raise only the minor version while the version is below 1.0,
+where it stays until the package has been tested widely. It writes the
+version into `pyproject.toml` and `uv.lock`, adds the release's entry to
+`CHANGELOG.md`, commits and tags (`v0.2.0`) on `main` and creates the GitHub
+release. The workflow then builds the distributions from the tag on Ubuntu
+with Nix (and, as a check, a second time with libclc from conda-forge),
+runs the check on lavapipe, attaches them to the release and uploads them
+to PyPI through trusted publishing from the `pypi` environment. The
+configuration is in `[tool.semantic_release]` in `pyproject.toml`;
+`semantic-release version --print` with the same version of
+python-semantic-release shows the version a release would get. Before
+releasing, it also runs the test suite on Windows with lavapipe
+(`.github/workflows/windows.yml`, which can be started on its own too); a
+failure there stops the release as well.
 
 On NixOS, commands must run inside `devenv shell`; the wheels in the
 virtual environment do not find their shared libraries otherwise.

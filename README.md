@@ -5,7 +5,7 @@
   <h1 align="center">numba-vulkan</h1>
 
   <p align="center">
-    A proof-of-concept Vulkan compute target for Numba: write a kernel in Python, run it on any GPU with a Vulkan driver.
+    A Vulkan compute target for Numba: write a kernel in Python, run it on any GPU with a Vulkan driver.
     <br />
     <a href="https://github.com/numba/numba/issues/10116"><strong>Background: numba/numba#10116 »</strong></a>
     <br />
@@ -67,8 +67,10 @@ and compiles `numba.cuda`-style kernels to SPIR-V compute shaders. The same
 kernel has been run on an NVIDIA GPU, an Intel integrated GPU and a CPU
 rasteriser (llvmpipe), with results checked against NumPy.
 
-This is a proof of concept. It shows that the approach works end to end and
-where it hurts; it is not ready for real workloads.
+This is alpha software. It works end to end on NVIDIA and Intel GPUs and
+llvmpipe on Linux and on Apple GPUs through MoltenVK, and every change is
+tested on all of them, but its interfaces may still change and it has not
+yet been proven on real workloads.
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
@@ -118,8 +120,22 @@ where it hurts; it is not ready for real workloads.
 
 ### Installation
 
-With devenv (NixOS or any system with Nix), everything including the Vulkan
-loader and SPIRV-Tools is provided by the shell:
+From PyPI, with the Vulkan loader (`libvulkan1` on Debian and Ubuntu,
+`vulkan-loader` on Fedora and Arch) and a Vulkan driver for your GPU
+installed:
+
+```sh
+pip install numba-vulkan        # or: uv add numba-vulkan
+python -c "import numba_vulkan as nv; print(nv.list_devices())"
+```
+
+The wheel bundles libclc for accurate and `float64` math. On macOS it also
+needs MoltenVK and an `llc` of LLVM 22 named by `NUMBA_VULKAN_LLC` (KI-32);
+see below.
+
+To work on numba-vulkan itself: with devenv (NixOS or any system with Nix),
+everything including the Vulkan loader and SPIRV-Tools is provided by the
+shell:
 
 ```sh
 devenv shell

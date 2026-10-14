@@ -7,7 +7,7 @@
 :class: dark-light
 ```
 
-A proof-of-concept Vulkan compute target for [Numba](https://numba.pydata.org/):
+A Vulkan compute target for [Numba](https://numba.pydata.org/):
 write a kernel in Python and run it on any GPU with a Vulkan driver.
 
 ```python
@@ -37,8 +37,10 @@ direction of, and reviewed by, a human author. See {doc}`authorship`.
 :::
 
 :::{warning}
-This is a proof of concept. It shows that the approach works end to end and
-where it hurts; it is not ready for real workloads. See {doc}`limitations`
+This is alpha software. It works end to end on NVIDIA and Intel GPUs and
+llvmpipe on Linux and on Apple GPUs through MoltenVK, and every change is
+tested on all of them, but its interfaces may still change and it has not
+yet been proven on real workloads. See {doc}`limitations`
 and {doc}`known_issues`.
 :::
 

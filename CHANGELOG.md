@@ -1,10 +1,15 @@
 # Changelog
 
-## 0.1.0 (unreleased)
+The entry of each release is written by python-semantic-release from the
+messages of the commits it contains; see the development guide.
 
-The first release of numba-vulkan, a proof-of-concept Vulkan compute target
-for Numba: Python kernels go through Numba's pipeline to LLVM IR, through
-LLVM's SPIR-V backend, and run as Vulkan compute shaders. It was written by
+<!-- version list -->
+
+## 0.1.0 at a glance
+
+The first release of numba-vulkan, a Vulkan compute target for Numba, as
+alpha software. Python kernels go through Numba's pipeline to LLVM IR,
+through LLVM's SPIR-V backend, and run as Vulkan compute shaders. It was written by
 an AI under human direction and review (see the authorship page of the
 documentation).
 

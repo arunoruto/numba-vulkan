@@ -5,13 +5,20 @@ name: "Build and publish"
 # bundles libclc built by nix/libclc.nix against the nixpkgs that
 # devenv.lock pins; the check installs it into a plain uv-managed Python,
 # outside Nix. A second build takes libclc from conda-forge, so that
-# building without Nix keeps working. Publishing to PyPI happens only for a
-# published GitHub release, through PyPI's trusted publishing (no token),
-# from the `pypi` environment.
+# building without Nix keeps working.
+#
+# Releasing: run this workflow by hand on main. After the test suite has
+# passed, on Linux and on Windows (windows.yml), python-semantic-release
+# derives the next version from the commit messages since the last release
+# (configured in pyproject.toml), updates pyproject.toml, uv.lock and
+# CHANGELOG.md, commits, tags and creates the GitHub release. The
+# distributions built from that tag are attached to the release and uploaded
+# to PyPI through trusted publishing (no token), from the `pypi`
+# environment; PyPI knows this workflow by its file name. Without commits
+# that call for a release, nothing is released. Pull requests that change
+# the packaging only build and check.
 
 on:
-  release:
-    types: [published]
   workflow_dispatch:
   pull_request:
     paths:
@@ -22,8 +29,55 @@ on:
       - "devenv.lock"
       - ".github/workflows/publish.yml"
 
+permissions:
+  contents: read
+
 jobs:
+  tests:
+    if: github.event_name == 'workflow_dispatch'
+    uses: ./.github/workflows/tests.yml
+
+  windows:
+    if: github.event_name == 'workflow_dispatch'
+    uses: ./.github/workflows/windows.yml
+
+  release:
+    needs: [tests, windows]
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    concurrency:
+      group: release
+      cancel-in-progress: false
+    permissions:
+      contents: write
+    outputs:
+      released: ${{ steps.release.outputs.released || 'false' }}
+      tag: ${{ steps.release.outputs.tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.ref_name }}
+          fetch-depth: 0
+
+      - name: Release from the commit the workflow started on
+        run: git reset --hard ${{ github.sha }}
+
+      # Also refuses to release if main has moved on since the run started.
+      - name: Version, changelog, tag and GitHub release
+        id: release
+        uses: python-semantic-release/python-semantic-release@v10.7.0
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          git_committer_name: "github-actions"
+          git_committer_email: "actions@users.noreply.github.com"
+
   build:
+    needs: release
+    # Pull requests skip the release; then the build runs on its own.
+    if: >
+      !cancelled() && (github.event_name == 'pull_request'
+      || needs.release.outputs.released == 'true')
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -32,6 +86,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.release.outputs.tag || github.sha }}
 
       - name: Install uv
         uses: astral-sh/setup-uv@v10.2.0
@@ -46,11 +102,13 @@ jobs:
           sudo apt-get install -y --no-install-recommends libvulkan1 mesa-vulkan-drivers
 
       - name: Check that the release tag matches the version
-        if: github.event_name == 'release' && matrix.libclc == 'nix'
+        if: needs.release.outputs.released == 'true'
+        env:
+          TAG: ${{ needs.release.outputs.tag }}
         run: |
           version=$(uv run --no-project python -c "import tomllib; print(tomllib.load(open('pyproject.toml', 'rb'))['project']['version'])")
-          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
-            echo "tag $GITHUB_REF_NAME does not match version $version" >&2
+          if [ "v$version" != "$TAG" ]; then
+            echo "tag $TAG does not match version $version" >&2
             exit 1
           fi
 
@@ -68,20 +126,32 @@ jobs:
           path: dist/
 
   publish:
-    needs: build
-    if: github.event_name == 'release'
+    needs: [release, build]
+    if: needs.release.outputs.released == 'true'
     runs-on: ubuntu-latest
     environment:
       name: pypi
       url: https://pypi.org/project/numba-vulkan/
     permissions:
+      contents: write  # release assets
       id-token: write  # trusted publishing
     steps:
+      - name: Checkout the release
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.release.outputs.tag }}
+
       - name: Fetch the distributions
         uses: actions/download-artifact@v8
         with:
           name: dist
           path: dist/
+
+      - name: Attach them to the GitHub release
+        uses: python-semantic-release/publish-action@v10.7.0
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          tag: ${{ needs.release.outputs.tag }}
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@v1.14.2

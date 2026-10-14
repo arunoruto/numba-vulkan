@@ -22,7 +22,7 @@ What this means in practice:
 - The benchmark numbers and hardware observations come from real runs on
   the author's machine, not from the model's memory. The reasons given for
   driver behaviour are inferences from those runs.
-- The project is a proof of concept. Treat it with the scepticism that
+- The project is alpha software. Treat it with the scepticism that
   unreviewed-by-third-parties, machine-written code deserves.
 
 ## Relationship to Numba
