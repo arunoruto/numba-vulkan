@@ -124,6 +124,17 @@ def target_machine():
     return _target_machine
 
 
+def _kill(proc):
+    """Kill a child started in a session of its own, and its children.
+
+    Windows has no process groups; there, only the child is killed.
+    """
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except (AttributeError, ProcessLookupError, PermissionError):
+        proc.kill()
+
+
 class Emitter:
     """A child process that runs LLVM's SPIR-V backend.
 
@@ -177,10 +188,7 @@ class Emitter:
     def _stop(self):
         """Terminate the child process and its children, if any."""
         if self._proc is not None:
-            try:
-                os.killpg(self._proc.pid, signal.SIGKILL)
-            except (AttributeError, ProcessLookupError, PermissionError):
-                self._proc.kill()
+            _kill(self._proc)
             self._proc.wait()
             for stream in (self._proc.stdin, self._proc.stdout, self._log):
                 stream.close()
@@ -290,7 +298,7 @@ class Emitter:
         try:
             spirv, log = proc.communicate(llvm_ir.encode(), timeout=EMIT_TIMEOUT)
         except subprocess.TimeoutExpired:
-            os.killpg(proc.pid, signal.SIGKILL)
+            _kill(proc)
             proc.communicate()
             raise SpirvCodegenError(
                 f"LLVM's SPIR-V backend did not finish within {EMIT_TIMEOUT} seconds"
