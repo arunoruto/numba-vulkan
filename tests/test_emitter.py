@@ -2,6 +2,8 @@
 
 import os
 import shutil
+import subprocess
+import sys
 
 import pytest
 
@@ -132,3 +134,43 @@ def test_failures_are_saved_for_reproducing(tmp_path, monkeypatch):
     (ll,) = saved.glob("*.ll")
     assert ll.read_text() == "this is not LLVM IR"
     assert str(ll) in note
+
+
+def test_translation_as_on_windows(tmp_path):
+    """llvmlite appends "-elf" to the triple on Windows unless asked not to
+    (issue #53); the backend then aborts. Pretends to be Windows to llvmlite
+    only, in a child process, since the backend may abort it."""
+    script = tmp_path / "windows.py"
+    script.write_text(
+        "import io, sys, types\n"
+        "import llvmlite.binding as llvm\n"
+        "import llvmlite.binding.targets as targets\n"
+        "targets.os = types.SimpleNamespace(name='nt')\n"
+        f"sys.path.insert(0, {os.path.dirname(codegen.__file__)!r})\n"
+        "import _emit\n"
+        "llvm.initialize_all_targets()\n"
+        "llvm.initialize_all_asmprinters()\n"
+        f"target = llvm.Target.from_triple({codegen.TRIPLE!r})\n"
+        "out = io.BytesIO()\n"
+        "_emit._translate(target, sys.stdin.buffer.read(), out)\n"
+        "print(len(out.getvalue()))\n"
+    )
+    proc = subprocess.run(
+        [sys.executable, "-I", str(script)],
+        input=SHADER.encode(),
+        capture_output=True,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr.decode()
+    assert int(proc.stdout) > 20
+
+
+@pytest.mark.skipif(shutil.which("spirv-val") is None, reason="needs spirv-val")
+def test_spirv_val_rejects_invalid_modules(monkeypatch):
+    monkeypatch.setenv("NUMBA_VULKAN_VALIDATE", "1")
+    spirv = codegen.emit_spirv(SHADER)
+    codegen.check_spirv(spirv)
+    # SPIR-V 1.6 is too new for Vulkan 1.2.
+    newer = spirv[:4] + (0x00010600).to_bytes(4, "little") + spirv[8:]
+    with pytest.raises(SpirvCodegenError, match="invalid"):
+        codegen.check_spirv(newer)

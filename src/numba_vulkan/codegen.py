@@ -117,8 +117,22 @@ def target_machine():
     if _target_machine is None:
         llvm.initialize_all_targets()
         llvm.initialize_all_asmprinters()
-        _target_machine = llvm.Target.from_triple(TRIPLE).create_target_machine(opt=0)
+        # codemodel="default" keeps the triple as given on Windows (see _emit).
+        _target_machine = llvm.Target.from_triple(TRIPLE).create_target_machine(
+            opt=0, codemodel="default"
+        )
     return _target_machine
+
+
+def _kill(proc):
+    """Kill a child started in a session of its own, and its children.
+
+    Windows has no process groups; there, only the child is killed.
+    """
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except (AttributeError, ProcessLookupError, PermissionError):
+        proc.kill()
 
 
 class Emitter:
@@ -174,10 +188,7 @@ class Emitter:
     def _stop(self):
         """Terminate the child process and its children, if any."""
         if self._proc is not None:
-            try:
-                os.killpg(self._proc.pid, signal.SIGKILL)
-            except (AttributeError, ProcessLookupError, PermissionError):
-                self._proc.kill()
+            _kill(self._proc)
             self._proc.wait()
             for stream in (self._proc.stdin, self._proc.stdout, self._log):
                 stream.close()
@@ -287,7 +298,7 @@ class Emitter:
         try:
             spirv, log = proc.communicate(llvm_ir.encode(), timeout=EMIT_TIMEOUT)
         except subprocess.TimeoutExpired:
-            os.killpg(proc.pid, signal.SIGKILL)
+            _kill(proc)
             proc.communicate()
             raise SpirvCodegenError(
                 f"LLVM's SPIR-V backend did not finish within {EMIT_TIMEOUT} seconds"
@@ -1586,19 +1597,17 @@ def check_spirv(spirv):
             )
         pos += max(count, 1)
     if os.environ.get("NUMBA_VULKAN_VALIDATE", "0") not in ("", "0"):
-        with tempfile.NamedTemporaryFile(suffix=".spv") as tmp:
-            tmp.write(spirv)
-            tmp.flush()
-            proc = subprocess.run(
-                ["spirv-val", "--target-env", "vulkan1.2", tmp.name],
-                capture_output=True,
-                text=True,
-                check=False,
-            )
+        # From standard input: Windows does not let another process open a
+        # temporary file that is still open.
+        proc = subprocess.run(
+            ["spirv-val", "--target-env", "vulkan1.2", "-"],
+            input=spirv,
+            capture_output=True,
+            check=False,
+        )
         if proc.returncode != 0:
-            raise SpirvCodegenError(
-                f"generated SPIR-V is invalid: {proc.stderr.strip()}"
-            )
+            message = proc.stderr.decode(errors="replace").strip()
+            raise SpirvCodegenError(f"generated SPIR-V is invalid: {message}")
 
 
 def _link_libclc(module, pass_builder):

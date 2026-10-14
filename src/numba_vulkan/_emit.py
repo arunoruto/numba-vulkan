@@ -43,7 +43,10 @@ def _read(stream, count):
 def _translate(target, text, stdout):
     """Translate one module and write the reply."""
     module = llvm.parse_assembly(text.decode())
-    spirv = target.create_target_machine(opt=0).emit_object(module)
+    # codemodel="default": with llvmlite's "jitdefault", Windows gets "-elf"
+    # appended to the triple, and ELF output makes the backend abort.
+    machine = target.create_target_machine(opt=0, codemodel="default")
+    spirv = machine.emit_object(module)
     stdout.write(HEADER.pack(len(spirv)) + spirv)
     stdout.flush()
 
