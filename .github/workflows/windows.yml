@@ -1,0 +1,49 @@
+name: "Tests on Windows"
+
+# The test suite on Windows, with Mesa's lavapipe (GitHub's runners have no
+# GPU) and spirv-val from the Vulkan SDK, both installed by
+# jakoch/install-vulkan-sdk-action. Windows gets less attention than Linux:
+# this runs only on demand ("Run workflow") and before a release
+# (publish.yml), which it stops if it fails.
+
+on:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  lavapipe:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.2.0
+
+      - name: Install the Vulkan runtime, the SDK and lavapipe
+        uses: jakoch/install-vulkan-sdk-action@v1.7.0
+        with:
+          install_runtime: true
+          install_lavapipe: true
+          cache: true
+
+      - name: Use lavapipe, and the SDK's tools
+        shell: pwsh
+        run: |
+          $icd = Get-ChildItem C:\lavapipe -Recurse -Filter "lvp_icd*.json" | Select-Object -First 1
+          "VK_DRIVER_FILES=$($icd.FullName)" >> $env:GITHUB_ENV
+          "$env:VULKAN_SDK\Bin" >> $env:GITHUB_PATH
+
+      - name: Show the Vulkan devices
+        run: vulkaninfo --summary
+
+      - name: Get libclc
+        run: >
+          uv run --no-project --with zstandard python scripts/fetch_libclc.py
+          --source conda --output src/numba_vulkan/data/clspv--.bc
+
+      - name: Run the tests
+        run: uv run pytest -q -rxXs

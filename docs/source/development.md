@@ -90,7 +90,10 @@ runs the check on lavapipe, attaches them to the release and uploads them
 to PyPI through trusted publishing from the `pypi` environment. The
 configuration is in `[tool.semantic_release]` in `pyproject.toml`;
 `semantic-release version --print` with the same version of
-python-semantic-release shows the version a release would get.
+python-semantic-release shows the version a release would get. Before
+releasing, it also runs the test suite on Windows with lavapipe
+(`.github/workflows/windows.yml`, which can be started on its own too); a
+failure there stops the release as well.
 
 On NixOS, commands must run inside `devenv shell`; the wheels in the
 virtual environment do not find their shared libraries otherwise.

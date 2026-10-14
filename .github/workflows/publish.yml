@@ -8,14 +8,15 @@ name: "Build and publish"
 # building without Nix keeps working.
 #
 # Releasing: run this workflow by hand on main. After the test suite has
-# passed, python-semantic-release derives the next version from the commit
-# messages since the last release (configured in pyproject.toml), updates
-# pyproject.toml, uv.lock and CHANGELOG.md, commits, tags and creates the
-# GitHub release. The distributions built from that tag are attached to the
-# release and uploaded to PyPI through trusted publishing (no token), from
-# the `pypi` environment; PyPI knows this workflow by its file name. Without
-# commits that call for a release, nothing is released. Pull requests that
-# change the packaging only build and check.
+# passed, on Linux and on Windows (windows.yml), python-semantic-release
+# derives the next version from the commit messages since the last release
+# (configured in pyproject.toml), updates pyproject.toml, uv.lock and
+# CHANGELOG.md, commits, tags and creates the GitHub release. The
+# distributions built from that tag are attached to the release and uploaded
+# to PyPI through trusted publishing (no token), from the `pypi`
+# environment; PyPI knows this workflow by its file name. Without commits
+# that call for a release, nothing is released. Pull requests that change
+# the packaging only build and check.
 
 on:
   workflow_dispatch:
@@ -36,8 +37,12 @@ jobs:
     if: github.event_name == 'workflow_dispatch'
     uses: ./.github/workflows/tests.yml
 
+  windows:
+    if: github.event_name == 'workflow_dispatch'
+    uses: ./.github/workflows/windows.yml
+
   release:
-    needs: tests
+    needs: [tests, windows]
     if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     concurrency:
