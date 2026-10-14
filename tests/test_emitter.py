@@ -163,3 +163,14 @@ def test_translation_as_on_windows(tmp_path):
     )
     assert proc.returncode == 0, proc.stderr.decode()
     assert int(proc.stdout) > 20
+
+
+@pytest.mark.skipif(shutil.which("spirv-val") is None, reason="needs spirv-val")
+def test_spirv_val_rejects_invalid_modules(monkeypatch):
+    monkeypatch.setenv("NUMBA_VULKAN_VALIDATE", "1")
+    spirv = codegen.emit_spirv(SHADER)
+    codegen.check_spirv(spirv)
+    # SPIR-V 1.6 is too new for Vulkan 1.2.
+    newer = spirv[:4] + (0x00010600).to_bytes(4, "little") + spirv[8:]
+    with pytest.raises(SpirvCodegenError, match="invalid"):
+        codegen.check_spirv(newer)

@@ -1589,19 +1589,17 @@ def check_spirv(spirv):
             )
         pos += max(count, 1)
     if os.environ.get("NUMBA_VULKAN_VALIDATE", "0") not in ("", "0"):
-        with tempfile.NamedTemporaryFile(suffix=".spv") as tmp:
-            tmp.write(spirv)
-            tmp.flush()
-            proc = subprocess.run(
-                ["spirv-val", "--target-env", "vulkan1.2", tmp.name],
-                capture_output=True,
-                text=True,
-                check=False,
-            )
+        # From standard input: Windows does not let another process open a
+        # temporary file that is still open.
+        proc = subprocess.run(
+            ["spirv-val", "--target-env", "vulkan1.2", "-"],
+            input=spirv,
+            capture_output=True,
+            check=False,
+        )
         if proc.returncode != 0:
-            raise SpirvCodegenError(
-                f"generated SPIR-V is invalid: {proc.stderr.strip()}"
-            )
+            message = proc.stderr.decode(errors="replace").strip()
+            raise SpirvCodegenError(f"generated SPIR-V is invalid: {message}")
 
 
 def _link_libclc(module, pass_builder):
