@@ -13,8 +13,9 @@ through LLVM's SPIR-V backend, and run as Vulkan compute shaders. It was written
 an AI under human direction and review (see the authorship page of the
 documentation).
 
-Tested on an NVIDIA TITAN X (Pascal), Intel UHD Graphics 630, Mesa's
-llvmpipe on Linux, and an Apple M3 Pro through MoltenVK.
+Tested on an NVIDIA TITAN X (Pascal), Intel UHD Graphics 630 and Mesa's
+llvmpipe on Linux, an Apple M3 Pro through MoltenVK, and Mesa's lavapipe on
+Windows; the benchmarks also ran on an Intel Arc GPU under Windows.
 
 ### Kernels
 

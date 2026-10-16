@@ -37,10 +37,11 @@ direction of, and reviewed by, a human author. See {doc}`authorship`.
 :::
 
 :::{warning}
-This is alpha software. It works end to end on NVIDIA and Intel GPUs and
-llvmpipe on Linux and on Apple GPUs through MoltenVK, and every change is
-tested on all of them, but its interfaces may still change and it has not
-yet been proven on real workloads. See {doc}`limitations`
+This is alpha software. Its test suite passes on NVIDIA and Intel GPUs and
+llvmpipe on Linux, on an Apple M3 Pro through MoltenVK, and on Windows with
+lavapipe, and the benchmarks run on an Intel Arc GPU under Windows; but its
+interfaces may still change and it has not yet been proven on real
+workloads. See {doc}`limitations`
 and {doc}`known_issues`.
 :::
 
