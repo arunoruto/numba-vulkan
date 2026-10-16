@@ -99,6 +99,15 @@ conda-forge's package unless Nix is installed, and the file is the same on
 every platform. Without it, `float32` math uses the driver's functions.
 CUDA does not exist on macOS, so the benchmarks leave out numba-cuda.
 
+### Windows
+
+GPU drivers on Windows come with the Vulkan loader, so `pip install
+numba-vulkan` is all it takes. The test suite runs on Windows with Mesa's
+lavapipe before every release (`.github/workflows/windows.yml`), and the
+benchmarks have run on an Intel Arc GPU. Windows has no `fork`, so each
+kernel's first compilation starts a process of its own and takes a little
+longer than on Linux or macOS.
+
 ## Checking the setup
 
 ```python

@@ -67,10 +67,11 @@ and compiles `numba.cuda`-style kernels to SPIR-V compute shaders. The same
 kernel has been run on an NVIDIA GPU, an Intel integrated GPU and a CPU
 rasteriser (llvmpipe), with results checked against NumPy.
 
-This is alpha software. It works end to end on NVIDIA and Intel GPUs and
-llvmpipe on Linux and on Apple GPUs through MoltenVK, and every change is
-tested on all of them, but its interfaces may still change and it has not
-yet been proven on real workloads.
+This is alpha software. Its test suite passes on NVIDIA and Intel GPUs and
+llvmpipe on Linux, on an Apple M3 Pro through MoltenVK, and on Windows with
+lavapipe, and the benchmarks run on an Intel Arc GPU under Windows; but its
+interfaces may still change and it has not yet been proven on real
+workloads.
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
