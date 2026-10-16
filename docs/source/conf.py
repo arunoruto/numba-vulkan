@@ -92,27 +92,24 @@ napoleon_use_ivar = True
 
 # -- Options for HTML output -------------------------------------------------
 
-html_theme = "pydata_sphinx_theme"
+html_theme = "shibuya"
 html_static_path = ["_static"]
 html_logo = "_static/logo.svg"
 html_favicon = "_static/favicon.svg"
-html_css_files = []
+# The repository link and "Edit this page".
 html_context = {
-    "github_user": "arunoruto",
-    "github_repo": "numba-vulkan",
-    "github_version": "main",
-    "doc_path": "docs/source/",
+    "source_type": "github",
+    "source_user": "arunoruto",
+    "source_repo": "numba-vulkan",
+    "source_version": "main",
+    "source_docs_path": "/docs/source/",
 }
 
-# PyData Theme Options
 html_theme_options = {
-    "github_url": f"https://github.com/{html_context['github_user']}/{html_context['github_repo']}",
-    "use_edit_page_button": True,
-    "logo": {"text": "numba-vulkan", "alt_text": "numba-vulkan"},
+    "github_url": "https://github.com/arunoruto/numba-vulkan",
+    # Numba's blue, the left end of the logo.
+    "accent_color": "sky",
 }
-
-# The name of the Pygments (syntax highlighting) style to use.
-pygments_style = "sphinx"
 
 ## Intersphinx Configuration: Set up links to external documentation:
 intersphinx_mapping = {
