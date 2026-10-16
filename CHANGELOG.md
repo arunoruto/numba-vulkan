@@ -5,6 +5,10 @@ messages of the commits it contains; see the development guide.
 
 <!-- version list -->
 
+## v0.1.0 (2026-10-16)
+
+- Initial Release
+
 ## 0.1.0 at a glance
 
 The first release of numba-vulkan, a Vulkan compute target for Numba, as
