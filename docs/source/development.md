@@ -93,7 +93,10 @@ configuration is in `[tool.semantic_release]` in `pyproject.toml`;
 python-semantic-release shows the version a release would get. Before
 releasing, it also runs the test suite on Windows with lavapipe
 (`.github/workflows/windows.yml`, which can be started on its own too); a
-failure there stops the release as well.
+failure there stops the release as well. If a release is made but
+building or publishing it fails, fix the cause and run the workflow again
+with the tag, which skips the tests and the release and publishes that
+tag: `gh workflow run publish.yml --ref main -f tag=v0.1.0`.
 
 On NixOS, commands must run inside `devenv shell`; the wheels in the
 virtual environment do not find their shared libraries otherwise.
