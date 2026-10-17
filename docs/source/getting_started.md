@@ -120,9 +120,14 @@ nv.list_devices()
 ```
 
 The test suite runs every test on every device in that list and validates
-each generated shader with `spirv-val` when it is installed:
+each generated shader with `spirv-val` when it is installed. The tests and
+examples are part of the repository, not of the package installed from
+PyPI, so they run in a copy of it: a `git clone`, or the zip of `main` from
+GitHub.
 
 ```sh
+git clone https://github.com/arunoruto/numba-vulkan
+cd numba-vulkan
 uv run pytest
 uv run python examples/saxpy.py
 ```
