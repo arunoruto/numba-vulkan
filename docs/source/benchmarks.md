@@ -78,8 +78,11 @@ uv run python benchmarks/collect.py --user <your GitHub name>
 
 This runs both suites (a few minutes) and writes
 `benchmarks/results/<user>/<date>.json`. Commit that file in a pull request.
-The machine is labelled with its host name; `--machine` chooses another
-label. `--quick` runs small problem sizes for trying it out; such runs are
+The scripts are part of the repository, not of the package on PyPI; the zip
+of `main` from GitHub works as well as a `git clone`, and the result then
+records no commit. The machine is labelled with its host name; `--machine`
+chooses another label, which also keeps apart runs of one machine in
+different conditions, such as a laptop in power-saving mode. `--quick` runs small problem sizes for trying it out; such runs are
 not charted. `NUMBA_VULKAN_BENCH_USER` and `NUMBA_VULKAN_BENCH_MACHINE` can
 stand in for the options. On a machine without CUDA, such as a Mac, the
 CUDA rows are left out; `uv sync --group bench` is not needed there.
