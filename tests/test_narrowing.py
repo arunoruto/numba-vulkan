@@ -63,6 +63,7 @@ def test_forced_narrow_kernel_needs_no_optional_features(run, dtype):
     assert out.dtype == dtype  # converted back on the host
 
 
+@pytest.mark.skipif(not libclc.available(), reason="libclc is not installed")
 def test_exact_kernel_still_uses_64_bit_types(run):
     kernel = nv.jit(narrow=False)(typical)
     counts = np.arange(64, dtype=np.int64)
@@ -116,6 +117,7 @@ def test_float32_kernel_on_a_limited_device_does_not_warn(limited):
     np.testing.assert_array_equal(out, x * 2)
 
 
+@pytest.mark.skipif(not libclc.available(), reason="libclc is not installed")
 def test_narrow_false_fails_on_a_limited_device(limited):
     kernel = nv.jit(narrow=False)(typical)
     with pytest.raises(nv.VulkanSupportError, match="needs float64, int64"):

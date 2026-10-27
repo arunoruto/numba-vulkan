@@ -77,6 +77,7 @@ def test_float64_trig_over_the_whole_range(run):
     _check_trig(run, _trig_arguments())
 
 
+@pytest.mark.skipif(not libclc.available(), reason="libclc is not installed")
 def test_float32_trig_over_the_whole_range(run):
     x = _trig_arguments().astype(np.float32)
     _check_trig(run, x[np.isfinite(x)])
@@ -97,6 +98,7 @@ def forced(device, monkeypatch):
     return dev
 
 
+@pytest.mark.skipif(not libclc.available(), reason="libclc is not installed")
 def test_float32_trig_is_correct_with_the_workarounds_forced(run, forced):
     x = _trig_arguments()[:500].astype(np.float32)
     _check_trig(run, x[np.isfinite(x)])

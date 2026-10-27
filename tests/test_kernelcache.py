@@ -7,12 +7,15 @@ import numpy as np
 import pytest
 
 import numba_vulkan as nv
-from numba_vulkan import codegen, kernelcache
+from numba_vulkan import codegen, kernelcache, libclc
 
 f32 = np.float32
 X = np.linspace(0.1, 3, 16, dtype=f32)
 TABLE_A = np.array([1, 2, 3, 4], dtype=f32)
 TABLE_B = np.array([10, 20, 30, 40], dtype=f32)
+# The kernels compute sin, accurately with libclc; the driver's own, used
+# without it, is less accurate on some devices (KI-23).
+RTOL = 1e-6 if libclc.available() else 1e-3
 
 
 def body(a, out):
@@ -75,7 +78,7 @@ def test_second_compilation_comes_from_the_cache(cache, device):
     assert len(emitted) == 1 and len(entries()) == 1
     second, cached = launch(body, device)
     assert len(emitted) == 1  # the backend did not run again
-    np.testing.assert_allclose(first, want, rtol=1e-6)
+    np.testing.assert_allclose(first, want, rtol=RTOL)
     np.testing.assert_array_equal(first, second)
     assert cached.spirv == compiled.spirv and cached.llvm_ir == compiled.llvm_ir
     assert cached.written_bindings == compiled.written_bindings == {0, 2}
@@ -99,8 +102,8 @@ def test_table_contents_are_not_part_of_the_entry(cache, device):
     # One entry serves both, and each run sees the values of its own table.
     assert len(emitted) == 1 and len(entries()) == 1
     base = np.sin(X) * 2
-    np.testing.assert_allclose(first, base + TABLE_A[np.arange(16) % 4], rtol=1e-6)
-    np.testing.assert_allclose(second, base + TABLE_B[np.arange(16) % 4], rtol=1e-6)
+    np.testing.assert_allclose(first, base + TABLE_A[np.arange(16) % 4], rtol=RTOL)
+    np.testing.assert_allclose(second, base + TABLE_B[np.arange(16) % 4], rtol=RTOL)
 
 
 @pytest.mark.float64
@@ -141,7 +144,7 @@ def test_unwritable_cache_directory_is_harmless(cache, device, monkeypatch):
     monkeypatch.setenv("NUMBA_VULKAN_CACHE_DIR", "/proc/numba-vulkan-no-such-place")
     out, _ = launch(body, device)
     np.testing.assert_allclose(
-        out, np.sin(X) * 2 + TABLE_A[np.arange(16) % 4], rtol=1e-6
+        out, np.sin(X) * 2 + TABLE_A[np.arange(16) % 4], rtol=RTOL
     )
 
 

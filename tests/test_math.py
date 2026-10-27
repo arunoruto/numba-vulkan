@@ -226,6 +226,7 @@ def test_gamma_over_its_range(run, case):
     _check(run, ("gamma range", case), math.gamma, (x,), want, rtol=rtol, atol=atol)
 
 
+@pytest.mark.skipif(not libclc.available(), reason="libclc is not installed")
 def test_gamma_with_fastmath_keeps_its_accuracy(run):
     x = _gamma_arguments(-41.5, 35.0, f32)
     want = np.vectorize(math.gamma)(x.astype(np.float64)).astype(f32)
