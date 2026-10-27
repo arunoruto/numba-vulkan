@@ -5,6 +5,39 @@ messages of the commits it contains; see the development guide.
 
 <!-- version list -->
 
+## v0.1.1 (2026-10-27)
+
+### Bench
+
+- Label drtrigon's power-saving runs with a valid machine name
+  ([`1eb82b8`](https://github.com/arunoruto/numba-vulkan/commit/1eb82b89b5c2bc27ea3730eded3ce4ed67909e7b))
+
+### Bug Fixes
+
+- Run spirv-val by the path shutil.which finds
+  ([#52](https://github.com/arunoruto/numba-vulkan/pull/52),
+  [`9dbb2fb`](https://github.com/arunoruto/numba-vulkan/commit/9dbb2fb1666a1c0ea2e69c955e0df53614262a03))
+
+### Continuous Integration
+
+- Publish an existing release tag; attach files with gh
+  ([`a490093`](https://github.com/arunoruto/numba-vulkan/commit/a4900937b93f74aa55f87f80052759e2598582a2))
+
+### Documentation
+
+- Tests and benchmarks run in a copy of the repository
+  ([`15eebe3`](https://github.com/arunoruto/numba-vulkan/commit/15eebe3705fb27c9f4722effdc0bfb210598187a))
+
+### Testing
+
+- Spirv-val behind a wrapper script on PATH
+  ([#52](https://github.com/arunoruto/numba-vulkan/pull/52),
+  [`782ea13`](https://github.com/arunoruto/numba-vulkan/commit/782ea132d15466b7def280d3ceeba0dcea901a16))
+
+- The suite on GPUs without float64 and without libclc
+  ([`1d271eb`](https://github.com/arunoruto/numba-vulkan/commit/1d271eb502b2120fe1e351f3049e9a3c8a6804bf))
+
+
 ## v0.1.0 (2026-10-16)
 
 - Initial Release

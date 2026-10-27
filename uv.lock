@@ -1121,7 +1121,7 @@ cu12 = [
 
 [[package]]
 name = "numba-vulkan"
-version = "0.1.0"
+version = "0.1.1"
 source = { editable = "." }
 default-groups = ["test"]
 dependencies = [

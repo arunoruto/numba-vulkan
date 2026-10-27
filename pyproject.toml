@@ -1,6 +1,6 @@
 [project]
 name = "numba-vulkan"
-version = "0.1.0"
+version = "0.1.1"
 description = "A Vulkan compute target for Numba: Python kernels on any GPU with a Vulkan driver"
 readme = "README.md"
 # Distributions bundle libclc's bitcode, which is under LLVM's licence.
