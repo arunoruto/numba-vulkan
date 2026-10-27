@@ -6,7 +6,8 @@ name: "Tests"
 # libclc comes from conda-forge (make libclc without Nix). It runs on every
 # supported Python with the locked dependencies, and once with the newest
 # releases of them, as `pip install` would get them; weekly as well, to
-# notice new releases of Numba or llvmlite that break it.
+# notice new releases of Numba or llvmlite that break it. The run with the
+# newest releases goes without spirv-val, as most users' machines do.
 
 on:
   workflow_dispatch:
@@ -77,7 +78,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            libvulkan1 mesa-vulkan-drivers vulkan-validationlayers spirv-tools vulkan-tools
+            libvulkan1 mesa-vulkan-drivers vulkan-validationlayers vulkan-tools \
+            ${{ !matrix.newest && 'spirv-tools' || '' }}
           vulkaninfo --summary | grep -E "deviceName|driverInfo|apiVersion"
 
       - name: Get libclc
