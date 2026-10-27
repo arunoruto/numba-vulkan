@@ -22,8 +22,6 @@ import warnings
 
 import numpy as np
 
-os.environ["NUMBA_VULKAN_VALIDATE"] = "1"
-warnings.simplefilter("ignore")
 import numba_vulkan as nv
 
 f32 = np.float32
@@ -166,4 +164,8 @@ def main(argv):
 
 
 if __name__ == "__main__":
+    # Only when run as a script: test_control_flow.py imports this module,
+    # and the test session must keep its own settings.
+    os.environ["NUMBA_VULKAN_VALIDATE"] = "1"
+    warnings.simplefilter("ignore")
     sys.exit(main(sys.argv[1:]))
