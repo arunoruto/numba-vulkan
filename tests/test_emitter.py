@@ -184,6 +184,28 @@ def test_spirv_val_rejects_invalid_modules(monkeypatch):
         codegen.check_spirv(newer)
 
 
+@pytest.mark.skipif(shutil.which("spirv-val") is None, reason="needs spirv-val")
+def test_spirv_val_behind_a_wrapper(tmp_path, monkeypatch):
+    """spirv-val found on PATH as a wrapper script rather than a program, as
+    shutil.which finds it but Windows cannot start it by its bare name (#52)."""
+    real = shutil.which("spirv-val")
+    spirv = codegen.emit_spirv(SHADER)
+    if sys.platform == "win32":
+        (tmp_path / "spirv-val.bat").write_text(f'@"{real}" %*\n')
+        system = os.path.join(os.environ["SystemRoot"], "System32")
+        monkeypatch.setenv("PATH", os.pathsep.join([str(tmp_path), system]))
+    else:
+        wrapper = tmp_path / "spirv-val"
+        wrapper.write_text(f'#!/bin/sh\nexec "{real}" "$@"\n')
+        wrapper.chmod(0o755)
+        monkeypatch.setenv("PATH", str(tmp_path))
+    monkeypatch.setenv("NUMBA_VULKAN_VALIDATE", "1")
+    codegen.check_spirv(spirv)
+    newer = spirv[:4] + (0x00010600).to_bytes(4, "little") + spirv[8:]
+    with pytest.raises(SpirvCodegenError, match="invalid"):
+        codegen.check_spirv(newer)
+
+
 def test_translation_without_fork(monkeypatch):
     """Where there is no fork (Windows), each module gets a process of its own;
     reading its reply must not use select, which works only on sockets there."""

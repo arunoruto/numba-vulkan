@@ -65,6 +65,7 @@ def test_float64_fields_keep_their_precision(run):
     np.testing.assert_array_equal(dst["big"], 1.0 + 1e-12)
 
 
+@pytest.mark.float64  # the float64 field is narrowed to float32 otherwise
 def test_whole_records_are_copied(run):
     @nv.jit
     def reverse(src, dst):

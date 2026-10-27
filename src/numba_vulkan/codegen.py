@@ -5,6 +5,7 @@ import hashlib
 import os
 import re
 import select
+import shutil
 import signal
 import struct
 import subprocess
@@ -1646,10 +1647,18 @@ def check_spirv(spirv):
             )
         pos += max(count, 1)
     if os.environ.get("NUMBA_VULKAN_VALIDATE", "0") not in ("", "0"):
+        # By the path shutil.which finds: Windows starts only programs, not
+        # wrapper scripts (such as spirv-val.bat), by their bare name.
+        tool = shutil.which("spirv-val")
+        if tool is None:
+            raise SpirvCodegenError(
+                "NUMBA_VULKAN_VALIDATE=1 needs spirv-val (from SPIRV-Tools), "
+                "which was not found on PATH"
+            )
         # From standard input: Windows does not let another process open a
         # temporary file that is still open.
         proc = subprocess.run(
-            ["spirv-val", "--target-env", "vulkan1.2", "-"],
+            [tool, "--target-env", "vulkan1.2", "-"],
             input=spirv,
             capture_output=True,
             check=False,
