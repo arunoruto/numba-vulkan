@@ -1,9 +1,9 @@
 """Executable list of known issues (see docs/source/known_issues.md).
 
 Every case is expected to fail (KI-32 only on macOS arm64, KI-33 only on
-NVIDIA and Intel GPUs). The marks are strict, so fixing an issue
-turns its test red until the case is moved to the regular test suite and
-the entry is removed from the documentation.
+NVIDIA and Intel GPUs, KI-34 only with Intel's Windows driver). The marks
+are strict, so fixing an issue turns its test red until the case is moved
+to the regular test suite and the entry is removed from the documentation.
 """
 
 import platform
@@ -118,3 +118,34 @@ def test_float32_sqrt_is_correctly_rounded(info):
     out = np.zeros_like(x)
     root.forall(x.size, device=info.index)(x, out)
     np.testing.assert_array_equal(out, np.sqrt(x))
+
+
+@pytest.mark.parametrize(
+    "info",
+    [
+        pytest.param(
+            info,
+            marks=pytest.mark.xfail(
+                sys.platform == "win32" and _vendor(info) == 0x8086,
+                strict=True,
+                reason="KI-34, documented in docs/source/known_issues.md",
+            ),
+            id=info.name,
+        )
+        for info in nv.list_devices()
+    ],
+)
+def test_min_keeps_nan_and_signed_zero(info):
+    @nv.jit
+    def smaller(x, y, out):
+        i = nv.global_id(0)
+        if i < x.shape[0]:
+            out[i] = min(x[i], y[i])
+
+    x = np.array([np.nan, 0.0], f32)
+    y = np.array([1.0, -0.0], f32)
+    out = np.ones_like(x)
+    smaller.forall(x.size, device=info.index)(x, y, out)
+    # Python's min(x, y) is x unless y < x.
+    np.testing.assert_array_equal(out, x)
+    assert not np.signbit(out[1])

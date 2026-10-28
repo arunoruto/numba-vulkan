@@ -1,6 +1,7 @@
 """``math`` functions and NumPy ufuncs on scalars, checked against NumPy."""
 
 import math
+import sys
 
 import numpy as np
 import pytest
@@ -388,8 +389,14 @@ _PAIRS = (
         "np.fmax(x, y)",
     ],
 )
-def test_min_and_max_keep_nan_and_signed_zero_as_numba_does(run, expression):
+def test_min_and_max_keep_nan_and_signed_zero_as_numba_does(run, device, expression):
     import numba
+    import vulkan as vk
+
+    info = nv.get_device(device).info
+    vendor = vk.vkGetPhysicalDeviceProperties(info.handle).vendorID
+    if sys.platform == "win32" and vendor == 0x8086:
+        pytest.skip("KI-34: Intel's Windows driver does not keep NaN and -0")
 
     scope = {"np": np, "nv": nv}
     exec(f"def op(x, y):\n    return {expression}\n", scope)  # noqa: S102
