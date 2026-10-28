@@ -6,9 +6,10 @@ drivers, and both are found out by running small kernels on each device:
 * Vulkan lets a driver compute ``Fma`` as a multiplication followed by an
   addition, rounding twice. libclc assumes a fused operation; without it,
   its ``sin``, ``cos`` and ``tan`` lose all accuracy beyond small
-  arguments. llvmpipe does not fuse, in either precision. Kernels for such
-  a device are compiled with a software version
-  (`numba_vulkan.legalize.emulate_fma`).
+  arguments. llvmpipe does not fuse, in either precision. Intel's Windows
+  driver for Arc fuses the probe's ``Fma`` but not all of libclc's, so
+  libclc's float32 ``sin`` is checked as well. Kernels for such a device
+  are compiled with a software version (`numba_vulkan.legalize.emulate_fma`).
 * llvmpipe (Mesa 26.1) gets ``Trunc`` and ``RoundEven`` of ``double``
   values wrong in its vectorised code (values that differ between
   invocations); the scalar path is correct. Kernels for such a device
@@ -25,6 +26,7 @@ workaround on every device, ``0`` on none.
 """
 
 import json
+import math
 import os
 import tempfile
 import warnings
@@ -39,7 +41,7 @@ from numba_vulkan import kernelcache, libclc
 FMA_ENV_VAR = "NUMBA_VULKAN_SOFT_FMA"
 ROUNDING_ENV_VAR = "NUMBA_VULKAN_SOFT_ROUNDING"
 # Part of the key of stored results; changes whenever the probe does.
-_VERSION = "2"
+_VERSION = "3"
 _RESULTS = "probes.json"
 # Rows: a, b and c, a value to truncate and one to round, one column per
 # invocation.
@@ -63,6 +65,10 @@ _INPUT = np.stack(
 # m**2 * 2**-24 when fused (the product needs 25 bits), and 0 when not.
 _A32 = (1 + (2 * _k + 1) * 2.0**-12).astype(np.float32)
 _INPUT32 = np.stack([_A32, _A32, -(_A32 * _A32)])
+# Arguments of sin whose float32 results are off by about 1e-5 without a
+# fused Fma, and within 1e-7 with one.
+_SIN32 = (300 + 173.3 * _k).astype(np.float32)
+_SIN32_WANT = np.sin(_SIN32.astype(np.float64))
 
 
 @intrinsic(target="vulkan")
@@ -83,7 +89,13 @@ _kernels = None
 
 
 def _probe_kernel():
-    """The probe kernels, for float64 and float32, compiled on first use."""
+    """The probe kernels, compiled on first use.
+
+    Returns
+    -------
+    tuple
+        The kernels for float64 and float32, and one computing ``sin``.
+    """
     global _kernels
     if _kernels is None:
         from numba_vulkan.dispatcher import jit
@@ -101,7 +113,12 @@ def _probe_kernel():
             if i < x.shape[1]:
                 out[i] = _fma(x[0, i], x[1, i], x[2, i])
 
-        _kernels = (jit(probe), jit(probe32))
+        def probe_sin(x, out):
+            i = global_id(0)
+            if i < x.shape[0]:
+                out[i] = math.sin(x[i])
+
+        _kernels = (jit(probe), jit(probe32), jit(probe_sin))
     return _kernels
 
 
@@ -166,10 +183,14 @@ def _measure(device):
 
 def _run_probe(device):
     """Run the probe kernels; see `_measure`."""
-    probe, probe32 = _probe_kernel()
+    probe, probe32, probe_sin = _probe_kernel()
     out32 = np.ones(_LANES, dtype=np.float32)
     probe32.forall(_LANES, device=device)(_INPUT32, out32)
     result = {"soft_fma": bool((out32 == 0).any()), "soft_rounding": False}
+    if libclc.available():  # sin is the driver's own otherwise
+        out32 = np.zeros(_LANES, dtype=np.float32)
+        probe_sin.forall(_LANES, device=device)(_SIN32, out32)
+        result["soft_fma"] |= bool((np.abs(out32 - _SIN32_WANT) > 1e-6).any())
     if device.info.float64:
         out = np.zeros((3, _LANES))
         with warnings.catch_warnings():

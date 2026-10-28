@@ -119,6 +119,23 @@ round correctly, so results can differ in the last bit.
 neighbours with `x`, computed exactly (Dekker's product), for kernels
 without `fastmath`.
 
+### KI-34: Intel's Windows driver drops NaN and -0 in `min` and `max`
+
+Python's `min(x, y)` is `y < x ? y : x`, and NumPy's `minimum`, `maximum`,
+`fmin` and `fmax` are built from such selections. Vulkan lets a driver turn
+them into its own min and max instructions, which treat NaN and signed
+zeros differently, unless the shader declares `SignedZeroInfNanPreserve`.
+numba-vulkan declares it for kernels without `fastmath`. Intel's Windows
+driver (101.6651, the Arc Graphics of a Meteor Lake CPU) reports support for
+it and still does so: `min(nan, 1)` gives `1`, `min(0.0, -0.0)` gives `-0.0`,
+and `np.maximum(-0.0, 0.0)` and `np.fmax(-0.0, 0.0)` give `0.0`; the
+other cases of the test came out right.
+
+**Fix:** a form of the selection that the driver's optimiser does not
+recognise, tried on that driver. Choosing between the values' bits as
+integers is probably not enough: the driver's compiler is built on LLVM,
+which turns such a choice back into a float selection.
+
 ### KI-27: very large functions are not restructured
 
 SPIR-V needs structured control flow, and `structurize.py` rearranges the
