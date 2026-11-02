@@ -5,6 +5,30 @@ messages of the commits it contains; see the development guide.
 
 <!-- version list -->
 
+## v0.1.2 (2026-11-02)
+
+### Bug Fixes
+
+- Check libclc's float32 sin in the FMA probe
+  ([#52](https://github.com/arunoruto/numba-vulkan/pull/52),
+  [`f554db6`](https://github.com/arunoruto/numba-vulkan/commit/f554db61572562be480e56bb51b941463a12fe46))
+
+### Continuous Integration
+
+- Run the newest-dependencies job without spirv-val
+  ([`e37062d`](https://github.com/arunoruto/numba-vulkan/commit/e37062d7d74556f1bcae0d61d305ca7e3050e83a))
+
+### Testing
+
+- Keep the fuzz script's settings out of the test session
+  ([#52](https://github.com/arunoruto/numba-vulkan/pull/52),
+  [`5f69f57`](https://github.com/arunoruto/numba-vulkan/commit/5f69f579e3521fc035dfb836c734a7c82e924afb))
+
+- KI-34, Intel's Windows driver drops NaN and -0 in min and max
+  ([#52](https://github.com/arunoruto/numba-vulkan/pull/52),
+  [`fb7f703`](https://github.com/arunoruto/numba-vulkan/commit/fb7f703e4861e8c384a5674fcacee036a2d9283b))
+
+
 ## v0.1.1 (2026-10-27)
 
 ### Bench
