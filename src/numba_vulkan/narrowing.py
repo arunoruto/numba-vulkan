@@ -105,6 +105,10 @@ class Mode(NamedTuple):
     soft_rounding : bool
         Whether ``float64`` truncation and rounding to even are computed
         from ``floor``, because the device gets them wrong (llvmpipe).
+    soft_minmax : bool
+        Whether selections that a driver may turn into min or max keep
+        NaN and signed zeros by hand, because the device drops them
+        (`numba_vulkan.legalize.guard_minmax`).
     """
 
     floats: bool = False
@@ -112,6 +116,7 @@ class Mode(NamedTuple):
     float_atomics: bool = False
     soft_fma: bool = False
     soft_rounding: bool = False
+    soft_minmax: bool = False
 
 
 # The mode of the kernel being compiled. Compilation holds Numba's global

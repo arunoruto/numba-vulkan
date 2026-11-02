@@ -86,6 +86,73 @@ _FLOAT_BITS = {
 }
 
 
+_FLAGS = r"(?:(?:nnan|ninf|nsz|arcp|contract|afn|reassoc|fast) )*"
+_ORDERING = re.compile(
+    rf"^\s*(%\S+) = fcmp {_FLAGS}([ou])(lt|gt|le|ge) (float|double) ([^\s,]+), ([^\s,]+)$",
+    re.MULTILINE,
+)
+_SELECT = re.compile(
+    rf"^(\s*)(%\S+) = select {_FLAGS}i1 (%\S+), (float|double) ([^\s,]+), \4 ([^\s,]+)$",
+    re.MULTILINE,
+)
+
+
+def guard_minmax(text):
+    """Keep NaN and signed zeros in selections that drivers make min or max.
+
+    ``a < b ? a : b`` is how Numba computes Python's ``min``, and NumPy's
+    ``minimum``, ``maximum``, ``fmin`` and ``fmax`` are built from the same
+    kind of selection. A driver may turn it into its own min or max
+    instruction, which returns the other operand for a NaN and orders -0
+    below +0, unless the shader declares ``SignedZeroInfNanPreserve``.
+    Intel's Windows driver does so anyway (KI-34). The selection is kept,
+    and its result replaced where the two can differ: when an operand is
+    NaN (tested on the bit pattern, by `expand_fcmp_ordering`) or both are
+    zeros (tested as integers), by what the comparison would have chosen.
+
+    Parameters
+    ----------
+    text : str
+        Textual LLVM IR.
+
+    Returns
+    -------
+    str
+        The rewritten LLVM IR.
+    """
+    compares = {m[1]: m.groups()[1:] for m in _ORDERING.finditer(text)}
+
+    def repl(match):
+        """Replacement text for one match."""
+        indent, res, cond, ty, p, q = match.groups()
+        compare = compares.get(cond)
+        if compare is None or p == q or compare[2] != ty:
+            return match.group(0)
+        order, relation, _, a, b = compare
+        if {a, b} != {p, q}:
+            return match.group(0)
+        bits, _, mask, _ = _FLOAT_BITS[ty]
+        # The comparison is true with a NaN only if unordered, and true for
+        # two equal zeros only if it includes equality.
+        on_nan = p if order == "u" else q
+        on_zero = p if relation in ("le", "ge") else q
+        v = f"%mm{next(_COUNTER)}"
+        lines = [
+            f"{v}.s = select i1 {cond}, {ty} {p}, {ty} {q}",
+            f"{v}.n = fcmp uno {ty} {a}, {b}",
+            f"{v}.a = bitcast {ty} {a} to {bits}",
+            f"{v}.b = bitcast {ty} {b} to {bits}",
+            f"{v}.o = or {bits} {v}.a, {v}.b",
+            f"{v}.m = and {bits} {v}.o, {mask}",
+            f"{v}.z = icmp eq {bits} {v}.m, 0",
+            f"{v}.r = select i1 {v}.z, {ty} {on_zero}, {ty} {v}.s",
+            f"{res} = select i1 {v}.n, {ty} {on_nan}, {ty} {v}.r",
+        ]
+        return "\n".join(indent + line for line in lines)
+
+    return _SELECT.sub(repl, text)
+
+
 def expand_srem(text):
     """Rewrite ``srem`` instructions as ``a - (a / b) * b``.
 
@@ -722,7 +789,7 @@ def expand_saturating(text):
     return _SATURATING_DECLARATION.sub("", _SATURATING.sub(repl, text))
 
 
-def legalize(text, narrow_ints=False):
+def legalize(text, narrow_ints=False, minmax=False):
     """Apply all rewrites.
 
     Parameters
@@ -731,12 +798,16 @@ def legalize(text, narrow_ints=False):
         Textual LLVM IR after optimisation.
     narrow_ints : bool
         Whether the kernel must not use 64-bit integers.
+    minmax : bool
+        Whether to apply `guard_minmax`, for drivers that need it.
 
     Returns
     -------
     str
         IR that the SPIR-V backend can translate.
     """
+    if minmax:
+        text = guard_minmax(text)  # before its NaN tests are expanded
     for rewrite in (
         expand_srem,
         expand_fcmp_ordering,

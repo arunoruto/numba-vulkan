@@ -2028,13 +2028,17 @@ class VulkanCodeLibrary(CodeLibrary):
             text = emulate_rounding64(text)
         if early:
             self.narrowed = narrowing.Mode(ints=user_i64)
-            text = legalize(text)
+            text = legalize(text, minmax=self.mode.soft_minmax)
         else:
             self.narrowed = narrowing.Mode(
                 self.mode.floats and re.search(r"\bdouble\b", text) is not None,
                 self.mode.ints and re.search(r"\bi64\b", text) is not None,
             )  # only the narrowing of types is recorded
-            text = legalize(narrowing.narrow_ir(text, self.mode), self.mode.ints)
+            text = legalize(
+                narrowing.narrow_ir(text, self.mode),
+                self.mode.ints,
+                minmax=self.mode.soft_minmax,
+            )
             # Once more: some of the rewrites above introduce 64-bit indices.
             text = narrowing.narrow_ir(text, self.mode)
         missing = _UNDEFINED_LIBCLC.findall(text)
