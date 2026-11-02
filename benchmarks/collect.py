@@ -219,7 +219,9 @@ def vulkan_devices():
                 "float64": info.float64,
                 "float32_atomic_add": info.float32_atomic_add,
                 "workarounds": [
-                    w for w in ("soft_fma", "soft_rounding") if getattr(mode, w)
+                    w
+                    for w in ("soft_fma", "soft_rounding", "soft_minmax")
+                    if getattr(mode, w)
                 ],
             }
         )

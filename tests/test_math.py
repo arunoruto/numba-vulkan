@@ -389,14 +389,19 @@ _PAIRS = (
         "np.fmax(x, y)",
     ],
 )
-def test_min_and_max_keep_nan_and_signed_zero_as_numba_does(run, device, expression):
+@pytest.mark.parametrize("guarded", [False, True], ids=["bare", "guarded"])
+def test_min_and_max_keep_nan_and_signed_zero_as_numba_does(
+    run, device, monkeypatch, expression, guarded
+):
     import numba
     import vulkan as vk
 
-    info = nv.get_device(device).info
-    vendor = vk.vkGetPhysicalDeviceProperties(info.handle).vendorID
-    if sys.platform == "win32" and vendor == 0x8086:
+    dev = nv.get_device(device)
+    vendor = vk.vkGetPhysicalDeviceProperties(dev.info.handle).vendorID
+    if not guarded and sys.platform == "win32" and vendor == 0x8086:
         pytest.skip("KI-34: Intel's Windows driver does not keep NaN and -0")
+    # The workaround for such drivers (legalize.guard_minmax), on any device.
+    monkeypatch.setattr(dev, "mode", dev.mode._replace(soft_minmax=guarded))
 
     scope = {"np": np, "nv": nv}
     exec(f"def op(x, y):\n    return {expression}\n", scope)  # noqa: S102

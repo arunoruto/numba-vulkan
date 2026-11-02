@@ -131,15 +131,16 @@ an error naming the helper.
 
 ### Drivers that compute differently
 
-Two kinds of `float64` behaviour broke libclc and kernels on some drivers.
+Three kinds of float behaviour broke libclc and kernels on some drivers.
 {py:mod}`numba_vulkan.probes` runs a small kernel on each device the first
 time it is used, and stores the result per device and driver version in
 `probes.json` in the cache directory:
 
 | Behaviour | Seen on | Workaround |
 | --- | --- | --- |
-| `Fma` rounds the product before adding (Vulkan allows this), in both precisions | llvmpipe | `llvm.fma` computed in software, exactly (`legalize.emulate_fma`) |
+| `Fma` rounds the product before adding (Vulkan allows this), in both precisions | llvmpipe; for some of libclc's `Fma`, Intel's Windows driver (Arc), which the probe finds through libclc's `float32` `sin` | `llvm.fma` computed in software, exactly (`legalize.emulate_fma`) |
 | `Trunc` returns values of at least 2**24 unchanged; `RoundEven` rounds halves towards zero (vectorised code only) | llvmpipe (Mesa 26.1) | both computed from `Floor` (`legalize.emulate_rounding64`) |
+| `a < b ? a : b` becomes a min or max that drops NaN and -0, despite `SignedZeroInfNanPreserve` (KI-34) | Intel's Windows driver (Arc) | NaN and two zeros handled by integer tests on the bits (`legalize.guard_minmax`) |
 
 libclc relies on a fused `Fma` and on `Trunc` for the argument reduction
 of `sin`, `cos` and `tan`, which on llvmpipe were off by up to 1e19 ulp
@@ -147,8 +148,8 @@ of `sin`, `cos` and `tan`, which on llvmpipe were off by up to 1e19 ulp
 workarounds they are within 1 to 3 ulp there, as on the other devices. The rounding bug also affected `math.trunc`,
 `np.trunc`, `round` and `np.rint` in kernels. Kernels for devices that do
 not need the workarounds are compiled as before.
-`NUMBA_VULKAN_SOFT_FMA` and `NUMBA_VULKAN_SOFT_ROUNDING` (`1` or `0`)
-override the probe for every device.
+`NUMBA_VULKAN_SOFT_FMA`, `NUMBA_VULKAN_SOFT_ROUNDING` and
+`NUMBA_VULKAN_SOFT_MINMAX` (`1` or `0`) override the probe for every device.
 
 Intel's driver returns `+0.0` for `trunc` and `ceil` of values between -1
 and 0; rounding functions now take the sign of their argument on every

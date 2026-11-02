@@ -1,6 +1,7 @@
 """Workarounds for drivers' float64 behaviour (see numba_vulkan.probes)."""
 
 import math
+import re
 
 import numpy as np
 import pytest
@@ -118,13 +119,17 @@ def test_rounding_is_correct_with_the_workarounds_forced(run, forced):
 
 
 def test_environment_overrides_the_probe(monkeypatch):
+    # Opened first: opening a device for the first time applies the probe.
+    device = nv.get_device()
     monkeypatch.setenv(probes.FMA_ENV_VAR, "1")
     monkeypatch.setenv(probes.ROUNDING_ENV_VAR, "0")
-    # With both forced, the probe kernel is not run at all.
+    monkeypatch.setenv(probes.MINMAX_ENV_VAR, "1")
+    # With all forced, the probe kernel is not run at all.
     monkeypatch.setattr(probes, "_probe_kernel", None)
-    assert probes.workarounds(nv.get_device()) == {
+    assert probes.workarounds(device) == {
         "soft_fma": True,
         "soft_rounding": False,
+        "soft_minmax": True,
     }
 
 
@@ -141,6 +146,31 @@ def test_fma_rewrite_replaces_every_call():
     single = text.replace("double", "float").replace(".f64", ".f32")
     assert "fmul float %a, 4097.0" in legalize.emulate_fma(single)
     assert legalize.emulate_fma(single, ("double",)) == single
+
+
+def test_minmax_guard_rewrites_only_minmax_selections():
+    text = (
+        "  %c = fcmp olt float %y, %x\n"
+        "  %m = select i1 %c, float %y, float %x\n"
+        "  %d = fcmp oge double %a, %b\n"
+        "  %n = select i1 %d, double %b, double %a\n"
+        "  %e = fcmp olt float %y, %x\n"
+        "  %o = select i1 %e, float %y, float %z\n"
+    )
+    out = legalize.guard_minmax(text)
+    lines = dict(line.strip().split(" = ", 1) for line in out.splitlines())
+    # y < x ? y : x is false with a NaN and for equal zeros: both give %x.
+    assert re.fullmatch(r"select i1 %mm\d+\.n, float %x, float %mm\d+\.r", lines["%m"])
+    # a >= b ? b : a gives %a with a NaN, and %b for equal zeros.
+    assert re.fullmatch(
+        r"select i1 %mm\d+\.n, double %a, double %mm\d+\.r", lines["%n"]
+    )
+    assert any(
+        re.fullmatch(r"select i1 %mm\d+\.z, double %b, double %mm\d+\.s", line)
+        for line in lines.values()
+    )
+    # Not a choice between the compared values: left alone.
+    assert lines["%o"] == "select i1 %e, float %y, float %z"
 
 
 def test_rounding_rewrite_declares_what_it_uses():
@@ -177,6 +207,7 @@ def test_probe_results_are_stored(tmp_path, monkeypatch):
     assert first == {
         "soft_fma": device.mode.soft_fma,
         "soft_rounding": device.mode.soft_rounding,
+        "soft_minmax": device.mode.soft_minmax,
     }
 
 
@@ -184,6 +215,7 @@ def test_a_failing_probe_warns_and_applies_no_workarounds(monkeypatch):
     monkeypatch.setenv("NUMBA_VULKAN_CACHE", "0")
     monkeypatch.delenv(probes.FMA_ENV_VAR, raising=False)
     monkeypatch.delenv(probes.ROUNDING_ENV_VAR, raising=False)
+    monkeypatch.delenv(probes.MINMAX_ENV_VAR, raising=False)
 
     def broken(device):
         raise RuntimeError("driver crashed")
@@ -191,7 +223,7 @@ def test_a_failing_probe_warns_and_applies_no_workarounds(monkeypatch):
     monkeypatch.setattr(probes, "_measure", broken)
     with pytest.warns(UserWarning, match="could not probe"):
         result = probes.workarounds(nv.get_device())
-    assert result == {"soft_fma": False, "soft_rounding": False}
+    assert result == {"soft_fma": False, "soft_rounding": False, "soft_minmax": False}
 
 
 def test_probe_measures_the_driver_not_the_workarounds(device, monkeypatch):
@@ -199,7 +231,9 @@ def test_probe_measures_the_driver_not_the_workarounds(device, monkeypatch):
     dev = nv.get_device(device)
     expected = probes._measure(dev)
     monkeypatch.setattr(
-        dev, "mode", dev.mode._replace(soft_fma=True, soft_rounding=True)
+        dev,
+        "mode",
+        dev.mode._replace(soft_fma=True, soft_rounding=True, soft_minmax=True),
     )
     assert probes._measure(dev) == expected
-    assert dev.mode.soft_fma and dev.mode.soft_rounding  # restored
+    assert dev.mode.soft_fma and dev.mode.soft_rounding and dev.mode.soft_minmax

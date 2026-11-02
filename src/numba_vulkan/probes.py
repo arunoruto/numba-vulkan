@@ -1,7 +1,7 @@
 """Behaviour of a device that its reported features do not reveal.
 
-Two kinds of float behaviour make libclc and kernels go wrong on some
-drivers, and both are found out by running small kernels on each device:
+Three kinds of float behaviour make libclc and kernels go wrong on some
+drivers, and all are found out by running small kernels on each device:
 
 * Vulkan lets a driver compute ``Fma`` as a multiplication followed by an
   addition, rounding twice. libclc assumes a fused operation; without it,
@@ -14,15 +14,19 @@ drivers, and both are found out by running small kernels on each device:
   values wrong in its vectorised code (values that differ between
   invocations); the scalar path is correct. Kernels for such a device
   compute both from ``Floor`` (`numba_vulkan.legalize.emulate_rounding64`).
+* Intel's Windows driver turns ``y < x ? y : x`` (Python's ``min``) into
+  its own min instruction, which drops NaN and signed zeros, although
+  kernels ask it to keep them (KI-34). Kernels for such a device keep them
+  by hand (`numba_vulkan.legalize.guard_minmax`).
 
 The probe therefore gives each invocation its own operands. Its results
 depend only on the driver, so they are kept in ``probes.json`` in the
 cache directory (``~/.cache/numba-vulkan``), per device and driver
 version, unless ``NUMBA_VULKAN_CACHE=0``.
 
-The environment variables ``NUMBA_VULKAN_SOFT_FMA`` and
-``NUMBA_VULKAN_SOFT_ROUNDING`` override the probe: ``1`` applies the
-workaround on every device, ``0`` on none.
+The environment variables ``NUMBA_VULKAN_SOFT_FMA``,
+``NUMBA_VULKAN_SOFT_ROUNDING`` and ``NUMBA_VULKAN_SOFT_MINMAX`` override the
+probe: ``1`` applies the workaround on every device, ``0`` on none.
 """
 
 import json
@@ -40,8 +44,9 @@ from numba_vulkan import kernelcache, libclc
 
 FMA_ENV_VAR = "NUMBA_VULKAN_SOFT_FMA"
 ROUNDING_ENV_VAR = "NUMBA_VULKAN_SOFT_ROUNDING"
+MINMAX_ENV_VAR = "NUMBA_VULKAN_SOFT_MINMAX"
 # Part of the key of stored results; changes whenever the probe does.
-_VERSION = "3"
+_VERSION = "4"
 _RESULTS = "probes.json"
 # Rows: a, b and c, a value to truncate and one to round, one column per
 # invocation.
@@ -69,6 +74,11 @@ _INPUT32 = np.stack([_A32, _A32, -(_A32 * _A32)])
 # fused Fma, and within 1e-7 with one.
 _SIN32 = (300 + 173.3 * _k).astype(np.float32)
 _SIN32_WANT = np.sin(_SIN32.astype(np.float64))
+# Pairs whose min and max a driver that drops NaN and -0 gets wrong.
+_PAIRS = np.array(
+    [[np.nan, 1.0], [1.0, np.nan], [0.0, -0.0], [-0.0, 0.0]] * (_LANES // 4),
+    dtype=np.float32,
+).T.copy()
 
 
 @intrinsic(target="vulkan")
@@ -94,7 +104,8 @@ def _probe_kernel():
     Returns
     -------
     tuple
-        The kernels for float64 and float32, and one computing ``sin``.
+        The kernels for float64 and float32, one computing ``sin``, and
+        one computing ``min`` and ``max``.
     """
     global _kernels
     if _kernels is None:
@@ -118,7 +129,13 @@ def _probe_kernel():
             if i < x.shape[0]:
                 out[i] = math.sin(x[i])
 
-        _kernels = (jit(probe), jit(probe32), jit(probe_sin))
+        def probe_minmax(x, out):
+            i = global_id(0)
+            if i < x.shape[1]:
+                out[0, i] = min(x[0, i], x[1, i])
+                out[1, i] = max(x[0, i], x[1, i])
+
+        _kernels = (jit(probe), jit(probe32), jit(probe_sin), jit(probe_minmax))
     return _kernels
 
 
@@ -171,10 +188,10 @@ def _measure(device):
     Returns
     -------
     dict
-        ``soft_fma`` and ``soft_rounding``.
+        ``soft_fma``, ``soft_rounding`` and ``soft_minmax``.
     """
     mode = device.mode
-    device.mode = mode._replace(soft_fma=False, soft_rounding=False)
+    device.mode = mode._replace(soft_fma=False, soft_rounding=False, soft_minmax=False)
     try:
         return _run_probe(device)
     finally:
@@ -183,7 +200,7 @@ def _measure(device):
 
 def _run_probe(device):
     """Run the probe kernels; see `_measure`."""
-    probe, probe32, probe_sin = _probe_kernel()
+    probe, probe32, probe_sin, probe_minmax = _probe_kernel()
     out32 = np.ones(_LANES, dtype=np.float32)
     probe32.forall(_LANES, device=device)(_INPUT32, out32)
     result = {"soft_fma": bool((out32 == 0).any()), "soft_rounding": False}
@@ -191,6 +208,14 @@ def _run_probe(device):
         out32 = np.zeros(_LANES, dtype=np.float32)
         probe_sin.forall(_LANES, device=device)(_SIN32, out32)
         result["soft_fma"] |= bool((np.abs(out32 - _SIN32_WANT) > 1e-6).any())
+    out = np.zeros_like(_PAIRS)
+    probe_minmax.forall(_LANES, device=device)(_PAIRS, out)
+    x, y = _PAIRS
+    want = np.stack([np.where(y < x, y, x), np.where(y > x, y, x)])
+    result["soft_minmax"] = not np.array_equal(
+        np.where(np.isnan(want), np.nan, want).view(np.uint32),
+        np.where(np.isnan(out), np.nan, out).view(np.uint32),
+    )
     if device.info.float64:
         out = np.zeros((3, _LANES))
         with warnings.catch_warnings():
@@ -207,7 +232,7 @@ def _run_probe(device):
 
 
 def workarounds(device):
-    """Which ``float64`` workarounds kernels for a device need.
+    """Which workarounds kernels for a device need.
 
     Parameters
     ----------
@@ -217,12 +242,13 @@ def workarounds(device):
     Returns
     -------
     dict
-        ``soft_fma`` and ``soft_rounding``, as for
+        ``soft_fma``, ``soft_rounding`` and ``soft_minmax``, as for
         `numba_vulkan.narrowing.Mode`.
     """
     forced = {
         "soft_fma": _forced(FMA_ENV_VAR),
         "soft_rounding": _forced(ROUNDING_ENV_VAR),
+        "soft_minmax": _forced(MINMAX_ENV_VAR),
     }
     if None not in forced.values():
         return {name: bool(value) for name, value in forced.items()}

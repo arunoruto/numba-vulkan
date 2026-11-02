@@ -131,10 +131,14 @@ it and still does so: `min(nan, 1)` gives `1`, `min(0.0, -0.0)` gives `-0.0`,
 and `np.maximum(-0.0, 0.0)` and `np.fmax(-0.0, 0.0)` give `0.0`; the
 other cases of the test came out right.
 
-**Fix:** a form of the selection that the driver's optimiser does not
-recognise, tried on that driver. Choosing between the values' bits as
-integers is probably not enough: the driver's compiler is built on LLVM,
-which turns such a choice back into a float selection.
+**Fix, untested on that driver:** the probe (see {doc}`math_library`)
+now detects this, and kernels for such a device then correct the
+selection's result where NaN or two zeros are involved, with tests on the
+values' bits that the driver should not see through
+(`legalize.guard_minmax`). With a NaN-ignoring min and max put in the
+selections' place on the tested devices, the results are right. If it also
+works on Intel's driver, the case in `tests/test_known_issues.py` passes
+there, and this entry can go.
 
 ### KI-27: very large functions are not restructured
 
